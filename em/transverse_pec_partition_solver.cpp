@@ -64,6 +64,14 @@ bool TransversePecPartitionSolver::canSolve(const SimulationRequest &request,
         setReason(reason, "PEC plate dimensions, position, and rotation must be finite and positive.");
         return false;
     }
+    // A plate with a window is an iris: it transmits through the aperture, so it
+    // must never be reduced to the closed-form short circuit. The same applies
+    // to a post standing in that window.
+    if (plateHasOpening(plate) || plateHasPost(plate)) {
+        setReason(reason,
+                  "A plate with an aperture is an iris and requires mode matching or the FEM backend.");
+        return false;
+    }
     if (std::abs(plate.rotation_rad.x) > angle_tolerance_rad ||
         std::abs(plate.rotation_rad.y) > angle_tolerance_rad ||
         std::abs(plate.rotation_rad.z) > angle_tolerance_rad) {

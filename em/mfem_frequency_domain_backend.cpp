@@ -327,6 +327,11 @@ public:
     {
     }
 
+    // MFEM keeps shared mutable state inside FiniteElementSpace/GridFunction
+    // evaluation (beyond the element transformation, which is handled locally
+    // below), so sampling must stay on one thread.
+    bool supportsConcurrentEvaluation() const override { return false; }
+
     bool contains(const Vec3 &position_m) const override
     {
         int element_index = -1;

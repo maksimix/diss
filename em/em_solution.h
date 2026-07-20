@@ -22,6 +22,12 @@ public:
 
     virtual bool contains(const Vec3 &position_m) const = 0;
     virtual FieldPhasor evaluate(const Vec3 &position_m) const = 0;
+
+    // Whether contains()/evaluate() may be called concurrently from several
+    // threads. Closed-form evaluators are pure and safe; the MFEM-backed one is
+    // not, because the library keeps shared mutable state inside its finite
+    // element space and grid functions.
+    virtual bool supportsConcurrentEvaluation() const { return true; }
 };
 
 struct ModeDescriptor

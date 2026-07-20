@@ -26,9 +26,40 @@ double automaticMeshSize(const SimulationRequest &request)
     // Five elements across the height keep the serial GMRES/GS solver inside
     // its convergent range; h/8 produced systems that stall near 1e-4 while
     // changing the S-parameters of the converged solution by under 0.2%.
-    return std::min({waveguide.inner_width_m / 8.0,
-                     waveguide.inner_height_m / 5.0,
-                     wavelength / 12.0});
+    const double base_size_m = std::min({waveguide.inner_width_m / 8.0,
+                                         waveguide.inner_height_m / 5.0,
+                                         wavelength / 12.0});
+    const double factor = std::clamp(request.settings.fem.mesh.refinement_factor, 0.2, 4.0);
+    return base_size_m * factor;
+}
+
+// Emits a box centred on `center` and rotates it about `rotation_origin`
+// (X, then Y, then Z about the world axes). The separate origin lets a window
+// cutter inherit the parent plate's orientation while sitting off-centre.
+void appendRotatedBox(std::ostringstream &script,
+                      int tag,
+                      const Vec3 &center,
+                      const Vec3 &size,
+                      const Vec3 &rotation,
+                      const Vec3 &rotation_origin)
+{
+    script << "Box(" << tag << ") = {"
+           << center.x - 0.5 * size.x << ","
+           << center.y - 0.5 * size.y << ","
+           << center.z - 0.5 * size.z << ","
+           << size.x << "," << size.y << "," << size.z << "};\n";
+    if (rotation.x != 0.0) {
+        script << "Rotate {{1,0,0},{" << rotation_origin.x << "," << rotation_origin.y << ","
+               << rotation_origin.z << "}," << rotation.x << "} { Volume{" << tag << "}; }\n";
+    }
+    if (rotation.y != 0.0) {
+        script << "Rotate {{0,1,0},{" << rotation_origin.x << "," << rotation_origin.y << ","
+               << rotation_origin.z << "}," << rotation.y << "} { Volume{" << tag << "}; }\n";
+    }
+    if (rotation.z != 0.0) {
+        script << "Rotate {{0,0,1},{" << rotation_origin.x << "," << rotation_origin.y << ","
+               << rotation_origin.z << "}," << rotation.z << "} { Volume{" << tag << "}; }\n";
+    }
 }
 
 void appendRotatedBox(std::ostringstream &script,
@@ -37,22 +68,32 @@ void appendRotatedBox(std::ostringstream &script,
                       const Vec3 &size,
                       const Vec3 &rotation)
 {
-    script << "Box(" << tag << ") = {"
-           << center.x - 0.5 * size.x << ","
-           << center.y - 0.5 * size.y << ","
-           << center.z - 0.5 * size.z << ","
-           << size.x << "," << size.y << "," << size.z << "};\n";
+    appendRotatedBox(script, tag, center, size, rotation, center);
+}
+
+// Cylinder along the plate normal (local z), rotated with the plate. `base` is
+// the centre of the bottom cap.
+void appendRotatedCylinder(std::ostringstream &script,
+                           int tag,
+                           const Vec3 &base,
+                           double length,
+                           double radius,
+                           const Vec3 &rotation,
+                           const Vec3 &rotation_origin)
+{
+    script << "Cylinder(" << tag << ") = {" << base.x << "," << base.y << "," << base.z
+           << ",0,0," << length << "," << radius << "};\n";
     if (rotation.x != 0.0) {
-        script << "Rotate {{1,0,0},{" << center.x << "," << center.y << ","
-               << center.z << "}," << rotation.x << "} { Volume{" << tag << "}; }\n";
+        script << "Rotate {{1,0,0},{" << rotation_origin.x << "," << rotation_origin.y << ","
+               << rotation_origin.z << "}," << rotation.x << "} { Volume{" << tag << "}; }\n";
     }
     if (rotation.y != 0.0) {
-        script << "Rotate {{0,1,0},{" << center.x << "," << center.y << ","
-               << center.z << "}," << rotation.y << "} { Volume{" << tag << "}; }\n";
+        script << "Rotate {{0,1,0},{" << rotation_origin.x << "," << rotation_origin.y << ","
+               << rotation_origin.z << "}," << rotation.y << "} { Volume{" << tag << "}; }\n";
     }
     if (rotation.z != 0.0) {
-        script << "Rotate {{0,0,1},{" << center.x << "," << center.y << ","
-               << center.z << "}," << rotation.z << "} { Volume{" << tag << "}; }\n";
+        script << "Rotate {{0,0,1},{" << rotation_origin.x << "," << rotation_origin.y << ","
+               << rotation_origin.z << "}," << rotation.z << "} { Volume{" << tag << "}; }\n";
     }
 }
 
@@ -239,21 +280,73 @@ std::string GmshTetrahedralMesher::buildGeometryScript(const SimulationRequest &
     }
 
     int next_tag = 100;
-    std::vector<int> pec_tags;
+    bool has_pec_bodies = false;
+    script << "pecBodies[] = {};\n";
     for (const PecPlateGeometry &plate : request.model.pec_plates) {
         if (!plate.enabled) {
             continue;
         }
-        appendRotatedBox(script, next_tag, plate.center_m, plate.size_m, plate.rotation_rad);
-        pec_tags.push_back(next_tag++);
+        const int plate_tag = next_tag++;
+        appendRotatedBox(script, plate_tag, plate.center_m, plate.size_m, plate.rotation_rad);
+        if (plateHasOpening(plate)) {
+            // Window cutter: same orientation as the plate, offset inside its
+            // local x/y, and deliberately longer than the plate thickness so the
+            // boolean cuts cleanly all the way through.
+            const int window_tag = next_tag++;
+            const double cut_length = plate.size_m.z * 3.0 + 1.0e-6;
+            const Vec3 window_center{plate.center_m.x + plate.aperture_offset_x_m,
+                                     plate.center_m.y + plate.aperture_offset_y_m,
+                                     plate.center_m.z};
+            if (plate.aperture_shape == PlateApertureShape::Circular) {
+                const Vec3 base{window_center.x,
+                                window_center.y,
+                                window_center.z - 0.5 * cut_length};
+                appendRotatedCylinder(script,
+                                      window_tag,
+                                      base,
+                                      cut_length,
+                                      plate.aperture_radius_m,
+                                      plate.rotation_rad,
+                                      plate.center_m);
+            } else {
+                const Vec3 window_size{plate.aperture_width_m,
+                                       plate.aperture_height_m,
+                                       cut_length};
+                appendRotatedBox(script,
+                                 window_tag,
+                                 window_center,
+                                 window_size,
+                                 plate.rotation_rad,
+                                 plate.center_m);
+            }
+            script << "iris" << plate_tag << "[] = BooleanDifference{ Volume{" << plate_tag
+                   << "}; Delete; }{ Volume{" << window_tag << "}; Delete; };\n"
+                   << "pecBodies[] += iris" << plate_tag << "[];\n";
+        } else {
+            script << "pecBodies[] += {" << plate_tag << "};\n";
+        }
+        if (plateHasPost(plate)) {
+            // The post stands free inside the window, so it is simply another
+            // PEC body: it never touches the perforated plate.
+            const int post_tag = next_tag++;
+            const Vec3 base{plate.center_m.x + plate.aperture_offset_x_m,
+                            plate.center_m.y + plate.aperture_offset_y_m,
+                            plate.center_m.z - 0.5 * plate.post_length_m};
+            appendRotatedCylinder(script,
+                                  post_tag,
+                                  base,
+                                  plate.post_length_m,
+                                  plate.post_radius_m,
+                                  plate.rotation_rad,
+                                  plate.center_m);
+            script << "pecBodies[] += {" << post_tag << "};\n";
+        }
+        has_pec_bodies = true;
     }
 
-    if (!pec_tags.empty()) {
-        script << "fluidAfterPec[] = BooleanDifference{ Volume{fluid[]}; Delete; }{ Volume{";
-        for (std::size_t i = 0; i < pec_tags.size(); ++i) {
-            script << (i == 0 ? "" : ",") << pec_tags[i];
-        }
-        script << "}; Delete; };\n";
+    if (has_pec_bodies) {
+        script << "fluidAfterPec[] = BooleanDifference{ Volume{fluid[]}; Delete; }"
+                  "{ Volume{pecBodies[]}; Delete; };\n";
     } else {
         script << "fluidAfterPec[] = fluid[];\n";
     }

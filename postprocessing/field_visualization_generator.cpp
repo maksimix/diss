@@ -29,11 +29,13 @@ int workerCount(int item_count)
 }
 
 // Strided parallel loop. The body receives (item index, worker index) so it can
-// accumulate into per-worker slots without locking.
+// accumulate into per-worker slots without locking. When enabled is false the
+// loop runs serially, which is required for field evaluators that are not
+// safe to call concurrently.
 template <typename Body>
-void parallelFor(int item_count, const Body &body)
+void parallelFor(bool enabled, int item_count, const Body &body)
 {
-    const int workers = workerCount(item_count);
+    const int workers = enabled ? workerCount(item_count) : 1;
     if (workers <= 1) {
         for (int index = 0; index < item_count; ++index) {
             body(index, 0);
@@ -748,6 +750,29 @@ PlateState advancePlateRk4(const em::FieldSolution &solution,
     };
 }
 
+// True when a point on the plate (given in the plate's local x/y) falls inside
+// the window of a diaphragm, i.e. where there is no metal.
+bool insidePlateAperture(const em::PecPlateGeometry &plate,
+                         double local_x_m,
+                         double local_y_m)
+{
+    if (!em::plateHasOpening(plate)) {
+        return false;
+    }
+    const double dx_m = local_x_m - plate.aperture_offset_x_m;
+    const double dy_m = local_y_m - plate.aperture_offset_y_m;
+    if (plate.aperture_shape == em::PlateApertureShape::Circular) {
+        // The post itself is metal again, so it does not count as an opening.
+        const double radius_m = std::hypot(dx_m, dy_m);
+        if (em::plateHasPost(plate) && radius_m <= plate.post_radius_m) {
+            return false;
+        }
+        return radius_m <= plate.aperture_radius_m;
+    }
+    return std::abs(dx_m) <= 0.5 * plate.aperture_width_m &&
+           std::abs(dy_m) <= 0.5 * plate.aperture_height_m;
+}
+
 bool insidePlateFace(const em::RectangularWaveguideGeometry &geometry,
                      const em::PecPlateGeometry &plate,
                      const PlateState &state)
@@ -761,7 +786,10 @@ bool insidePlateFace(const em::RectangularWaveguideGeometry &geometry,
     const double maximum_y_m = std::min(0.5 * geometry.inner_height_m,
                                         plate.center_m.y + 0.5 * plate.size_m.y);
     return state.x_m >= minimum_x_m && state.x_m <= maximum_x_m &&
-           state.y_m >= minimum_y_m && state.y_m <= maximum_y_m;
+           state.y_m >= minimum_y_m && state.y_m <= maximum_y_m &&
+           !insidePlateAperture(plate,
+                                state.x_m - plate.center_m.x,
+                                state.y_m - plate.center_m.y);
 }
 
 std::vector<em::Vec3> tracePlateDirection(const em::FieldSolution &solution,
@@ -1204,7 +1232,7 @@ void appendVolumeVectorArrows(std::vector<VisualizationPrimitive> &primitives,
     const double base_length_m = std::min({geometry.inner_width_m,
                                           geometry.inner_height_m,
                                           geometry.length_m}) *
-                                 0.16;
+                                 0.40;
     constexpr int x_count = 9;
     constexpr int y_count = 3;
     constexpr int z_count = 13;
@@ -1289,6 +1317,109 @@ em::Vec3 rotateVector(const em::Vec3 &rotation_rad, const em::Vec3 &vector)
     return result;
 }
 
+// Animatable surface-current arrows on the four guide walls. The streamlines
+// are traced once and cannot follow the phase, so these carry the complex
+// J_s = n x H phasor and let the walls animate together with E and H.
+void appendWallCurrentArrows(std::vector<VisualizationPrimitive> &primitives,
+                             const em::FieldSolution &solution,
+                             double phase_rad,
+                             const GenerationControl &control)
+{
+    const em::RectangularWaveguideGeometry &geometry = solution.request.model.waveguide;
+    const std::array<WallDefinition, 4> walls{{
+        {em::WallSurface::Top, {0.0, -1.0, 0.0}, 0.5 * geometry.inner_width_m},
+        {em::WallSurface::Right, {-1.0, 0.0, 0.0}, 0.5 * geometry.inner_height_m},
+        {em::WallSurface::Bottom, {0.0, 1.0, 0.0}, 0.5 * geometry.inner_width_m},
+        {em::WallSurface::Left, {1.0, 0.0, 0.0}, 0.5 * geometry.inner_height_m},
+    }};
+    const double half_length_m = 0.5 * geometry.length_m;
+    const double inside_offset_m =
+        std::max(1.0e-9,
+                 std::min(geometry.inner_width_m, geometry.inner_height_m) * 1.0e-6);
+    const double arrow_base_m =
+        std::min(geometry.inner_width_m, geometry.inner_height_m) * 0.34;
+    constexpr int u_count = 5;
+    constexpr int z_count = 9;
+
+    for (const WallDefinition &wall : walls) {
+        if (control.isCancellationRequested()) {
+            return;
+        }
+        struct WallHit
+        {
+            em::Vec3 point_m;
+            em::ComplexVec3 phasor;
+            double envelope = 0.0;
+        };
+        std::vector<WallHit> hits;
+        double maximum_envelope = 0.0;
+
+        for (int z_index = 0; z_index < z_count; ++z_index) {
+            const double z_m = -0.88 * half_length_m +
+                               z_index * 1.76 * half_length_m / (z_count - 1);
+            for (int u_index = 0; u_index < u_count; ++u_index) {
+                const double u_m = -0.80 * wall.half_u_m +
+                                   u_index * 1.60 * wall.half_u_m / (u_count - 1);
+                if (isInsideSlot(solution, wall.wall, u_m, z_m)) {
+                    continue;
+                }
+                const em::Vec3 wall_point_m = surfacePoint(wall, geometry, u_m, z_m);
+                const em::Vec3 sample_point_m =
+                    wall_point_m + wall.normal_from_metal_to_field * inside_offset_m;
+                if (!solution.field->contains(sample_point_m)) {
+                    continue;
+                }
+                const em::FieldPhasor field = solution.field->evaluate(sample_point_m);
+                const em::ComplexVec3 phasor =
+                    em::surfaceCurrent(wall.normal_from_metal_to_field,
+                                       field.magnetic_a_per_m);
+                const double envelope = em::magnitude(phasor);
+                if (envelope <= vector_tolerance) {
+                    continue;
+                }
+                // The arrow must sit exactly on the metal: a surface current
+                // lives on the wall, not in the volume above it.
+                maximum_envelope = std::max(maximum_envelope, envelope);
+                hits.push_back({wall_point_m, phasor, envelope});
+            }
+        }
+
+        if (maximum_envelope <= vector_tolerance) {
+            continue;
+        }
+        for (const WallHit &hit : hits) {
+            const double normalized_magnitude = hit.envelope / maximum_envelope;
+            if (normalized_magnitude < 0.08) {
+                continue;
+            }
+            em::Vec3 instantaneous = em::realAtPhase(hit.phasor, phase_rad);
+            instantaneous = instantaneous -
+                            wall.normal_from_metal_to_field *
+                                em::dot(instantaneous, wall.normal_from_metal_to_field);
+            const double instantaneous_magnitude = em::magnitude(instantaneous);
+            const em::Vec3 direction = instantaneous_magnitude > vector_tolerance
+                                           ? instantaneous / instantaneous_magnitude
+                                           : em::Vec3{0.0, 0.0, 1.0};
+            const double arrow_length_m =
+                arrow_base_m * (0.4 + 0.6 * std::min(1.0, normalized_magnitude));
+            VisualizationPrimitive primitive;
+            primitive.quantity = FieldQuantity::SurfaceCurrent;
+            primitive.kind = PrimitiveKind::Arrow;
+            primitive.points_m = {
+                hit.point_m - direction * (0.5 * arrow_length_m),
+                hit.point_m + direction * (0.5 * arrow_length_m),
+            };
+            primitive.normalized_magnitude = std::min(1.0, normalized_magnitude);
+            primitive.animated = true;
+            primitive.anchor_m = hit.point_m;
+            primitive.phasor = hit.phasor;
+            primitive.reference_magnitude = maximum_envelope;
+            primitive.arrow_length_m = arrow_base_m;
+            primitives.push_back(std::move(primitive));
+        }
+    }
+}
+
 // Surface-current arrows on every face of every enabled plate, including
 // rotated plates and the side and downstream faces (the streamline pass only
 // covers the axis-aligned upstream face).
@@ -1311,7 +1442,9 @@ void appendPlateCurrentArrows(std::vector<VisualizationPrimitive> &primitives,
     {
         em::Vec3 point_m;
         em::Vec3 current;
+        em::ComplexVec3 phasor;
         double magnitude = 0.0;
+        double envelope = 0.0;
     };
 
     for (const em::PecPlateGeometry &plate : solution.request.model.pec_plates) {
@@ -1343,6 +1476,10 @@ void appendPlateCurrentArrows(std::vector<VisualizationPrimitive> &primitives,
                             local_normal * vectorComponent(half, axis) +
                             unit_axis[a1] * (fu * vectorComponent(half, a1)) +
                             unit_axis[a2] * (fv * vectorComponent(half, a2));
+                        // A diaphragm carries no metal inside its window.
+                        if (insidePlateAperture(plate, local_point.x, local_point.y)) {
+                            continue;
+                        }
                         const em::Vec3 world_point =
                             plate.center_m + rotateVector(plate.rotation_rad, local_point);
                         const em::Vec3 sample_point = world_point + world_normal * offset_m;
@@ -1356,13 +1493,16 @@ void appendPlateCurrentArrows(std::vector<VisualizationPrimitive> &primitives,
                         const double normal_component = em::dot(current, world_normal);
                         current = current - world_normal * normal_component;
                         const double magnitude = em::magnitude(current);
-                        if (magnitude <= vector_tolerance) {
+                        const double envelope = em::magnitude(current_phasor);
+                        if (envelope <= vector_tolerance) {
                             continue;
                         }
-                        maximum_magnitude = std::max(maximum_magnitude, magnitude);
+                        maximum_magnitude = std::max(maximum_magnitude, envelope);
                         hits.push_back({world_point + world_normal * (2.0 * offset_m),
                                         current,
-                                        magnitude});
+                                        current_phasor,
+                                        magnitude,
+                                        envelope});
                     }
                 }
             }
@@ -1372,13 +1512,15 @@ void appendPlateCurrentArrows(std::vector<VisualizationPrimitive> &primitives,
             continue;
         }
         for (const FaceHit &hit : hits) {
-            const double normalized_magnitude = hit.magnitude / maximum_magnitude;
+            const double normalized_magnitude = hit.envelope / maximum_magnitude;
             if (normalized_magnitude < 0.06) {
                 continue;
             }
-            const em::Vec3 direction = hit.current / hit.magnitude;
             const double arrow_length_m =
                 arrow_base_m * (0.4 + 0.6 * std::min(1.0, normalized_magnitude));
+            const em::Vec3 direction = hit.magnitude > vector_tolerance
+                                           ? hit.current / hit.magnitude
+                                           : em::Vec3{0.0, 0.0, 1.0};
             VisualizationPrimitive primitive;
             primitive.quantity = FieldQuantity::SurfaceCurrent;
             primitive.kind = PrimitiveKind::Arrow;
@@ -1387,6 +1529,11 @@ void appendPlateCurrentArrows(std::vector<VisualizationPrimitive> &primitives,
                 hit.point_m + direction * (0.5 * arrow_length_m),
             };
             primitive.normalized_magnitude = std::min(1.0, normalized_magnitude);
+            primitive.animated = true;
+            primitive.anchor_m = hit.point_m;
+            primitive.phasor = hit.phasor;
+            primitive.reference_magnitude = maximum_magnitude;
+            primitive.arrow_length_m = arrow_base_m;
             primitives.push_back(std::move(primitive));
         }
     }
@@ -1476,6 +1623,10 @@ std::vector<VisualizationPrimitive> FieldVisualizationGenerator::generate(
         if (control.isCancellationRequested()) {
             return {};
         }
+        appendWallCurrentArrows(primitives, solution, settings.phase_rad, control);
+        if (control.isCancellationRequested()) {
+            return {};
+        }
     }
     if (settings.generate_poynting) {
         appendPoyntingArrows(primitives, solution, control);
@@ -1521,15 +1672,17 @@ FieldSliceData FieldVisualizationGenerator::generateSlice(
     const double dv_m = v_span_m / v_count;
 
     // Sampling the plane dominates slice generation (tens of thousands of field
-    // evaluations), and every cell is independent, so it runs across all cores.
-    // Only worker 0 polls the cancellation callback: the callback belongs to the
-    // caller and is not required to be thread-safe.
+    // evaluations), and every cell is independent, so it runs across all cores
+    // whenever the evaluator allows concurrent sampling (closed-form modes do;
+    // the MFEM backend does not). Only worker 0 polls the cancellation callback:
+    // the callback belongs to the caller and need not be thread-safe.
     const int cell_count = u_count * v_count;
     slice.cells.assign(static_cast<std::size_t>(cell_count), SliceSampleCell{});
     std::vector<double> worker_maximum(maximum_workers, 0.0);
     std::atomic<bool> cancelled{false};
 
-    parallelFor(cell_count, [&](int index, int worker) {
+    parallelFor(solution.field->supportsConcurrentEvaluation(), cell_count,
+                [&](int index, int worker) {
         if (cancelled.load(std::memory_order_relaxed)) {
             return;
         }

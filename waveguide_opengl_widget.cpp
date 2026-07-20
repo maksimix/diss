@@ -671,6 +671,13 @@ void WaveguideOpenGLWidget::drawPecPlates() const
         const double half_y = 0.5 * (plate.y_max_mm - plate.y_min_mm);
         const double half_z = 0.5 * (plate.z_max_mm - plate.z_min_mm);
 
+        const QColor body_color = selected ? QColor(62, 151, 210) : QColor(145, 157, 168);
+        const double body_alpha = selected ? 0.98 : 0.92;
+        const QColor edge_color = selected ? QColor(255, 210, 68) : QColor(225, 235, 242);
+        const bool has_window = plate.aperture_enabled &&
+                                plate.aperture_width_mm > 0.0 &&
+                                plate.aperture_height_mm > 0.0;
+
         glPushMatrix();
         glTranslated(center_x, center_y, center_z);
         // Match the gmsh mesher: rotations are applied about the world axes in
@@ -678,22 +685,128 @@ void WaveguideOpenGLWidget::drawPecPlates() const
         glRotated(plate.rotation_z_deg, 0.0, 0.0, 1.0);
         glRotated(plate.rotation_y_deg, 0.0, 1.0, 0.0);
         glRotated(plate.rotation_x_deg, 1.0, 0.0, 0.0);
-        drawBox(-half_x,
-                half_x,
-                -half_y,
-                half_y,
-                -half_z,
-                half_z,
-                selected ? QColor(62, 151, 210) : QColor(145, 157, 168),
-                selected ? 0.98 : 0.92);
-        ::glLineWidth(selected ? 3.2f : 2.0f);
-        drawBoxEdges(-half_x,
-                     half_x,
-                     -half_y,
-                     half_y,
-                     -half_z,
-                     half_z,
-                     selected ? QColor(255, 210, 68) : QColor(225, 235, 242));
+        const bool circular_window = has_window && plate.aperture_shape == 1;
+        if (circular_window) {
+            // Plate with a round hole: a radial fan from the circle out to the
+            // rectangular outline, drawn on both faces, plus the bore wall.
+            constexpr int segments = 48;
+            const double cx = plate.aperture_offset_x_mm;
+            const double cy = plate.aperture_offset_y_mm;
+            const double r = plate.aperture_radius_mm;
+            const auto outline_point = [&](double angle) {
+                // Where the ray from the hole centre meets the plate rectangle.
+                const double dx = std::cos(angle);
+                const double dy = std::sin(angle);
+                const double tx = std::abs(dx) > 1.0e-9
+                                      ? ((dx > 0.0 ? half_x - cx : -half_x - cx) / dx)
+                                      : 1.0e30;
+                const double ty = std::abs(dy) > 1.0e-9
+                                      ? ((dy > 0.0 ? half_y - cy : -half_y - cy) / dy)
+                                      : 1.0e30;
+                const double t = std::min(tx, ty);
+                return QVector3D(static_cast<float>(cx + dx * t),
+                                 static_cast<float>(cy + dy * t),
+                                 0.0f);
+            };
+
+            setColor(body_color, body_alpha);
+            for (int face = 0; face < 2; ++face) {
+                const double z = face == 0 ? -half_z : half_z;
+                glBegin(GL_QUADS);
+                for (int i = 0; i < segments; ++i) {
+                    const double a0 = 2.0 * pi * i / segments;
+                    const double a1 = 2.0 * pi * (i + 1) / segments;
+                    const QVector3D o0 = outline_point(a0);
+                    const QVector3D o1 = outline_point(a1);
+                    glVertex3d(cx + r * std::cos(a0), cy + r * std::sin(a0), z);
+                    glVertex3d(cx + r * std::cos(a1), cy + r * std::sin(a1), z);
+                    glVertex3d(o1.x(), o1.y(), z);
+                    glVertex3d(o0.x(), o0.y(), z);
+                }
+                glEnd();
+            }
+            glBegin(GL_QUADS);   // bore wall
+            for (int i = 0; i < segments; ++i) {
+                const double a0 = 2.0 * pi * i / segments;
+                const double a1 = 2.0 * pi * (i + 1) / segments;
+                glVertex3d(cx + r * std::cos(a0), cy + r * std::sin(a0), -half_z);
+                glVertex3d(cx + r * std::cos(a1), cy + r * std::sin(a1), -half_z);
+                glVertex3d(cx + r * std::cos(a1), cy + r * std::sin(a1), half_z);
+                glVertex3d(cx + r * std::cos(a0), cy + r * std::sin(a0), half_z);
+            }
+            glEnd();
+            ::glLineWidth(selected ? 3.2f : 2.0f);
+            setColor(edge_color, 0.9);
+            for (int face = 0; face < 2; ++face) {
+                const double z = face == 0 ? -half_z : half_z;
+                glBegin(GL_LINE_LOOP);
+                for (int i = 0; i < segments; ++i) {
+                    const double a = 2.0 * pi * i / segments;
+                    glVertex3d(cx + r * std::cos(a), cy + r * std::sin(a), z);
+                }
+                glEnd();
+            }
+            drawBoxEdges(-half_x, half_x, -half_y, half_y, -half_z, half_z, edge_color);
+
+            if (plate.post_enabled && plate.post_radius_mm > 0.0 &&
+                plate.post_length_mm > 0.0) {
+                const double pr = plate.post_radius_mm;
+                const double pz = 0.5 * plate.post_length_mm;
+                setColor(selected ? QColor(255, 196, 96) : QColor(196, 170, 120), 0.96);
+                glBegin(GL_QUADS);
+                for (int i = 0; i < segments; ++i) {
+                    const double a0 = 2.0 * pi * i / segments;
+                    const double a1 = 2.0 * pi * (i + 1) / segments;
+                    glVertex3d(cx + pr * std::cos(a0), cy + pr * std::sin(a0), -pz);
+                    glVertex3d(cx + pr * std::cos(a1), cy + pr * std::sin(a1), -pz);
+                    glVertex3d(cx + pr * std::cos(a1), cy + pr * std::sin(a1), pz);
+                    glVertex3d(cx + pr * std::cos(a0), cy + pr * std::sin(a0), pz);
+                }
+                glEnd();
+                for (int face = 0; face < 2; ++face) {
+                    const double z = face == 0 ? -pz : pz;
+                    glBegin(GL_TRIANGLE_FAN);
+                    glVertex3d(cx, cy, z);
+                    for (int i = 0; i <= segments; ++i) {
+                        const double a = 2.0 * pi * i / segments;
+                        glVertex3d(cx + pr * std::cos(a), cy + pr * std::sin(a), z);
+                    }
+                    glEnd();
+                }
+            }
+        } else if (has_window) {
+            // Draw the diaphragm as four frame segments around the window so the
+            // aperture reads as an actual opening.
+            const double window_x0 =
+                plate.aperture_offset_x_mm - 0.5 * plate.aperture_width_mm;
+            const double window_x1 =
+                plate.aperture_offset_x_mm + 0.5 * plate.aperture_width_mm;
+            const double window_y0 =
+                plate.aperture_offset_y_mm - 0.5 * plate.aperture_height_mm;
+            const double window_y1 =
+                plate.aperture_offset_y_mm + 0.5 * plate.aperture_height_mm;
+            const double segments[4][4] = {
+                {-half_x, window_x0, -half_y, half_y},        // left bar
+                {window_x1, half_x, -half_y, half_y},         // right bar
+                {window_x0, window_x1, -half_y, window_y0},   // bottom bar
+                {window_x0, window_x1, window_y1, half_y},    // top bar
+            };
+            for (const auto &segment : segments) {
+                if (segment[1] <= segment[0] || segment[3] <= segment[2]) {
+                    continue;
+                }
+                drawBox(segment[0], segment[1], segment[2], segment[3],
+                        -half_z, half_z, body_color, body_alpha);
+                ::glLineWidth(selected ? 3.2f : 2.0f);
+                drawBoxEdges(segment[0], segment[1], segment[2], segment[3],
+                             -half_z, half_z, edge_color);
+            }
+        } else {
+            drawBox(-half_x, half_x, -half_y, half_y, -half_z, half_z,
+                    body_color, body_alpha);
+            ::glLineWidth(selected ? 3.2f : 2.0f);
+            drawBoxEdges(-half_x, half_x, -half_y, half_y, -half_z, half_z, edge_color);
+        }
 
         if (selected) {
             // Keep the selected object's silhouette visible through dense field lines.

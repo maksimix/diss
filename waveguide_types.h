@@ -25,6 +25,18 @@ struct PecPlateParameters
     double rotation_x_deg = 0.0;
     double rotation_y_deg = 0.0;
     double rotation_z_deg = 0.0;
+    // Окно насквозь через пластину (диафрагма/ирис).
+    bool aperture_enabled = false;
+    int aperture_shape = 0;             // 0 — прямоугольное, 1 — круглое
+    double aperture_width_mm = 10.0;
+    double aperture_height_mm = 4.0;
+    double aperture_radius_mm = 3.0;
+    double aperture_offset_x_mm = 0.0;
+    double aperture_offset_y_mm = 0.0;
+    // Соосный штырь внутри окна (ось вдоль нормали пластины).
+    bool post_enabled = false;
+    double post_radius_mm = 1.0;
+    double post_length_mm = 4.0;
 };
 
 struct WaveguideParameters
@@ -34,6 +46,9 @@ struct WaveguideParameters
     double depth_mm = 10.16;
     double wall_thickness_mm = 0.1;
     double wall_conductivity_s_per_m = 0.0;   // 0 => идеальный проводник (без потерь)
+    // Уровень качества FEM-расчёта: 0 — быстро, 1 — обычное, 2 — высокое,
+    // 3 — максимальное. Влияет на шаг сетки, порядок элементов и бюджет решателя.
+    int accuracy_level = 1;
     double frequency_ghz = 10.0;
     bool slot_enabled = false;
     double slot_length_mm = 12.0;

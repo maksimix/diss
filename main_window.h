@@ -61,7 +61,9 @@ private:
     void handleObjectDoubleClick(QTreeWidgetItem *item, int column);
     void showWaveguideDialog();
     void showSlotDialog();
-    void showPlateDialog(int plate_index = -1);
+    void showPlateDialog(int plate_index = -1,
+                         bool iris_template = false,
+                         bool round_post_template = false);
     void showExcitationDialog();
     void applyCstStyle();
     void setStatus(const QString &message, bool error);
@@ -71,6 +73,7 @@ private:
     WaveguideOpenGLWidget *side_projection_widget_ = nullptr;
     QCheckBox *slot_enabled_check_box_ = nullptr;
     QPushButton *add_plate_button_ = nullptr;
+    QPushButton *add_iris_button_ = nullptr;
     QTreeWidget *object_tree_widget_ = nullptr;
     QComboBox *field_mode_combo_box_ = nullptr;
     QCheckBox *slice_check_box_ = nullptr;

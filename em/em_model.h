@@ -51,13 +51,50 @@ struct SlotGeometry
     double rotation_rad = 0.0;
 };
 
+enum class PlateApertureShape
+{
+    Rectangular,
+    Circular
+};
+
 struct PecPlateGeometry
 {
     bool enabled = false;
     Vec3 center_m;
     Vec3 size_m;
     Vec3 rotation_rad;
+    // Optional window cut straight through the plate along its local z axis.
+    // A plate that spans the whole cross-section with a window is an iris
+    // (diaphragm), not a short circuit.
+    bool aperture_enabled = false;
+    PlateApertureShape aperture_shape = PlateApertureShape::Rectangular;
+    double aperture_width_m = 0.0;      // rectangular window, along local x
+    double aperture_height_m = 0.0;     // rectangular window, along local y
+    double aperture_radius_m = 0.0;     // circular window
+    double aperture_offset_x_m = 0.0;   // window centre, from the plate centre
+    double aperture_offset_y_m = 0.0;
+    // Optional post standing in the window, coaxial with it, its axis along the
+    // plate normal (the propagation axis for a transverse plate).
+    bool post_enabled = false;
+    double post_radius_m = 0.0;
+    double post_length_m = 0.0;
 };
+
+// True when the plate actually has an opening through it.
+inline bool plateHasOpening(const PecPlateGeometry &plate)
+{
+    if (!plate.aperture_enabled) {
+        return false;
+    }
+    return plate.aperture_shape == PlateApertureShape::Circular
+               ? plate.aperture_radius_m > 0.0
+               : plate.aperture_width_m > 0.0 && plate.aperture_height_m > 0.0;
+}
+
+inline bool plateHasPost(const PecPlateGeometry &plate)
+{
+    return plate.post_enabled && plate.post_radius_m > 0.0 && plate.post_length_m > 0.0;
+}
 
 struct DielectricBlockGeometry
 {
@@ -75,6 +112,10 @@ struct FemMeshSettings
     double minimum_element_size_m = 0.0;
     double geometry_tolerance_m = 1.0e-9;
     int uniform_refinement_levels = 0;
+    // Scales the automatic element size: below 1 refines the mesh (slower and
+    // more accurate), above 1 coarsens it. Ignored when maximum_element_size_m
+    // is set explicitly.
+    double refinement_factor = 1.0;
 };
 
 struct PmlSettings

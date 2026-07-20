@@ -467,6 +467,64 @@ QWidget *MainWindow::createParameterPanel()
     add_plate_button_ = new QPushButton(QStringLiteral("Добавить пластину"), panel);
     panel_layout->addWidget(add_plate_button_);
 
+    add_iris_button_ = new QPushButton(QStringLiteral("Добавить диафрагму (окно)"), panel);
+    add_iris_button_->setToolTip(
+        QStringLiteral("Пластина во всё сечение волновода с прямоугольным окном внутри"));
+    panel_layout->addWidget(add_iris_button_);
+
+    QPushButton *add_round_iris_button =
+        new QPushButton(QStringLiteral("Круглая диафрагма со штырём"), panel);
+    add_round_iris_button->setToolTip(
+        QStringLiteral("Пластина во всё сечение с круглым отверстием и соосным штырём внутри"));
+    panel_layout->addWidget(add_round_iris_button);
+
+    QPushButton *symmetric_profile_button =
+        new QPushButton(QStringLiteral("Профиль: симметричное сужение"), panel);
+    symmetric_profile_button->setToolTip(
+        QStringLiteral("Волновод сужается с обеих боковых стенок на участке по длине"));
+    panel_layout->addWidget(symmetric_profile_button);
+
+    QPushButton *single_step_profile_button =
+        new QPushButton(QStringLiteral("Профиль: уступ на стенке"), panel);
+    single_step_profile_button->setToolTip(
+        QStringLiteral("Волновод сужается с одной боковой стенки на участке по длине"));
+    panel_layout->addWidget(single_step_profile_button);
+
+    QGroupBox *solve_group = new QGroupBox(QStringLiteral("Расчёт"), panel);
+    QFormLayout *solve_layout = new QFormLayout(solve_group);
+    QComboBox *accuracy_combo_box = new QComboBox(solve_group);
+    accuracy_combo_box->addItem(QStringLiteral("Быстро (грубая сетка)"));
+    accuracy_combo_box->addItem(QStringLiteral("Обычное"));
+    accuracy_combo_box->addItem(QStringLiteral("Высокое (мелкая сетка)"));
+    accuracy_combo_box->setCurrentIndex(std::clamp(parameters_.accuracy_level, 0, 2));
+    accuracy_combo_box->setToolTip(
+        QStringLiteral("Влияет только на расчёт с пластинами, диафрагмой или щелью (FEM).\n"
+                       "Более высокое качество убирает «мозаику» поля ценой времени расчёта."));
+    QLabel *accuracy_hint_label = new QLabel(solve_group);
+    accuracy_hint_label->setWordWrap(true);
+    accuracy_hint_label->setStyleSheet(QStringLiteral("color: #4a5a66;"));
+    const auto update_accuracy_hint = [accuracy_hint_label](int level) {
+        static const char *const hints[] = {
+            "Замер: ~13 с (7 тыс. неизвестных). Поле заметно «мозаичное».",
+            "Замер: ~1 мин (17 тыс.). Базовое качество.",
+            "Замер: ~5 мин (40 тыс.). Мозаика слабее; S-параметры заметно точнее.",
+        };
+        accuracy_hint_label->setText(QString::fromUtf8(hints[std::clamp(level, 0, 2)]));
+    };
+    update_accuracy_hint(accuracy_combo_box->currentIndex());
+    solve_layout->addRow(QStringLiteral("Качество"), accuracy_combo_box);
+    solve_layout->addRow(accuracy_hint_label);
+    panel_layout->addWidget(solve_group);
+
+    connect(accuracy_combo_box,
+            qOverload<int>(&QComboBox::currentIndexChanged),
+            this,
+            [this, update_accuracy_hint](int index) {
+                parameters_.accuracy_level = index;
+                update_accuracy_hint(index);
+                scheduleCalculation();
+            });
+
     QGroupBox *view_group = new QGroupBox(QStringLiteral("Отображение"), panel);
     QFormLayout *view_layout = new QFormLayout(view_group);
     field_mode_combo_box_ = new QComboBox(view_group);
@@ -501,6 +559,55 @@ QWidget *MainWindow::createParameterPanel()
             });
     connect(add_plate_button_, &QPushButton::clicked, this, [this]() {
         showPlateDialog(-1);
+    });
+    connect(add_iris_button_, &QPushButton::clicked, this, [this]() {
+        showPlateDialog(-1, true);
+    });
+    connect(add_round_iris_button, &QPushButton::clicked, this, [this]() {
+        showPlateDialog(-1, true, true);
+    });
+    // H-plane profile templates. A step machined into the side wall is
+    // geometrically the same cavity as a PEC block filling that corner, so the
+    // profile reuses the (already meshed and FEM-routed) plate bodies.
+    const auto insert_profile = [this](bool symmetric) {
+        const double inner_width = parameters_.width_mm - 2.0 * parameters_.wall_thickness_mm;
+        const double inner_depth = parameters_.depth_mm - 2.0 * parameters_.wall_thickness_mm;
+        const double half_width = 0.5 * inner_width;
+        const double half_depth = 0.5 * inner_depth;
+        const double section_length = std::min(0.35 * parameters_.length_mm, 12.0);
+        // Mild default steps: a deeper narrowing pushes the narrow section below
+        // cutoff (evanescent), which is a valid design but a confusing default.
+        const double inset = symmetric ? 0.15 * inner_width : 0.25 * inner_width;
+
+        const auto make_step = [&](const QString &name, double x_min, double x_max) {
+            PecPlateParameters step;
+            step.name = name;
+            step.enabled = true;
+            step.x_min_mm = x_min;
+            step.x_max_mm = x_max;
+            step.y_min_mm = -half_depth;
+            step.y_max_mm = half_depth;
+            step.z_min_mm = -0.5 * section_length;
+            step.z_max_mm = 0.5 * section_length;
+            parameters_.pec_plates.push_back(step);
+        };
+
+        const int base = parameters_.pec_plates.size() + 1;
+        if (symmetric) {
+            make_step(QStringLiteral("step_%1_left").arg(base), -half_width, -half_width + inset);
+            make_step(QStringLiteral("step_%1_right").arg(base), half_width - inset, half_width);
+        } else {
+            make_step(QStringLiteral("step_%1").arg(base), half_width - inset, half_width);
+        }
+        selected_plate_index_ = parameters_.pec_plates.size() - 1;
+        rebuildObjectTree();
+        scheduleCalculation();
+    };
+    connect(symmetric_profile_button, &QPushButton::clicked, this, [insert_profile]() {
+        insert_profile(true);
+    });
+    connect(single_step_profile_button, &QPushButton::clicked, this, [insert_profile]() {
+        insert_profile(false);
     });
     connect(object_tree_widget_,
             &QTreeWidget::itemDoubleClicked,
@@ -838,7 +945,7 @@ void MainWindow::showWaveguideDialog()
     grid_layout->addWidget(frequency_spin_box, 9, 1);
     grid_layout->addWidget(new QLabel(QStringLiteral("Component:"), &dialog), 10, 0, 1, 2);
     grid_layout->addWidget(component_combo_box, 11, 0, 1, 2);
-    grid_layout->addWidget(new QLabel(QStringLiteral("Material:"), &dialog), 12, 0, 1, 2);
+    grid_layout->addWidget(new QLabel(QStringLiteral("Материал стенок:"), &dialog), 12, 0, 1, 2);
     grid_layout->addWidget(material_combo_box, 13, 0, 1, 2);
 
     QVBoxLayout *button_layout = new QVBoxLayout();
@@ -1077,12 +1184,52 @@ void MainWindow::showSlotDialog()
     dialog.exec();
 }
 
-void MainWindow::showPlateDialog(int plate_index)
+void MainWindow::showPlateDialog(int plate_index, bool iris_template, bool round_post_template)
 {
     const bool creating = plate_index < 0 || plate_index >= parameters_.pec_plates.size();
     PecPlateParameters plate;
     if (!creating) {
         plate = parameters_.pec_plates[plate_index];
+    } else if (iris_template && round_post_template) {
+        // Circular diaphragm with a coaxial post: the plate spans the whole
+        // cross-section, the hole is centred, and the post stands on its axis.
+        const double inner_width = parameters_.width_mm - 2.0 * parameters_.wall_thickness_mm;
+        const double inner_depth = parameters_.depth_mm - 2.0 * parameters_.wall_thickness_mm;
+        const double thickness = std::max(0.5, 2.0 * parameters_.wall_thickness_mm);
+        const double radius = 0.30 * std::min(inner_width, inner_depth) * 2.0 * 0.5;
+        plate.name = QStringLiteral("iris_post_%1").arg(parameters_.pec_plates.size() + 1);
+        plate.x_min_mm = -0.5 * inner_width;
+        plate.x_max_mm = 0.5 * inner_width;
+        plate.y_min_mm = -0.5 * inner_depth;
+        plate.y_max_mm = 0.5 * inner_depth;
+        plate.z_min_mm = -0.5 * thickness;
+        plate.z_max_mm = 0.5 * thickness;
+        plate.aperture_enabled = true;
+        plate.aperture_shape = 1;
+        plate.aperture_radius_mm = radius;
+        plate.aperture_offset_x_mm = 0.0;
+        plate.aperture_offset_y_mm = 0.0;
+        plate.post_enabled = true;
+        plate.post_radius_mm = 0.35 * radius;
+        plate.post_length_mm = std::max(2.0 * thickness, 0.6 * radius);
+    } else if (iris_template) {
+        // Diaphragm template: the plate spans the whole inner cross-section
+        // (its edges touch all four walls) and carries a centred window.
+        const double inner_width = parameters_.width_mm - 2.0 * parameters_.wall_thickness_mm;
+        const double inner_depth = parameters_.depth_mm - 2.0 * parameters_.wall_thickness_mm;
+        const double thickness = std::max(0.5, 2.0 * parameters_.wall_thickness_mm);
+        plate.name = QStringLiteral("iris_%1").arg(parameters_.pec_plates.size() + 1);
+        plate.x_min_mm = -0.5 * inner_width;
+        plate.x_max_mm = 0.5 * inner_width;
+        plate.y_min_mm = -0.5 * inner_depth;
+        plate.y_max_mm = 0.5 * inner_depth;
+        plate.z_min_mm = -0.5 * thickness;
+        plate.z_max_mm = 0.5 * thickness;
+        plate.aperture_enabled = true;
+        plate.aperture_width_mm = 0.5 * inner_width;
+        plate.aperture_height_mm = 0.5 * inner_depth;
+        plate.aperture_offset_x_mm = 0.0;
+        plate.aperture_offset_y_mm = 0.0;
     } else {
         plate.name = QStringLiteral("plate_%1").arg(parameters_.pec_plates.size() + 1);
         const double inner_depth = parameters_.depth_mm - 2.0 * parameters_.wall_thickness_mm;
@@ -1127,6 +1274,53 @@ void MainWindow::showPlateDialog(int plate_index)
                                                         QStringLiteral(" deg"), &dialog);
     QCheckBox *enabled_check_box = new QCheckBox(QStringLiteral("Включена в модель"), &dialog);
     enabled_check_box->setChecked(plate.enabled);
+    QCheckBox *aperture_check_box =
+        new QCheckBox(QStringLiteral("Окно в пластине (диафрагма)"), &dialog);
+    aperture_check_box->setChecked(plate.aperture_enabled);
+    QComboBox *aperture_shape_combo_box = new QComboBox(&dialog);
+    aperture_shape_combo_box->addItem(QStringLiteral("Прямоугольное окно"));
+    aperture_shape_combo_box->addItem(QStringLiteral("Круглое отверстие"));
+    aperture_shape_combo_box->setCurrentIndex(std::clamp(plate.aperture_shape, 0, 1));
+    QDoubleSpinBox *aperture_radius_spin_box = createSpinBox(0.01, 10000.0, plate.aperture_radius_mm,
+                                                             0.1, 3, QStringLiteral(" mm"), &dialog);
+    QCheckBox *post_check_box =
+        new QCheckBox(QStringLiteral("Штырь в отверстии (соосный)"), &dialog);
+    post_check_box->setChecked(plate.post_enabled);
+    QDoubleSpinBox *post_radius_spin_box = createSpinBox(0.01, 10000.0, plate.post_radius_mm,
+                                                         0.1, 3, QStringLiteral(" mm"), &dialog);
+    QDoubleSpinBox *post_length_spin_box = createSpinBox(0.01, 10000.0, plate.post_length_mm,
+                                                         0.1, 3, QStringLiteral(" mm"), &dialog);
+    QDoubleSpinBox *aperture_width_spin_box = createSpinBox(0.01, 10000.0, plate.aperture_width_mm,
+                                                            0.1, 3, QStringLiteral(" mm"), &dialog);
+    QDoubleSpinBox *aperture_height_spin_box = createSpinBox(0.01, 10000.0, plate.aperture_height_mm,
+                                                             0.1, 3, QStringLiteral(" mm"), &dialog);
+    QDoubleSpinBox *aperture_offset_x_spin_box = createSpinBox(-10000.0, 10000.0,
+                                                               plate.aperture_offset_x_mm,
+                                                               0.1, 3, QStringLiteral(" mm"), &dialog);
+    QDoubleSpinBox *aperture_offset_y_spin_box = createSpinBox(-10000.0, 10000.0,
+                                                               plate.aperture_offset_y_mm,
+                                                               0.1, 3, QStringLiteral(" mm"), &dialog);
+    const auto update_aperture_enabled = [&]() {
+        const bool on = aperture_check_box->isChecked();
+        const bool circular = aperture_shape_combo_box->currentIndex() == 1;
+        aperture_shape_combo_box->setEnabled(on);
+        aperture_width_spin_box->setEnabled(on && !circular);
+        aperture_height_spin_box->setEnabled(on && !circular);
+        aperture_radius_spin_box->setEnabled(on && circular);
+        aperture_offset_x_spin_box->setEnabled(on);
+        aperture_offset_y_spin_box->setEnabled(on);
+        post_check_box->setEnabled(on && circular);
+        const bool post_on = on && circular && post_check_box->isChecked();
+        post_radius_spin_box->setEnabled(post_on);
+        post_length_spin_box->setEnabled(post_on);
+    };
+    update_aperture_enabled();
+    connect(aperture_check_box, &QCheckBox::toggled, &dialog, update_aperture_enabled);
+    connect(post_check_box, &QCheckBox::toggled, &dialog, update_aperture_enabled);
+    connect(aperture_shape_combo_box,
+            qOverload<int>(&QComboBox::currentIndexChanged),
+            &dialog,
+            [update_aperture_enabled](int) { update_aperture_enabled(); });
     QComboBox *component_combo_box = new QComboBox(&dialog);
     component_combo_box->addItem(QStringLiteral("component1"));
     component_combo_box->setEnabled(false);
@@ -1155,10 +1349,27 @@ void MainWindow::showPlateDialog(int plate_index)
     grid_layout->addWidget(new QLabel(QStringLiteral("Rotation Z:"), &dialog), 10, 0);
     grid_layout->addWidget(rotation_z_spin_box, 11, 0);
     grid_layout->addWidget(enabled_check_box, 11, 1);
-    grid_layout->addWidget(new QLabel(QStringLiteral("Component:"), &dialog), 12, 0);
-    grid_layout->addWidget(new QLabel(QStringLiteral("Material:"), &dialog), 12, 1);
-    grid_layout->addWidget(component_combo_box, 13, 0);
-    grid_layout->addWidget(material_combo_box, 13, 1);
+    grid_layout->addWidget(aperture_check_box, 12, 0, 1, 2);
+    grid_layout->addWidget(aperture_shape_combo_box, 13, 0, 1, 2);
+    grid_layout->addWidget(new QLabel(QStringLiteral("Окно: ширина X:"), &dialog), 14, 0);
+    grid_layout->addWidget(new QLabel(QStringLiteral("Окно: высота Y:"), &dialog), 14, 1);
+    grid_layout->addWidget(aperture_width_spin_box, 15, 0);
+    grid_layout->addWidget(aperture_height_spin_box, 15, 1);
+    grid_layout->addWidget(new QLabel(QStringLiteral("Радиус отверстия:"), &dialog), 16, 0);
+    grid_layout->addWidget(aperture_radius_spin_box, 17, 0);
+    grid_layout->addWidget(new QLabel(QStringLiteral("Окно: смещение X:"), &dialog), 18, 0);
+    grid_layout->addWidget(new QLabel(QStringLiteral("Окно: смещение Y:"), &dialog), 18, 1);
+    grid_layout->addWidget(aperture_offset_x_spin_box, 19, 0);
+    grid_layout->addWidget(aperture_offset_y_spin_box, 19, 1);
+    grid_layout->addWidget(post_check_box, 20, 0, 1, 2);
+    grid_layout->addWidget(new QLabel(QStringLiteral("Штырь: радиус:"), &dialog), 21, 0);
+    grid_layout->addWidget(new QLabel(QStringLiteral("Штырь: длина Z:"), &dialog), 21, 1);
+    grid_layout->addWidget(post_radius_spin_box, 22, 0);
+    grid_layout->addWidget(post_length_spin_box, 22, 1);
+    grid_layout->addWidget(new QLabel(QStringLiteral("Component:"), &dialog), 23, 0);
+    grid_layout->addWidget(new QLabel(QStringLiteral("Material:"), &dialog), 23, 1);
+    grid_layout->addWidget(component_combo_box, 24, 0);
+    grid_layout->addWidget(material_combo_box, 24, 1);
 
     QVBoxLayout *button_layout = new QVBoxLayout();
     QPushButton *ok_button = new QPushButton(QStringLiteral("OK"), &dialog);
@@ -1202,6 +1413,36 @@ void MainWindow::showPlateDialog(int plate_index)
         plate.rotation_x_deg = rotation_x_spin_box->value();
         plate.rotation_y_deg = rotation_y_spin_box->value();
         plate.rotation_z_deg = rotation_z_spin_box->value();
+        plate.aperture_enabled = aperture_check_box->isChecked();
+        plate.aperture_shape = aperture_shape_combo_box->currentIndex();
+        plate.aperture_width_mm = aperture_width_spin_box->value();
+        plate.aperture_height_mm = aperture_height_spin_box->value();
+        plate.aperture_radius_mm = aperture_radius_spin_box->value();
+        plate.aperture_offset_x_mm = aperture_offset_x_spin_box->value();
+        plate.aperture_offset_y_mm = aperture_offset_y_spin_box->value();
+        plate.post_enabled = post_check_box->isChecked() && plate.aperture_shape == 1;
+        plate.post_radius_mm = post_radius_spin_box->value();
+        plate.post_length_mm = post_length_spin_box->value();
+        if (plate.aperture_enabled) {
+            const bool circular = plate.aperture_shape == 1;
+            const double span_x =
+                circular ? plate.aperture_radius_mm : 0.5 * plate.aperture_width_mm;
+            const double span_y =
+                circular ? plate.aperture_radius_mm : 0.5 * plate.aperture_height_mm;
+            if (std::abs(plate.aperture_offset_x_mm) + span_x >= 0.5 * (x_max - x_min) ||
+                std::abs(plate.aperture_offset_y_mm) + span_y >= 0.5 * (y_max - y_min)) {
+                QMessageBox::warning(&dialog,
+                                     QStringLiteral("PEC Plate"),
+                                     QStringLiteral("Окно должно целиком помещаться внутри пластины."));
+                return;
+            }
+            if (plate.post_enabled && plate.post_radius_mm >= plate.aperture_radius_mm) {
+                QMessageBox::warning(&dialog,
+                                     QStringLiteral("PEC Plate"),
+                                     QStringLiteral("Штырь должен быть тоньше отверстия."));
+                return;
+            }
+        }
         if (creating) {
             parameters_.pec_plates.push_back(plate);
             selected_plate_index_ = parameters_.pec_plates.size() - 1;
@@ -1364,6 +1605,16 @@ QString MainWindow::buildResultText(const WaveguideCalculationResult &result) co
 
     text += QStringLiteral("Решатель\n");
     text += QStringLiteral("  Backend: %1\n").arg(result.solver_backend);
+    {
+        static const char *const accuracy_names[] = {
+            "быстро (грубая сетка)",
+            "обычное",
+            "высокое (мелкая сетка)",
+        };
+        const int level = std::clamp(result.parameters.accuracy_level, 0, 2);
+        text += QStringLiteral("  Качество расчёта: %1\n")
+                    .arg(QString::fromUtf8(accuracy_names[level]));
+    }
     text += QStringLiteral("  Падающая мощность: %1 W\n")
                 .arg(number(result.incident_power_w, 8));
     text += QStringLiteral("  Отраженная мощность: %1 W\n")

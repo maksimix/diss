@@ -5,6 +5,7 @@
 #include "em/mfem_frequency_domain_backend.h"
 #endif
 #include "em/rectangular_waveguide_solver.h"
+#include "em/transverse_pec_partition_solver.h"
 #include "postprocessing/field_visualization_generator.h"
 #include "postprocessing/slot_excitation_estimator.h"
 
@@ -940,6 +941,110 @@ void testPartitionSliceShadowAndPoynting()
                "lossless standing wave produces no Poynting arrows (noise suppressed)");
 }
 
+void testIrisPlateWithAperture()
+{
+    em::ModeSelection te10;
+    te10.automatic = false;
+    te10.family = em::ModeFamily::TransverseElectric;
+    te10.m = 1;
+    te10.n = 0;
+    em::SimulationRequest request = createRequest(10.0e9);
+    request.excitation = te10;
+
+    // A plate spanning the whole cross-section, but with a window in it.
+    em::PecPlateGeometry iris;
+    iris.enabled = true;
+    iris.center_m = {0.0, 0.0, 2.0e-3};
+    iris.size_m = {
+        request.model.waveguide.inner_width_m,
+        request.model.waveguide.inner_height_m,
+        1.0e-3,
+    };
+    iris.aperture_enabled = true;
+    iris.aperture_width_m = 0.5 * request.model.waveguide.inner_width_m;
+    iris.aperture_height_m = 0.5 * request.model.waveguide.inner_height_m;
+    request.model.pec_plates.push_back(iris);
+
+    // The closed-form short circuit must refuse an iris: it transmits.
+    std::string reason;
+    expectTrue(!em::TransversePecPartitionSolver::canSolve(request, nullptr, &reason),
+               "an apertured plate is not treated as a solid short circuit");
+    expectTrue(reason.find("aperture") != std::string::npos ||
+                   reason.find("iris") != std::string::npos,
+               "the refusal explains that the plate is an iris: " + reason);
+
+    // Without the window the very same plate is a valid analytic short.
+    em::SimulationRequest solid_request = request;
+    solid_request.model.pec_plates.front().aperture_enabled = false;
+    expectTrue(em::TransversePecPartitionSolver::canSolve(solid_request),
+               "the same plate without a window still solves as a short circuit");
+
+    // The iris must reach the FEM backend through the dispatcher.
+    const em::EmSolverDispatcher dispatcher(std::make_shared<TestFemBackend>());
+    const em::FieldSolution solution = dispatcher.solve(request);
+    expectTrue(solution.diagnostics.backend_name == "Test FEM backend",
+               "an iris is routed to the FEM backend");
+
+    // The mesh script must cut the window out of the plate before subtracting
+    // the metal from the fluid.
+    const std::string script = em::GmshTetrahedralMesher::buildGeometryScript(request);
+    expectTrue(script.find("iris100[] = BooleanDifference") != std::string::npos,
+               "the window is cut out of the plate body");
+    expectTrue(script.find("pecBodies[] += iris100[];") != std::string::npos,
+               "the perforated plate is the PEC body handed to the fluid subtraction");
+    expectTrue(script.find("Volume{pecBodies[]}") != std::string::npos,
+               "the fluid subtracts the assembled PEC bodies");
+}
+
+void testCircularIrisWithPost()
+{
+    em::ModeSelection te10;
+    te10.automatic = false;
+    te10.family = em::ModeFamily::TransverseElectric;
+    te10.m = 1;
+    te10.n = 0;
+    em::SimulationRequest request = createRequest(10.0e9);
+    request.excitation = te10;
+
+    em::PecPlateGeometry iris;
+    iris.enabled = true;
+    iris.center_m = {0.0, 0.0, 0.0};
+    iris.size_m = {
+        request.model.waveguide.inner_width_m,
+        request.model.waveguide.inner_height_m,
+        0.5e-3,
+    };
+    iris.aperture_enabled = true;
+    iris.aperture_shape = em::PlateApertureShape::Circular;
+    iris.aperture_radius_m = 3.0e-3;
+    iris.post_enabled = true;
+    iris.post_radius_m = 1.0e-3;
+    iris.post_length_m = 4.0e-3;
+    request.model.pec_plates.push_back(iris);
+
+    expectTrue(em::plateHasOpening(iris) && em::plateHasPost(iris),
+               "circular aperture and post are recognised");
+    std::string reason;
+    expectTrue(!em::TransversePecPartitionSolver::canSolve(request, nullptr, &reason),
+               "a circular iris is not treated as a solid short circuit");
+
+    const em::EmSolverDispatcher dispatcher(std::make_shared<TestFemBackend>());
+    expectTrue(dispatcher.solve(request).diagnostics.backend_name == "Test FEM backend",
+               "a circular iris with a post is routed to the FEM backend");
+
+    const std::string script = em::GmshTetrahedralMesher::buildGeometryScript(request);
+    expectTrue(script.find("Cylinder(") != std::string::npos,
+               "the round hole and the post are built from cylinders");
+    expectTrue(script.find("iris100[] = BooleanDifference") != std::string::npos,
+               "the round hole is cut out of the plate");
+    // Plate body, hole cutter and post: the post is a separate PEC body.
+    const std::size_t first_cylinder = script.find("Cylinder(");
+    expectTrue(script.find("Cylinder(", first_cylinder + 1) != std::string::npos,
+               "the post is emitted in addition to the hole cutter");
+    expectTrue(script.find("pecBodies[] += {102};") != std::string::npos,
+               "the post is added to the PEC bodies subtracted from the fluid");
+}
+
 void testFemGeometryGeneration()
 {
     em::SimulationRequest request = createRequest(10.0e9);
@@ -1147,6 +1252,8 @@ int main()
     testFullPecPartition();
     testFieldSliceAndAnimation();
     testPartitionSliceShadowAndPoynting();
+    testIrisPlateWithAperture();
+    testCircularIrisWithPost();
     testFemGeometryGeneration();
 #ifdef KRUTIEV_WITH_MFEM
     testMfemEmptyGuide();

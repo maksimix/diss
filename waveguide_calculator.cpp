@@ -100,6 +100,42 @@ QString validateParameters(const WaveguideParameters &parameters)
              plate.z_min_mm < -half_length || plate.z_max_mm > half_length)) {
             return QStringLiteral("PEC-пластина должна находиться внутри полости волновода.");
         }
+        if (plate.enabled && plate.aperture_enabled) {
+            if (!std::isfinite(plate.aperture_offset_x_mm) ||
+                !std::isfinite(plate.aperture_offset_y_mm)) {
+                return QStringLiteral("Смещение окна пластины должно быть конечным.");
+            }
+            const double plate_width_mm = plate.x_max_mm - plate.x_min_mm;
+            const double plate_height_mm = plate.y_max_mm - plate.y_min_mm;
+            const bool circular = plate.aperture_shape == 1;
+            const double half_span_x =
+                circular ? plate.aperture_radius_mm : 0.5 * plate.aperture_width_mm;
+            const double half_span_y =
+                circular ? plate.aperture_radius_mm : 0.5 * plate.aperture_height_mm;
+            if (circular ? !positiveFinite(plate.aperture_radius_mm)
+                         : (!positiveFinite(plate.aperture_width_mm) ||
+                            !positiveFinite(plate.aperture_height_mm))) {
+                return QStringLiteral("Размеры окна пластины должны быть конечными и больше нуля.");
+            }
+            if (std::abs(plate.aperture_offset_x_mm) + half_span_x >= 0.5 * plate_width_mm ||
+                std::abs(plate.aperture_offset_y_mm) + half_span_y >= 0.5 * plate_height_mm) {
+                return QStringLiteral("Окно должно целиком помещаться внутри пластины, не касаясь её краёв.");
+            }
+            if (plate.post_enabled) {
+                if (!positiveFinite(plate.post_radius_mm) ||
+                    !positiveFinite(plate.post_length_mm)) {
+                    return QStringLiteral("Радиус и длина штыря должны быть конечными и больше нуля.");
+                }
+                if (!circular) {
+                    return QStringLiteral("Штырь поддерживается только для круглого окна.");
+                }
+                if (plate.post_radius_mm >= plate.aperture_radius_mm) {
+                    return QStringLiteral("Штырь должен быть тоньше отверстия, иначе он перекроет его.");
+                }
+            }
+        } else if (plate.enabled && plate.post_enabled) {
+            return QStringLiteral("Штырь задаётся вместе с окном в пластине.");
+        }
     }
     if (!parameters.slot_enabled) {
         return {};
@@ -135,6 +171,35 @@ QString validateParameters(const WaveguideParameters &parameters)
     return {};
 }
 
+// Accuracy levels trade wall-clock time for discretisation error. The values
+// are the ones measured to actually converge with the current serial
+// GMRES/Gauss-Seidel solver on a plate scenario; finer settings than these
+// stall around 1e-4 and are reported as approximate.
+void applyAccuracyLevel(em::FemSolverSettings &fem, int level)
+{
+    switch (std::clamp(level, 0, 2)) {
+    case 0:   // быстро
+        fem.mesh.refinement_factor = 1.4;
+        fem.mesh.element_order = 1;
+        fem.maximum_iterations = 1200;
+        break;
+    case 2:   // высокое
+        fem.mesh.refinement_factor = 0.7;
+        fem.mesh.element_order = 1;
+        fem.maximum_iterations = 3000;
+        break;
+        // A fourth, finer level was tried and withdrawn: at refinement 0.5 the
+        // GMRES/Gauss-Seidel solver stalls around 1e-1, far from usable, and
+        // second-order elements did not finish a single run in 20 minutes.
+        // Both need an AMS preconditioner (parallel MFEM + hypre) to be viable.
+    default:  // обычное
+        fem.mesh.refinement_factor = 1.0;
+        fem.mesh.element_order = 1;
+        fem.maximum_iterations = 1200;
+        break;
+    }
+}
+
 em::SimulationRequest buildRequest(const WaveguideParameters &parameters,
                                    double inner_width_mm,
                                    double inner_height_mm)
@@ -152,6 +217,7 @@ em::SimulationRequest buildRequest(const WaveguideParameters &parameters,
     request.settings.normalization_power_w = 1.0;
     request.settings.fem.relative_tolerance = 1.0e-6;
     request.settings.fem.maximum_iterations = 1200;
+    applyAccuracyLevel(request.settings.fem, parameters.accuracy_level);
 
     if (parameters.slot_enabled) {
         em::SlotGeometry slot;
@@ -187,6 +253,18 @@ em::SimulationRequest buildRequest(const WaveguideParameters &parameters,
             plate_parameters.rotation_y_deg * em::pi / 180.0,
             plate_parameters.rotation_z_deg * em::pi / 180.0,
         };
+        plate.aperture_enabled = plate_parameters.aperture_enabled;
+        plate.aperture_shape = plate_parameters.aperture_shape == 1
+                                   ? em::PlateApertureShape::Circular
+                                   : em::PlateApertureShape::Rectangular;
+        plate.aperture_width_m = mmToM(plate_parameters.aperture_width_mm);
+        plate.aperture_height_m = mmToM(plate_parameters.aperture_height_mm);
+        plate.aperture_radius_m = mmToM(plate_parameters.aperture_radius_mm);
+        plate.aperture_offset_x_m = mmToM(plate_parameters.aperture_offset_x_mm);
+        plate.aperture_offset_y_m = mmToM(plate_parameters.aperture_offset_y_mm);
+        plate.post_enabled = plate_parameters.post_enabled;
+        plate.post_radius_m = mmToM(plate_parameters.post_radius_mm);
+        plate.post_length_m = mmToM(plate_parameters.post_length_mm);
         request.model.pec_plates.push_back(plate);
     }
     return request;
