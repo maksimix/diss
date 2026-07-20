@@ -1,0 +1,41 @@
+# Visual Studio and Qt build output
+.vs/
+**/x64/
+**/Debug/
+**/Release/
+*.VC.db
+*.VC.opendb
+*.sdf
+*.suo
+*.user
+
+# CMake build output
+build/
+out/
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+CTestTestfile.cmake
+Testing/
+
+# Compiled artifacts
+*.obj
+*.o
+*.pdb
+*.ilk
+*.exe
+*.dll
+*.lib
+*.exp
+*.tlog
+*.lastbuildstate
+*.recipe
+
+# Local IDE/assistant state
+.claude/
+.agents/
+
+# Operating system files
+.DS_Store
+Thumbs.db
