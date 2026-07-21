@@ -108,14 +108,20 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="calculation_worker.cpp" />
+    <ClCompile Include="cst_ribbon.cpp" />
+    <ClCompile Include="expression_spin_box.cpp" />
+    <ClCompile Include="model_parameters.cpp" />
+    <ClCompile Include="parameter_list_widget.cpp" />
     <ClCompile Include="em\em_solver_dispatcher.cpp" />
     <ClCompile Include="em\fem_frequency_domain_solver.cpp" />
     <ClCompile Include="em\gmsh_tetrahedral_mesher.cpp" />
     <ClCompile Include="em\mfem_frequency_domain_backend.cpp" Condition="'$(MfemRoot)'!=''" />
+    <ClCompile Include="em\mode_matching_iris_solver.cpp" />
     <ClCompile Include="em\rectangular_mode_field.cpp" />
     <ClCompile Include="em\rectangular_waveguide_solver.cpp" />
     <ClCompile Include="em\transverse_pec_partition_solver.cpp" />
     <ClCompile Include="main.cpp" />
+    <ClCompile Include="model_serialization.cpp" />
     <ClCompile Include="main_window.cpp" />
     <ClCompile Include="postprocessing\field_visualization_generator.cpp" />
     <ClCompile Include="postprocessing\qt_field_glyph_adapter.cpp" />
@@ -125,7 +131,10 @@
   </ItemGroup>
   <ItemGroup>
     <QtMoc Include="calculation_worker.h" />
+    <QtMoc Include="cst_ribbon.h" />
+    <QtMoc Include="expression_spin_box.h" />
     <QtMoc Include="main_window.h" />
+    <QtMoc Include="parameter_list_widget.h" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="em\derived_fields.h" />
@@ -137,12 +146,15 @@
     <ClInclude Include="em\fem_frequency_domain_solver.h" />
     <ClInclude Include="em\gmsh_tetrahedral_mesher.h" />
     <ClInclude Include="em\mfem_frequency_domain_backend.h" />
+    <ClInclude Include="em\mode_matching_iris_solver.h" />
     <ClInclude Include="em\rectangular_mode_field.h" />
     <ClInclude Include="em\rectangular_waveguide_solver.h" />
     <ClInclude Include="em\transverse_pec_partition_solver.h" />
     <ClInclude Include="postprocessing\field_visualization_generator.h" />
     <ClInclude Include="postprocessing\qt_field_glyph_adapter.h" />
     <ClInclude Include="postprocessing\slot_excitation_estimator.h" />
+    <ClInclude Include="model_parameters.h" />
+    <ClInclude Include="model_serialization.h" />
     <ClInclude Include="waveguide_calculator.h" />
     <ClInclude Include="waveguide_opengl_widget.h" />
     <ClInclude Include="waveguide_types.h" />

@@ -174,6 +174,19 @@ enum class GeometryApproximationPolicy
     UnperturbedBackgroundForSlots
 };
 
+// Which solver the dispatcher should use. Automatic keeps the historic
+// behaviour (cheapest solver that can represent the geometry); the explicit
+// values let the user pin one method and get an error instead of a silent
+// fallback when the geometry is outside that method's reach.
+enum class SolverMethod
+{
+    Automatic,
+    AnalyticRectangular,
+    TransversePartition,
+    ModeMatching,
+    FiniteElement
+};
+
 struct SolverSettings
 {
     int maximum_m = 3;
@@ -181,6 +194,7 @@ struct SolverSettings
     double normalization_power_w = 1.0;
     GeometryApproximationPolicy geometry_approximation_policy =
         GeometryApproximationPolicy::Strict;
+    SolverMethod solver_method = SolverMethod::Automatic;
     FemSolverSettings fem;
 };
 

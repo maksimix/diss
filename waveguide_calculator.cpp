@@ -117,9 +117,22 @@ QString validateParameters(const WaveguideParameters &parameters)
                             !positiveFinite(plate.aperture_height_mm))) {
                 return QStringLiteral("Размеры окна пластины должны быть конечными и больше нуля.");
             }
-            if (std::abs(plate.aperture_offset_x_mm) + half_span_x >= 0.5 * plate_width_mm ||
-                std::abs(plate.aperture_offset_y_mm) + half_span_y >= 0.5 * plate_height_mm) {
-                return QStringLiteral("Окно должно целиком помещаться внутри пластины, не касаясь её краёв.");
+            // A rectangular window may reach the plate edge (inductive and
+            // capacitive irises, solved by mode matching); a circular one must
+            // stay strictly inside, tangency would break the FEM booleans.
+            const double slack_mm = circular ? 0.0 : 1.0e-6;
+            const bool exceeds_x = circular
+                                       ? std::abs(plate.aperture_offset_x_mm) + half_span_x >=
+                                             0.5 * plate_width_mm
+                                       : std::abs(plate.aperture_offset_x_mm) + half_span_x >
+                                             0.5 * plate_width_mm + slack_mm;
+            const bool exceeds_y = circular
+                                       ? std::abs(plate.aperture_offset_y_mm) + half_span_y >=
+                                             0.5 * plate_height_mm
+                                       : std::abs(plate.aperture_offset_y_mm) + half_span_y >
+                                             0.5 * plate_height_mm + slack_mm;
+            if (exceeds_x || exceeds_y) {
+                return QStringLiteral("Окно должно помещаться внутри пластины (круглое — не касаясь краёв).");
             }
             if (plate.post_enabled) {
                 if (!positiveFinite(plate.post_width_mm) ||
@@ -200,6 +213,22 @@ void applyAccuracyLevel(em::FemSolverSettings &fem, int level)
     }
 }
 
+em::SolverMethod toEmSolverMethod(int method)
+{
+    switch (method) {
+    case 1:
+        return em::SolverMethod::AnalyticRectangular;
+    case 2:
+        return em::SolverMethod::TransversePartition;
+    case 3:
+        return em::SolverMethod::ModeMatching;
+    case 4:
+        return em::SolverMethod::FiniteElement;
+    default:
+        return em::SolverMethod::Automatic;
+    }
+}
+
 em::SimulationRequest buildRequest(const WaveguideParameters &parameters,
                                    double inner_width_mm,
                                    double inner_height_mm)
@@ -218,6 +247,7 @@ em::SimulationRequest buildRequest(const WaveguideParameters &parameters,
     request.settings.fem.relative_tolerance = 1.0e-6;
     request.settings.fem.maximum_iterations = 1200;
     applyAccuracyLevel(request.settings.fem, parameters.accuracy_level);
+    request.settings.solver_method = toEmSolverMethod(parameters.solver_method);
 
     if (parameters.slot_enabled) {
         em::SlotGeometry slot;

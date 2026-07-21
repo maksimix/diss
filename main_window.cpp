@@ -1,15 +1,24 @@
 #include "main_window.h"
 
 #include "calculation_worker.h"
+#include "cst_ribbon.h"
+#include "expression_spin_box.h"
+#include "model_serialization.h"
+#include "parameter_list_widget.h"
 #include "waveguide_opengl_widget.h"
 
+#include <QtCore/QFileInfo>
 #include <QtCore/QLocale>
 #include <QtCore/QSignalBlocker>
+#include <QtGui/QAction>
 #include <QtGui/QPainter>
 #include <QtWidgets/QAbstractItemView>
+#include <QtWidgets/QFileDialog>
 #include <QtWidgets/QCheckBox>
 #include <QtWidgets/QComboBox>
 #include <QtWidgets/QDialog>
+#include <QtWidgets/QDialogButtonBox>
+#include <QtWidgets/QDockWidget>
 #include <QtWidgets/QDoubleSpinBox>
 #include <QtWidgets/QFormLayout>
 #include <QtWidgets/QGridLayout>
@@ -149,6 +158,75 @@ QProgressBar {
 QProgressBar::chunk {
     background: #2aa7d6;
 }
+QTabBar#cstRibbonTabBar {
+    background: #f4f4f4;
+}
+QTabBar#cstRibbonTabBar::tab {
+    background: transparent;
+    border: 1px solid transparent;
+    border-bottom: none;
+    padding: 4px 14px;
+    margin-right: 1px;
+    color: #24384a;
+}
+QTabBar#cstRibbonTabBar::tab:hover {
+    background: #e2eef7;
+}
+QTabBar#cstRibbonTabBar::tab:selected {
+    background: #ffffff;
+    border: 1px solid #c4c4c4;
+    border-bottom: 1px solid #ffffff;
+    color: #10528a;
+    font-weight: 600;
+}
+QStackedWidget#cstRibbonPages {
+    background: #ffffff;
+    border: 1px solid #c4c4c4;
+}
+QStackedWidget#cstRibbonPages QToolButton {
+    border: 1px solid transparent;
+    border-radius: 2px;
+    padding: 2px 4px;
+    color: #1f1f1f;
+}
+QStackedWidget#cstRibbonPages QToolButton:hover {
+    background: #e2eef7;
+    border-color: #9dc7e4;
+}
+QStackedWidget#cstRibbonPages QToolButton:pressed {
+    background: #c9e2f3;
+    border-color: #5fa8d3;
+}
+QStackedWidget#cstRibbonPages QToolButton:disabled {
+    color: #a0a0a0;
+}
+QStackedWidget#cstRibbonPages QWidget {
+    background: #ffffff;
+}
+QStackedWidget#cstRibbonPages QComboBox,
+QStackedWidget#cstRibbonPages QDoubleSpinBox {
+    background: #ffffff;
+}
+QDockWidget {
+    titlebar-close-icon: none;
+    font-weight: 600;
+}
+QDockWidget::title {
+    background: #e3e3e3;
+    border: 1px solid #c4c4c4;
+    padding: 3px 6px;
+}
+QTableWidget {
+    background: #ffffff;
+    border: 1px solid #b9b9b9;
+    gridline-color: #dcdcdc;
+    alternate-background-color: #f7f7f7;
+}
+QHeaderView::section {
+    background: #ededed;
+    border: 1px solid #c9c9c9;
+    padding: 2px 6px;
+}
 )");
 }
 
@@ -226,7 +304,7 @@ private:
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
 {
-    setWindowTitle(QStringLiteral("Waveguide CST-like OpenGL"));
+    updateWindowTitle();
     applyCstStyle();
 
     open_gl_widget_ = new WaveguideOpenGLWidget(this);
@@ -249,6 +327,8 @@ MainWindow::MainWindow(QWidget *parent)
     QWidget *parameter_panel = createParameterPanel();
     QWidget *projection_panel = createProjectionPanel();
     QWidget *result_panel = createResultPanel();
+    createRibbon();
+    createParameterDock();
 
     QSplitter *main_splitter = new QSplitter(Qt::Horizontal, this);
     main_splitter->addWidget(parameter_panel);
@@ -264,15 +344,21 @@ MainWindow::MainWindow(QWidget *parent)
     vertical_splitter->addWidget(result_panel);
     vertical_splitter->setStretchFactor(0, 1);
     vertical_splitter->setStretchFactor(1, 0);
-    setCentralWidget(vertical_splitter);
+
+    // Лента живёт над центральной областью, как в CST: строка вкладок сразу под
+    // заголовком окна, ниже — рабочая область.
+    QWidget *central = new QWidget(this);
+    QVBoxLayout *central_layout = new QVBoxLayout(central);
+    central_layout->setContentsMargins(0, 0, 0, 0);
+    central_layout->setSpacing(0);
+    central_layout->addWidget(ribbon_bar_);
+    central_layout->addWidget(vertical_splitter, 1);
+    setCentralWidget(central);
 
     open_gl_widget_->setSlotEditedCallback([this](const WaveguideParameters &parameters) {
         applyInteractiveSlotParameters(parameters);
     });
 
-    calculation_timer_.setSingleShot(true);
-    calculation_timer_.setInterval(240);
-    connect(&calculation_timer_, &QTimer::timeout, this, &MainWindow::runCalculation);
     progress_timer_.setInterval(1000);
     connect(&progress_timer_, &QTimer::timeout, this, &MainWindow::updateCalculationProgress);
 
@@ -284,7 +370,11 @@ MainWindow::MainWindow(QWidget *parent)
     connect(worker_, &CalculationWorker::progressed, this, &MainWindow::handleCalculationProgress);
     worker_thread_.start();
 
-    scheduleCalculation();
+    // Стартовое состояние: геометрия показана, решатель ждёт кнопки Start.
+    updateModelPreview();
+    updateSimulationActionState();
+    setStatus(QStringLiteral("Модель готова. Нажмите «Начать расчёт» на вкладке Simulation."),
+              false);
 }
 
 MainWindow::~MainWindow()
@@ -296,19 +386,34 @@ MainWindow::~MainWindow()
     worker_thread_.wait();
 }
 
-void MainWindow::scheduleCalculation()
+void MainWindow::markModelChanged()
 {
+    // Изменение геометрии отменяет незавершённый расчёт: его результат уже
+    // относился бы к прежней модели.
     latest_request_id_ = 0;
     if (worker_ != nullptr) {
         worker_->setLatestRequestId(0);
     }
+    if (calculation_running_) {
+        calculation_running_ = false;
+        progress_timer_.stop();
+        calculation_progress_bar_->setVisible(false);
+        calculation_time_label_->setVisible(false);
+    }
+
+    model_changed_since_run_ = true;
     updateModelPreview();
-    setStatus(QStringLiteral("Параметры изменены, готовлю перерасчет..."), false);
-    calculation_timer_.start();
+    updateSimulationActionState();
+    setStatus(QStringLiteral("Модель изменена. Нажмите «Начать расчёт», чтобы пересчитать поле."),
+              false);
 }
 
 void MainWindow::runCalculation()
 {
+    if (calculation_running_) {
+        return;
+    }
+
     const int request_id = next_request_id_++;
     latest_request_id_ = request_id;
     worker_->setLatestRequestId(request_id);
@@ -330,6 +435,7 @@ void MainWindow::runCalculation()
     calculation_time_label_->setVisible(true);
     progress_timer_.start();
     updateCalculationProgress();
+    updateSimulationActionState();
     setStatus(active_calculation_is_fem_
                   ? QStringLiteral("FEM-расчет выполняется: пока показано предыдущее поле, оно еще не учитывает новую геометрию.")
                   : QStringLiteral("Расчет поля выполняется в отдельном потоке..."),
@@ -347,8 +453,10 @@ void MainWindow::handleCalculationResult(int request_id, const WaveguideCalculat
                                   ? calculation_elapsed_timer_.elapsed()
                                   : 0;
     calculation_running_ = false;
+    model_changed_since_run_ = false;
     calculation_stage_.clear();
     progress_timer_.stop();
+    updateSimulationActionState();
     calculation_progress_bar_->setValue(100);
     calculation_time_label_->setText(
         QStringLiteral("Завершено за %1").arg(formattedDuration(elapsed_ms)));
@@ -358,6 +466,12 @@ void MainWindow::handleCalculationResult(int request_id, const WaveguideCalculat
                                         : elapsed_ms;
     }
 
+    showResult(result);
+}
+
+void MainWindow::showResult(const WaveguideCalculationResult &result)
+{
+    last_result_ = result;
     result_text_edit_->setPlainText(buildResultText(result));
 
     if (!result.valid) {
@@ -464,67 +578,8 @@ QWidget *MainWindow::createParameterPanel()
     slot_enabled_check_box_->setChecked(parameters_.slot_enabled);
     panel_layout->addWidget(slot_enabled_check_box_);
 
-    add_plate_button_ = new QPushButton(QStringLiteral("Добавить пластину"), panel);
-    panel_layout->addWidget(add_plate_button_);
-
-    add_iris_button_ = new QPushButton(QStringLiteral("Добавить диафрагму (окно)"), panel);
-    add_iris_button_->setToolTip(
-        QStringLiteral("Пластина во всё сечение волновода с прямоугольным окном внутри"));
-    panel_layout->addWidget(add_iris_button_);
-
-    QPushButton *add_round_iris_button =
-        new QPushButton(QStringLiteral("Круглая диафрагма со штырём"), panel);
-    add_round_iris_button->setToolTip(
-        QStringLiteral("Пластина во всё сечение с круглым отверстием и соосным штырём внутри"));
-    panel_layout->addWidget(add_round_iris_button);
-
-    QPushButton *symmetric_profile_button =
-        new QPushButton(QStringLiteral("Профиль: симметричное сужение"), panel);
-    symmetric_profile_button->setToolTip(
-        QStringLiteral("Волновод сужается с обеих боковых стенок на участке по длине"));
-    panel_layout->addWidget(symmetric_profile_button);
-
-    QPushButton *single_step_profile_button =
-        new QPushButton(QStringLiteral("Профиль: уступ на стенке"), panel);
-    single_step_profile_button->setToolTip(
-        QStringLiteral("Волновод сужается с одной боковой стенки на участке по длине"));
-    panel_layout->addWidget(single_step_profile_button);
-
-    QGroupBox *solve_group = new QGroupBox(QStringLiteral("Расчёт"), panel);
-    QFormLayout *solve_layout = new QFormLayout(solve_group);
-    QComboBox *accuracy_combo_box = new QComboBox(solve_group);
-    accuracy_combo_box->addItem(QStringLiteral("Быстро (грубая сетка)"));
-    accuracy_combo_box->addItem(QStringLiteral("Обычное"));
-    accuracy_combo_box->addItem(QStringLiteral("Высокое (мелкая сетка)"));
-    accuracy_combo_box->setCurrentIndex(std::clamp(parameters_.accuracy_level, 0, 2));
-    accuracy_combo_box->setToolTip(
-        QStringLiteral("Влияет только на расчёт с пластинами, диафрагмой или щелью (FEM).\n"
-                       "Более высокое качество убирает «мозаику» поля ценой времени расчёта."));
-    QLabel *accuracy_hint_label = new QLabel(solve_group);
-    accuracy_hint_label->setWordWrap(true);
-    accuracy_hint_label->setStyleSheet(QStringLiteral("color: #4a5a66;"));
-    const auto update_accuracy_hint = [accuracy_hint_label](int level) {
-        static const char *const hints[] = {
-            "Замер: ~13 с (7 тыс. неизвестных). Поле заметно «мозаичное».",
-            "Замер: ~1 мин (17 тыс.). Базовое качество.",
-            "Замер: ~5 мин (40 тыс.). Мозаика слабее; S-параметры заметно точнее.",
-        };
-        accuracy_hint_label->setText(QString::fromUtf8(hints[std::clamp(level, 0, 2)]));
-    };
-    update_accuracy_hint(accuracy_combo_box->currentIndex());
-    solve_layout->addRow(QStringLiteral("Качество"), accuracy_combo_box);
-    solve_layout->addRow(accuracy_hint_label);
-    panel_layout->addWidget(solve_group);
-
-    connect(accuracy_combo_box,
-            qOverload<int>(&QComboBox::currentIndexChanged),
-            this,
-            [this, update_accuracy_hint](int index) {
-                parameters_.accuracy_level = index;
-                update_accuracy_hint(index);
-                scheduleCalculation();
-            });
-
+    // Кнопки построения и настройки расчёта переехали на ленту; на панели
+    // проекта остаётся дерево объектов и управление отображением.
     QGroupBox *view_group = new QGroupBox(QStringLiteral("Отображение"), panel);
     QFormLayout *view_layout = new QFormLayout(view_group);
     field_mode_combo_box_ = new QComboBox(view_group);
@@ -555,60 +610,8 @@ QWidget *MainWindow::createParameterPanel()
             [this](bool checked) {
                 parameters_.slot_enabled = checked;
                 rebuildObjectTree();
-                scheduleCalculation();
+                markModelChanged();
             });
-    connect(add_plate_button_, &QPushButton::clicked, this, [this]() {
-        showPlateDialog(-1);
-    });
-    connect(add_iris_button_, &QPushButton::clicked, this, [this]() {
-        showPlateDialog(-1, true);
-    });
-    connect(add_round_iris_button, &QPushButton::clicked, this, [this]() {
-        showPlateDialog(-1, true, true);
-    });
-    // H-plane profile templates. A step machined into the side wall is
-    // geometrically the same cavity as a PEC block filling that corner, so the
-    // profile reuses the (already meshed and FEM-routed) plate bodies.
-    const auto insert_profile = [this](bool symmetric) {
-        const double inner_width = parameters_.width_mm - 2.0 * parameters_.wall_thickness_mm;
-        const double inner_depth = parameters_.depth_mm - 2.0 * parameters_.wall_thickness_mm;
-        const double half_width = 0.5 * inner_width;
-        const double half_depth = 0.5 * inner_depth;
-        const double section_length = std::min(0.35 * parameters_.length_mm, 12.0);
-        // Mild default steps: a deeper narrowing pushes the narrow section below
-        // cutoff (evanescent), which is a valid design but a confusing default.
-        const double inset = symmetric ? 0.15 * inner_width : 0.25 * inner_width;
-
-        const auto make_step = [&](const QString &name, double x_min, double x_max) {
-            PecPlateParameters step;
-            step.name = name;
-            step.enabled = true;
-            step.x_min_mm = x_min;
-            step.x_max_mm = x_max;
-            step.y_min_mm = -half_depth;
-            step.y_max_mm = half_depth;
-            step.z_min_mm = -0.5 * section_length;
-            step.z_max_mm = 0.5 * section_length;
-            parameters_.pec_plates.push_back(step);
-        };
-
-        const int base = parameters_.pec_plates.size() + 1;
-        if (symmetric) {
-            make_step(QStringLiteral("step_%1_left").arg(base), -half_width, -half_width + inset);
-            make_step(QStringLiteral("step_%1_right").arg(base), half_width - inset, half_width);
-        } else {
-            make_step(QStringLiteral("step_%1").arg(base), half_width - inset, half_width);
-        }
-        selected_plate_index_ = parameters_.pec_plates.size() - 1;
-        rebuildObjectTree();
-        scheduleCalculation();
-    };
-    connect(symmetric_profile_button, &QPushButton::clicked, this, [insert_profile]() {
-        insert_profile(true);
-    });
-    connect(single_step_profile_button, &QPushButton::clicked, this, [insert_profile]() {
-        insert_profile(false);
-    });
     connect(object_tree_widget_,
             &QTreeWidget::itemDoubleClicked,
             this,
@@ -643,6 +646,45 @@ QWidget *MainWindow::createParameterPanel()
 
     rebuildObjectTree();
     return panel;
+}
+
+// H-plane profile templates. A step machined into the side wall is
+// geometrically the same cavity as a PEC block filling that corner, so the
+// profile reuses the (already meshed and FEM-routed) plate bodies.
+void MainWindow::insertProfileTemplate(bool symmetric)
+{
+    const double inner_width = parameters_.width_mm - 2.0 * parameters_.wall_thickness_mm;
+    const double inner_depth = parameters_.depth_mm - 2.0 * parameters_.wall_thickness_mm;
+    const double half_width = 0.5 * inner_width;
+    const double half_depth = 0.5 * inner_depth;
+    const double section_length = std::min(0.35 * parameters_.length_mm, 12.0);
+    // Mild default steps: a deeper narrowing pushes the narrow section below
+    // cutoff (evanescent), which is a valid design but a confusing default.
+    const double inset = symmetric ? 0.15 * inner_width : 0.25 * inner_width;
+
+    const auto make_step = [&](const QString &name, double x_min, double x_max) {
+        PecPlateParameters step;
+        step.name = name;
+        step.enabled = true;
+        step.x_min_mm = x_min;
+        step.x_max_mm = x_max;
+        step.y_min_mm = -half_depth;
+        step.y_max_mm = half_depth;
+        step.z_min_mm = -0.5 * section_length;
+        step.z_max_mm = 0.5 * section_length;
+        parameters_.pec_plates.push_back(step);
+    };
+
+    const int base = parameters_.pec_plates.size() + 1;
+    if (symmetric) {
+        make_step(QStringLiteral("step_%1_left").arg(base), -half_width, -half_width + inset);
+        make_step(QStringLiteral("step_%1_right").arg(base), half_width - inset, half_width);
+    } else {
+        make_step(QStringLiteral("step_%1").arg(base), half_width - inset, half_width);
+    }
+    selected_plate_index_ = parameters_.pec_plates.size() - 1;
+    rebuildObjectTree();
+    markModelChanged();
 }
 
 QWidget *MainWindow::createProjectionPanel()
@@ -712,7 +754,8 @@ QDoubleSpinBox *MainWindow::createSpinBox(double minimum,
                                           const QString &suffix,
                                           QWidget *parent)
 {
-    QDoubleSpinBox *spin_box = new QDoubleSpinBox(parent ? parent : this);
+    // Все числовые поля модели принимают выражения с переменными, как в CST.
+    QDoubleSpinBox *spin_box = new ExpressionSpinBox(&parameter_store_, parent ? parent : this);
     spin_box->setRange(minimum, maximum);
     spin_box->setValue(value);
     spin_box->setSingleStep(step);
@@ -736,7 +779,7 @@ void MainWindow::applyInteractiveSlotParameters(const WaveguideParameters &param
     }
 
     rebuildObjectTree();
-    scheduleCalculation();
+    markModelChanged();
 }
 
 void MainWindow::rebuildObjectTree()
@@ -988,7 +1031,7 @@ void MainWindow::showWaveguideDialog()
             material_combo_box->currentData().toDouble();
         parameters_.frequency_ghz = frequency_spin_box->value();
         rebuildObjectTree();
-        scheduleCalculation();
+        markModelChanged();
         return true;
     };
 
@@ -1164,7 +1207,7 @@ void MainWindow::showSlotDialog()
             slot_enabled_check_box_->setChecked(true);
         }
         rebuildObjectTree();
-        scheduleCalculation();
+        markModelChanged();
         return true;
     };
 
@@ -1430,11 +1473,22 @@ void MainWindow::showPlateDialog(int plate_index, bool iris_template, bool round
                 circular ? plate.aperture_radius_mm : 0.5 * plate.aperture_width_mm;
             const double span_y =
                 circular ? plate.aperture_radius_mm : 0.5 * plate.aperture_height_mm;
-            if (std::abs(plate.aperture_offset_x_mm) + span_x >= 0.5 * (x_max - x_min) ||
-                std::abs(plate.aperture_offset_y_mm) + span_y >= 0.5 * (y_max - y_min)) {
+            const double slack = circular ? 0.0 : 1.0e-6;
+            const bool exceeds_x = circular
+                                       ? std::abs(plate.aperture_offset_x_mm) + span_x >=
+                                             0.5 * (x_max - x_min)
+                                       : std::abs(plate.aperture_offset_x_mm) + span_x >
+                                             0.5 * (x_max - x_min) + slack;
+            const bool exceeds_y = circular
+                                       ? std::abs(plate.aperture_offset_y_mm) + span_y >=
+                                             0.5 * (y_max - y_min)
+                                       : std::abs(plate.aperture_offset_y_mm) + span_y >
+                                             0.5 * (y_max - y_min) + slack;
+            if (exceeds_x || exceeds_y) {
                 QMessageBox::warning(&dialog,
                                      QStringLiteral("PEC Plate"),
-                                     QStringLiteral("Окно должно целиком помещаться внутри пластины."));
+                                     QStringLiteral("Окно должно помещаться внутри пластины "
+                                                    "(круглое — не касаясь краёв)."));
                 return;
             }
             if (plate.post_enabled &&
@@ -1454,7 +1508,7 @@ void MainWindow::showPlateDialog(int plate_index, bool iris_template, bool round
             selected_plate_index_ = plate_index;
         }
         rebuildObjectTree();
-        scheduleCalculation();
+        markModelChanged();
         dialog.accept();
     });
     connect(cancel_button, &QPushButton::clicked, &dialog, &QDialog::reject);
@@ -1463,7 +1517,7 @@ void MainWindow::showPlateDialog(int plate_index, bool iris_template, bool round
             parameters_.pec_plates.removeAt(plate_index);
             selected_plate_index_ = -1;
             rebuildObjectTree();
-            scheduleCalculation();
+            markModelChanged();
         }
         dialog.accept();
     });
@@ -1531,7 +1585,7 @@ void MainWindow::showExcitationDialog()
                                : name_line_edit->text().trimmed();
         parameters_.frequency_ghz = frequency_spin_box->value();
         rebuildObjectTree();
-        scheduleCalculation();
+        markModelChanged();
         return true;
     };
 
@@ -1554,6 +1608,512 @@ void MainWindow::showExcitationDialog()
 void MainWindow::applyCstStyle()
 {
     setStyleSheet(cstStyleSheet());
+}
+
+QString MainWindow::solverMethodName(int method) const
+{
+    static const char *const names[] = {
+        "Автоматически",
+        "Аналитический (пустой волновод)",
+        "Метод поперечных сечений",
+        "Метод частичных областей",
+        "Метод конечных элементов (FEM)",
+    };
+    return QString::fromUtf8(names[std::clamp(method, 0, 4)]);
+}
+
+void MainWindow::createRibbon()
+{
+    ribbon_bar_ = new RibbonBar(this);
+
+    // Действие принадлежит окну и добавляется в его список: иначе горячая
+    // клавиша не сработает, пока вкладка ленты с этой кнопкой скрыта.
+    const auto make_action = [this](const QString &text, const QString &tip) {
+        QAction *action = new QAction(text, this);
+        action->setToolTip(tip);
+        addAction(action);
+        return action;
+    };
+
+    // ------------------------------------------------------------- File ----
+    RibbonTab *file_tab = ribbon_bar_->addRibbonTab(QStringLiteral("File"));
+    RibbonGroup *project_group = file_tab->addGroup(QStringLiteral("Проект"));
+
+    QAction *open_action =
+        make_action(QStringLiteral("Открыть"), QStringLiteral("Открыть модель волновода (.wgm)"));
+    open_action->setShortcut(QKeySequence::Open);
+    connect(open_action, &QAction::triggered, this, &MainWindow::openModelFile);
+    project_group->addLargeButton(open_action, RibbonIcon::Open);
+
+    QAction *save_action =
+        make_action(QStringLiteral("Сохранить"), QStringLiteral("Сохранить модель и расчёт"));
+    save_action->setShortcut(QKeySequence::Save);
+    connect(save_action, &QAction::triggered, this, [this]() { saveModelFile(); });
+    project_group->addLargeButton(save_action, RibbonIcon::Save);
+
+    QAction *save_as_action = make_action(QStringLiteral("Сохранить\nкак"),
+                                          QStringLiteral("Сохранить модель в другой файл"));
+    save_as_action->setShortcut(QKeySequence::SaveAs);
+    connect(save_as_action, &QAction::triggered, this, [this]() { saveModelFileAs(); });
+    project_group->addLargeButton(save_as_action, RibbonIcon::SaveAs);
+
+    RibbonGroup *exit_group = file_tab->addGroup(QStringLiteral("Выход"));
+    QAction *quit_action =
+        make_action(QStringLiteral("Закрыть"), QStringLiteral("Закрыть приложение"));
+    quit_action->setShortcut(QKeySequence::Quit);
+    connect(quit_action, &QAction::triggered, this, &QWidget::close);
+    exit_group->addLargeButton(quit_action, RibbonIcon::Quit);
+
+    // ------------------------------------------------------------- Home ----
+    RibbonTab *home_tab = ribbon_bar_->addRibbonTab(QStringLiteral("Home"));
+    RibbonGroup *home_file_group = home_tab->addGroup(QStringLiteral("Файл"));
+    home_file_group->addSmallButton(open_action, RibbonIcon::Open);
+    home_file_group->addSmallButton(save_action, RibbonIcon::Save);
+
+    RibbonGroup *home_simulation_group = home_tab->addGroup(QStringLiteral("Simulation"));
+
+    start_simulation_action_ = make_action(
+        QStringLiteral("Начать\nрасчёт"),
+        QStringLiteral("Запустить решатель выбранным методом (F5). Пока кнопка не нажата, "
+                       "изменения геометрии не пересчитываются."));
+    start_simulation_action_->setShortcut(QKeySequence(Qt::Key_F5));
+    connect(start_simulation_action_, &QAction::triggered, this, &MainWindow::runCalculation);
+    home_simulation_group->addLargeButton(start_simulation_action_, RibbonIcon::Start);
+
+    QAction *setup_solver_action =
+        make_action(QStringLiteral("Настройка\nрешателя"),
+                    QStringLiteral("Выбрать метод расчёта и уровень качества сетки"));
+    connect(setup_solver_action, &QAction::triggered, this, &MainWindow::showSolverSetupDialog);
+    home_simulation_group->addLargeButton(setup_solver_action, RibbonIcon::Setup);
+
+    RibbonGroup *home_edit_group = home_tab->addGroup(QStringLiteral("Правка"));
+    QAction *parameters_action =
+        make_action(QStringLiteral("Параметры"),
+                    QStringLiteral("Показать или скрыть список переменных модели"));
+    parameters_action->setCheckable(true);
+    parameters_action->setChecked(true);
+    connect(parameters_action, &QAction::toggled, this, [this](bool visible) {
+        if (parameter_dock_ != nullptr) {
+            parameter_dock_->setVisible(visible);
+        }
+    });
+    home_edit_group->addLargeButton(parameters_action, RibbonIcon::Parameters);
+
+    QAction *waveguide_action = make_action(QStringLiteral("Волновод"),
+                                            QStringLiteral("Размеры и материал стенок волновода"));
+    connect(waveguide_action, &QAction::triggered, this, &MainWindow::showWaveguideDialog);
+    home_edit_group->addSmallButton(waveguide_action, RibbonIcon::Waveguide);
+
+    QAction *excitation_action =
+        make_action(QStringLiteral("Возбуждение"), QStringLiteral("Частота и мода возбуждения"));
+    connect(excitation_action, &QAction::triggered, this, &MainWindow::showExcitationDialog);
+    home_edit_group->addSmallButton(excitation_action, RibbonIcon::Excitation);
+
+    QAction *slot_action =
+        make_action(QStringLiteral("Щель"), QStringLiteral("Параметры щели в стенке волновода"));
+    connect(slot_action, &QAction::triggered, this, &MainWindow::showSlotDialog);
+    home_edit_group->addSmallButton(slot_action, RibbonIcon::Slot);
+
+    // ---------------------------------------------------------- Modeling ---
+    RibbonTab *modeling_tab = ribbon_bar_->addRibbonTab(QStringLiteral("Modeling"));
+    RibbonGroup *shapes_group = modeling_tab->addGroup(QStringLiteral("Объекты"));
+
+    QAction *add_plate_action =
+        make_action(QStringLiteral("Пластина"), QStringLiteral("Добавить металлическую пластину"));
+    connect(add_plate_action, &QAction::triggered, this, [this]() { showPlateDialog(-1); });
+    shapes_group->addLargeButton(add_plate_action, RibbonIcon::Plate);
+
+    QAction *add_iris_action = make_action(
+        QStringLiteral("Диафрагма"),
+        QStringLiteral("Пластина во всё сечение волновода с прямоугольным окном внутри"));
+    connect(add_iris_action, &QAction::triggered, this, [this]() { showPlateDialog(-1, true); });
+    shapes_group->addLargeButton(add_iris_action, RibbonIcon::Iris);
+
+    QAction *add_round_iris_action = make_action(
+        QStringLiteral("Круглая\nсо штырём"),
+        QStringLiteral("Пластина во всё сечение с круглым отверстием и соосным штырём внутри"));
+    connect(add_round_iris_action, &QAction::triggered, this, [this]() {
+        showPlateDialog(-1, true, true);
+    });
+    shapes_group->addLargeButton(add_round_iris_action, RibbonIcon::RoundIris);
+
+    RibbonGroup *profile_group = modeling_tab->addGroup(QStringLiteral("Профиль волновода"));
+    QAction *symmetric_profile_action =
+        make_action(QStringLiteral("Симметричное\nсужение"),
+                    QStringLiteral("Волновод сужается с обеих боковых стенок на участке по длине"));
+    connect(symmetric_profile_action, &QAction::triggered, this, [this]() {
+        insertProfileTemplate(true);
+    });
+    profile_group->addLargeButton(symmetric_profile_action, RibbonIcon::Profile);
+
+    QAction *step_profile_action =
+        make_action(QStringLiteral("Уступ\nна стенке"),
+                    QStringLiteral("Волновод сужается с одной боковой стенки на участке по длине"));
+    connect(step_profile_action, &QAction::triggered, this, [this]() {
+        insertProfileTemplate(false);
+    });
+    profile_group->addLargeButton(step_profile_action, RibbonIcon::Profile);
+
+    RibbonGroup *modeling_edit_group = modeling_tab->addGroup(QStringLiteral("Правка"));
+    modeling_edit_group->addSmallButton(waveguide_action, RibbonIcon::Waveguide);
+    modeling_edit_group->addSmallButton(slot_action, RibbonIcon::Slot);
+    modeling_edit_group->addSmallButton(excitation_action, RibbonIcon::Excitation);
+
+    // -------------------------------------------------------- Simulation ---
+    RibbonTab *simulation_tab = ribbon_bar_->addRibbonTab(QStringLiteral("Simulation"));
+    RibbonGroup *solver_group = simulation_tab->addGroup(QStringLiteral("Решатель"));
+    solver_group->addLargeButton(start_simulation_action_, RibbonIcon::Start);
+    solver_group->addLargeButton(setup_solver_action, RibbonIcon::Setup);
+
+    RibbonGroup *settings_group = simulation_tab->addGroup(QStringLiteral("Настройки расчёта"));
+
+    solver_method_combo_box_ = new QComboBox();
+    for (int method = 0; method <= 4; ++method) {
+        solver_method_combo_box_->addItem(solverMethodName(method));
+    }
+    solver_method_combo_box_->setCurrentIndex(std::clamp(parameters_.solver_method, 0, 4));
+    solver_method_combo_box_->setToolTip(
+        QStringLiteral("«Автоматически» подбирает самый быстрый подходящий метод. Явно выбранный "
+                       "метод сообщит об ошибке, если геометрия ему не по силам."));
+    connect(solver_method_combo_box_,
+            qOverload<int>(&QComboBox::currentIndexChanged),
+            this,
+            [this](int index) {
+                parameters_.solver_method = index;
+                markModelChanged();
+            });
+    settings_group->addLabeledWidget(QStringLiteral("Метод"), solver_method_combo_box_);
+
+    accuracy_combo_box_ = new QComboBox();
+    accuracy_combo_box_->addItem(QStringLiteral("Быстро (грубая сетка)"));
+    accuracy_combo_box_->addItem(QStringLiteral("Обычное"));
+    accuracy_combo_box_->addItem(QStringLiteral("Высокое (мелкая сетка)"));
+    accuracy_combo_box_->setCurrentIndex(std::clamp(parameters_.accuracy_level, 0, 2));
+    accuracy_combo_box_->setToolTip(
+        QStringLiteral("Влияет только на расчёт с пластинами, диафрагмой или щелью (FEM).\n"
+                       "Более высокое качество убирает «мозаику» поля ценой времени расчёта."));
+    connect(accuracy_combo_box_,
+            qOverload<int>(&QComboBox::currentIndexChanged),
+            this,
+            [this](int index) {
+                parameters_.accuracy_level = index;
+                markModelChanged();
+            });
+    settings_group->addLabeledWidget(QStringLiteral("Качество"), accuracy_combo_box_);
+
+    RibbonGroup *simulation_edit_group = simulation_tab->addGroup(QStringLiteral("Возбуждение"));
+    simulation_edit_group->addLargeButton(excitation_action, RibbonIcon::Excitation);
+
+    // --------------------------------------------------- Post-Processing ---
+    RibbonTab *post_tab = ribbon_bar_->addRibbonTab(QStringLiteral("Post-Processing"));
+    RibbonGroup *field_group = post_tab->addGroup(QStringLiteral("Поля"));
+    QAction *fields_action =
+        make_action(QStringLiteral("Отображение\nполей"),
+                    QStringLiteral("Панель управления отображением полей слева"));
+    connect(fields_action, &QAction::triggered, this, [this]() {
+        if (field_mode_combo_box_ != nullptr) {
+            field_mode_combo_box_->setFocus();
+        }
+    });
+    field_group->addLargeButton(fields_action, RibbonIcon::Fields);
+
+    RibbonGroup *report_group = post_tab->addGroup(QStringLiteral("Отчёт"));
+    QAction *report_action = make_action(QStringLiteral("Итоги\nрасчёта"),
+                                         QStringLiteral("Перейти к текстовому отчёту внизу окна"));
+    connect(report_action, &QAction::triggered, this, [this]() {
+        if (result_text_edit_ != nullptr) {
+            result_text_edit_->setFocus();
+        }
+    });
+    report_group->addLargeButton(report_action, RibbonIcon::Report);
+
+    // ------------------------------------------------------------- View ----
+    RibbonTab *view_tab = ribbon_bar_->addRibbonTab(QStringLiteral("View"));
+    RibbonGroup *view_group = view_tab->addGroup(QStringLiteral("Вид"));
+    QAction *reset_view_action =
+        make_action(QStringLiteral("Сбросить\nвид"), QStringLiteral("Вернуть камеру в исходное положение"));
+    connect(reset_view_action, &QAction::triggered, open_gl_widget_, &WaveguideOpenGLWidget::resetView);
+    view_group->addLargeButton(reset_view_action, RibbonIcon::ResetView);
+
+    RibbonGroup *panels_group = view_tab->addGroup(QStringLiteral("Панели"));
+    panels_group->addSmallButton(parameters_action, RibbonIcon::Parameters);
+
+    ribbon_bar_->setCurrentTabIndex(1);
+}
+
+void MainWindow::createParameterDock()
+{
+    parameter_dock_ = new QDockWidget(QStringLiteral("Список параметров"), this);
+    parameter_dock_->setObjectName(QStringLiteral("parameterDock"));
+    parameter_dock_->setAllowedAreas(Qt::BottomDockWidgetArea | Qt::TopDockWidgetArea);
+
+    parameter_list_widget_ = new ParameterListWidget(&parameter_store_, parameter_dock_);
+    parameter_dock_->setWidget(parameter_list_widget_);
+    addDockWidget(Qt::BottomDockWidgetArea, parameter_dock_);
+    resizeDocks({parameter_dock_}, {150}, Qt::Vertical);
+
+    // Переменная сама по себе ничего не двигает: она влияет на модель только
+    // через поля, куда вписано выражение. Поэтому здесь достаточно пометить
+    // модель изменённой, чтобы пользователь заново нажал «Начать расчёт».
+    connect(parameter_list_widget_,
+            &ParameterListWidget::parametersEdited,
+            this,
+            &MainWindow::markModelChanged);
+}
+
+void MainWindow::showSolverSetupDialog()
+{
+    QDialog dialog(this);
+    dialog.setWindowTitle(QStringLiteral("Настройка решателя"));
+    QVBoxLayout *layout = new QVBoxLayout(&dialog);
+
+    QGroupBox *method_group = new QGroupBox(QStringLiteral("Метод расчёта"), &dialog);
+    QFormLayout *method_layout = new QFormLayout(method_group);
+    QComboBox *method_combo_box = new QComboBox(method_group);
+    for (int method = 0; method <= 4; ++method) {
+        method_combo_box->addItem(solverMethodName(method));
+    }
+    method_combo_box->setCurrentIndex(std::clamp(parameters_.solver_method, 0, 4));
+    QLabel *method_hint = new QLabel(method_group);
+    method_hint->setWordWrap(true);
+    method_hint->setMinimumWidth(380);
+    method_hint->setStyleSheet(QStringLiteral("color: #4a5a66;"));
+    const auto update_method_hint = [method_hint](int method) {
+        static const char *const hints[] = {
+            "Диспетчер сам выбирает самый быстрый метод, способный описать текущую "
+            "геометрию, и переходит к FEM, если другие неприменимы.",
+            "Замкнутые формулы прямоугольного волновода. Мгновенно, но пластины, "
+            "диафрагмы и диэлектрики игнорировать нельзя — расчёт откажется идти.",
+            "Сшивание полей на плоской поперечной пластине. Быстро и точно для "
+            "перегородок, перекрывающих часть сечения.",
+            "Метод частичных областей для диафрагмы с прямоугольным окном: почти "
+            "аналитическая точность S-параметров за секунды.",
+            "Универсальный конечно-элементный расчёт. Считает любую геометрию, но "
+            "заметно дольше; качество сетки задаётся ниже.",
+        };
+        method_hint->setText(QString::fromUtf8(hints[std::clamp(method, 0, 4)]));
+    };
+    update_method_hint(method_combo_box->currentIndex());
+    connect(method_combo_box,
+            qOverload<int>(&QComboBox::currentIndexChanged),
+            &dialog,
+            update_method_hint);
+    method_layout->addRow(QStringLiteral("Метод"), method_combo_box);
+    method_layout->addRow(method_hint);
+    layout->addWidget(method_group);
+
+    QGroupBox *quality_group = new QGroupBox(QStringLiteral("Качество сетки (FEM)"), &dialog);
+    QFormLayout *quality_layout = new QFormLayout(quality_group);
+    QComboBox *quality_combo_box = new QComboBox(quality_group);
+    quality_combo_box->addItem(QStringLiteral("Быстро (грубая сетка)"));
+    quality_combo_box->addItem(QStringLiteral("Обычное"));
+    quality_combo_box->addItem(QStringLiteral("Высокое (мелкая сетка)"));
+    quality_combo_box->setCurrentIndex(std::clamp(parameters_.accuracy_level, 0, 2));
+    QLabel *quality_hint = new QLabel(quality_group);
+    quality_hint->setWordWrap(true);
+    quality_hint->setStyleSheet(QStringLiteral("color: #4a5a66;"));
+    const auto update_quality_hint = [quality_hint](int level) {
+        static const char *const hints[] = {
+            "Замер: ~13 с (7 тыс. неизвестных). Поле заметно «мозаичное».",
+            "Замер: ~1 мин (17 тыс.). Базовое качество.",
+            "Замер: ~5 мин (40 тыс.). Мозаика слабее; S-параметры заметно точнее.",
+        };
+        quality_hint->setText(QString::fromUtf8(hints[std::clamp(level, 0, 2)]));
+    };
+    update_quality_hint(quality_combo_box->currentIndex());
+    connect(quality_combo_box,
+            qOverload<int>(&QComboBox::currentIndexChanged),
+            &dialog,
+            update_quality_hint);
+    quality_layout->addRow(QStringLiteral("Качество"), quality_combo_box);
+    quality_layout->addRow(quality_hint);
+    layout->addWidget(quality_group);
+
+    QDialogButtonBox *buttons =
+        new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    layout->addWidget(buttons);
+
+    if (dialog.exec() != QDialog::Accepted) {
+        return;
+    }
+
+    const int method = method_combo_box->currentIndex();
+    const int quality = quality_combo_box->currentIndex();
+    if (method == parameters_.solver_method && quality == parameters_.accuracy_level) {
+        return;
+    }
+
+    parameters_.solver_method = method;
+    parameters_.accuracy_level = quality;
+    if (solver_method_combo_box_ != nullptr) {
+        const QSignalBlocker blocker(solver_method_combo_box_);
+        solver_method_combo_box_->setCurrentIndex(method);
+    }
+    if (accuracy_combo_box_ != nullptr) {
+        const QSignalBlocker blocker(accuracy_combo_box_);
+        accuracy_combo_box_->setCurrentIndex(quality);
+    }
+    markModelChanged();
+}
+
+void MainWindow::updateSimulationActionState()
+{
+    if (start_simulation_action_ == nullptr) {
+        return;
+    }
+
+    start_simulation_action_->setEnabled(!calculation_running_);
+    if (calculation_running_) {
+        start_simulation_action_->setText(QStringLiteral("Идёт\nрасчёт"));
+    } else if (model_changed_since_run_) {
+        start_simulation_action_->setText(QStringLiteral("Начать\nрасчёт"));
+    } else {
+        start_simulation_action_->setText(QStringLiteral("Пересчитать"));
+    }
+}
+
+void MainWindow::updateWindowTitle()
+{
+    const QString base = QStringLiteral("Waveguide CST-like OpenGL");
+    if (current_model_path_.isEmpty()) {
+        setWindowTitle(base);
+        return;
+    }
+    setWindowTitle(QStringLiteral("%1 — %2")
+                       .arg(QFileInfo(current_model_path_).fileName(), base));
+}
+
+void MainWindow::applyLoadedParameters(const WaveguideParameters &parameters)
+{
+    parameters_ = parameters;
+    selected_plate_index_ = parameters_.pec_plates.isEmpty() ? -1 : 0;
+
+    if (slot_enabled_check_box_ != nullptr) {
+        const QSignalBlocker blocker(slot_enabled_check_box_);
+        slot_enabled_check_box_->setChecked(parameters_.slot_enabled);
+    }
+    if (accuracy_combo_box_ != nullptr) {
+        const QSignalBlocker blocker(accuracy_combo_box_);
+        accuracy_combo_box_->setCurrentIndex(std::clamp(parameters_.accuracy_level, 0, 2));
+    }
+    if (solver_method_combo_box_ != nullptr) {
+        const QSignalBlocker blocker(solver_method_combo_box_);
+        solver_method_combo_box_->setCurrentIndex(std::clamp(parameters_.solver_method, 0, 4));
+    }
+    if (parameter_list_widget_ != nullptr) {
+        parameter_list_widget_->reload();
+    }
+    rebuildObjectTree();
+    updateModelPreview();
+}
+
+void MainWindow::openModelFile()
+{
+    const QString path = QFileDialog::getOpenFileName(
+        this,
+        QStringLiteral("Открыть модель волновода"),
+        current_model_path_,
+        QStringLiteral("Модель волновода (*.wgm);;Все файлы (*)"));
+    if (path.isEmpty()) {
+        return;
+    }
+
+    WaveguideParameters loaded;
+    QString error;
+    if (!model_io::loadModel(path, &loaded, &parameter_store_, &error)) {
+        QMessageBox::warning(this, QStringLiteral("Открытие модели"), error);
+        return;
+    }
+
+    current_model_path_ = path;
+    updateWindowTitle();
+    applyLoadedParameters(loaded);
+
+    // Если рядом лежит файл расчёта именно для этой модели — показываем его
+    // сразу, без пересчёта. Иначе считаем заново.
+    const QString results_path = model_io::resultsPathFor(path);
+    WaveguideCalculationResult cached;
+    QString results_error;
+    if (QFileInfo::exists(results_path) &&
+        model_io::loadResults(results_path, parameters_, &cached, &results_error)) {
+        // Отменяем возможный текущий расчёт, чтобы он не затёр загруженное.
+        latest_request_id_ = 0;
+        if (worker_ != nullptr) {
+            worker_->setLatestRequestId(0);
+        }
+        calculation_running_ = false;
+        model_changed_since_run_ = false;
+        progress_timer_.stop();
+        calculation_progress_bar_->setVisible(false);
+        calculation_time_label_->setVisible(false);
+        showResult(cached);
+        updateSimulationActionState();
+        setStatus(QStringLiteral("Модель и готовый расчёт загружены из %1")
+                      .arg(QFileInfo(results_path).fileName()),
+                  false);
+        return;
+    }
+
+    if (!results_error.isEmpty()) {
+        setStatus(QStringLiteral("%1 Пересчитываю...").arg(results_error), false);
+    }
+    markModelChanged();
+}
+
+bool MainWindow::writeModel(const QString &path)
+{
+    QString error;
+    if (!model_io::saveModel(path, parameters_, &parameter_store_, &error)) {
+        QMessageBox::warning(this, QStringLiteral("Сохранение модели"), error);
+        return false;
+    }
+    current_model_path_ = path;
+    updateWindowTitle();
+
+    // Рядом с моделью кладём готовый расчёт, если он есть и актуален.
+    const QString results_path = model_io::resultsPathFor(path);
+    if (last_result_.valid) {
+        QString results_error;
+        if (model_io::saveResults(results_path, parameters_, last_result_, &results_error)) {
+            setStatus(QStringLiteral("Сохранены модель и расчёт: %1 + %2")
+                          .arg(QFileInfo(path).fileName(),
+                               QFileInfo(results_path).fileName()),
+                      false);
+            return true;
+        }
+        setStatus(QStringLiteral("Модель сохранена, но расчёт — нет: %1").arg(results_error), true);
+        return true;
+    }
+    setStatus(QStringLiteral("Модель сохранена: %1 (расчёт ещё не готов)")
+                  .arg(QFileInfo(path).fileName()),
+              false);
+    return true;
+}
+
+bool MainWindow::saveModelFile()
+{
+    if (current_model_path_.isEmpty()) {
+        return saveModelFileAs();
+    }
+    return writeModel(current_model_path_);
+}
+
+bool MainWindow::saveModelFileAs()
+{
+    QString path = QFileDialog::getSaveFileName(
+        this,
+        QStringLiteral("Сохранить модель волновода"),
+        current_model_path_.isEmpty() ? QStringLiteral("waveguide.wgm") : current_model_path_,
+        QStringLiteral("Модель волновода (*.wgm)"));
+    if (path.isEmpty()) {
+        return false;
+    }
+    if (!path.endsWith(QStringLiteral(".wgm"), Qt::CaseInsensitive)) {
+        path += QStringLiteral(".wgm");
+    }
+    return writeModel(path);
 }
 
 QString MainWindow::buildResultText(const WaveguideCalculationResult &result) const

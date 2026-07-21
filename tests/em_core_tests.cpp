@@ -4,6 +4,7 @@
 #ifdef KRUTIEV_WITH_MFEM
 #include "em/mfem_frequency_domain_backend.h"
 #endif
+#include "em/mode_matching_iris_solver.h"
 #include "em/rectangular_waveguide_solver.h"
 #include "em/transverse_pec_partition_solver.h"
 #include "postprocessing/field_visualization_generator.h"
@@ -877,6 +878,30 @@ void testFieldSliceAndAnimation()
     expectTrue(animated_electric, "TE10 electric arrows carry a non-zero animation phasor");
     expectTrue(animated_magnetic,
                "magnetic arrows carry an animation phasor so H oscillates like E");
+
+    // Animated arrows must stay on one axis: they reverse and change length with
+    // the phase, but never sweep around. H is elliptically polarised in a
+    // travelling wave, so the stored phasor is deliberately locked to the field
+    // line direction.
+    int checked_axes = 0;
+    for (const postprocessing::VisualizationPrimitive &primitive : primitives) {
+        if (!primitive.animated || !(primitive.reference_magnitude > 0.0)) {
+            continue;
+        }
+        const em::Vec3 early = em::realAtPhase(primitive.phasor, 0.3);
+        const em::Vec3 late = em::realAtPhase(primitive.phasor, 1.7);
+        const double scale = em::magnitude(early) * em::magnitude(late);
+        if (!(scale > 1.0e-24)) {
+            continue;
+        }
+        const em::Vec3 twist{early.y * late.z - early.z * late.y,
+                             early.z * late.x - early.x * late.z,
+                             early.x * late.y - early.y * late.x};
+        expectTrue(em::magnitude(twist) / scale < 1.0e-9,
+                   "an animated arrow keeps its axis across phases (no rotation)");
+        ++checked_axes;
+    }
+    expectTrue(checked_axes > 0, "animated arrows were actually checked for rotation");
 }
 
 void testPartitionSliceShadowAndPoynting()
@@ -979,11 +1004,13 @@ void testIrisPlateWithAperture()
     expectTrue(em::TransversePecPartitionSolver::canSolve(solid_request),
                "the same plate without a window still solves as a short circuit");
 
-    // The iris must reach the FEM backend through the dispatcher.
+    // A rectangular-window iris has an exact semi-analytic solution and is
+    // routed to the mode-matching backend, not to FEM.
     const em::EmSolverDispatcher dispatcher(std::make_shared<TestFemBackend>());
     const em::FieldSolution solution = dispatcher.solve(request);
-    expectTrue(solution.diagnostics.backend_name == "Test FEM backend",
-               "an iris is routed to the FEM backend");
+    expectTrue(solution.diagnostics.backend_name.rfind("Mode matching", 0) == 0,
+               "a rectangular iris is routed to the mode-matching backend: " +
+                   solution.diagnostics.backend_name);
 
     // The mesh script must cut the window out of the plate before subtracting
     // the metal from the fluid.
@@ -1051,6 +1078,110 @@ void testCircularIrisWithPost()
                "a point on the stub is recognised as metal");
     expectTrue(!em::insidePlateStub(iris, 0.0, 0.5 * iris.size_m.y - 1.0e-4),
                "a point above the stub is not metal");
+}
+
+em::SimulationRequest makeIrisRequest(double a, double b,
+                                      double window_w, double window_h,
+                                      double thickness)
+{
+    em::SimulationRequest request;
+    request.frequency_hz = 10.0e9;
+    request.model.waveguide.inner_width_m = a;
+    request.model.waveguide.inner_height_m = b;
+    request.model.waveguide.length_m = 50.0e-3;
+    request.model.waveguide.wall_thickness_m = 0.1e-3;
+    request.excitation.automatic = false;
+    request.excitation.family = em::ModeFamily::TransverseElectric;
+    request.excitation.m = 1;
+    request.excitation.n = 0;
+    request.settings.maximum_m = 3;
+    request.settings.maximum_n = 3;
+    request.settings.normalization_power_w = 1.0;
+
+    em::PecPlateGeometry iris;
+    iris.enabled = true;
+    iris.center_m = {0.0, 0.0, 0.0};
+    iris.size_m = {a, b, thickness};
+    iris.aperture_enabled = true;
+    iris.aperture_shape = em::PlateApertureShape::Rectangular;
+    iris.aperture_width_m = window_w;
+    iris.aperture_height_m = window_h;
+    request.model.pec_plates.push_back(iris);
+    return request;
+}
+
+void testModeMatchingIris()
+{
+    const em::ModeMatchingIrisSolver solver;
+    const double a = 22.66e-3;
+    const double b = 9.96e-3;
+
+    // Reference iris: window 0.5a x 0.5b, thickness 0.5 mm.
+    const em::FieldSolution solution =
+        solver.solve(makeIrisRequest(a, b, 0.5 * a, 0.5 * b, 0.5e-3));
+    expectTrue(solution.success && solution.field,
+               "mode matching solves the rectangular iris");
+    const double s11 = std::abs(solution.scattering.s11);
+    const double s21 = std::abs(solution.scattering.s21);
+
+    // Lossless mode matching is structurally unitary: the truncated system
+    // conserves power to machine precision, not merely approximately.
+    expectTrue(solution.diagnostics.power_balance_relative_error < 1.0e-12,
+               "mode matching conserves power to machine precision: " +
+                   std::to_string(solution.diagnostics.power_balance_relative_error));
+    // Converged value 0.771 (8x8 vs 12x12 aperture modes differ by 0.002).
+    expectNear(s11, 0.769, 0.02, "iris |S11| matches the converged mode-matching value");
+    expectTrue(std::abs(solution.scattering.s12 - solution.scattering.s21) < 1.0e-12,
+               "mode matching is reciprocal");
+    expectNear(std::abs(solution.scattering.s22), s11, 1.0e-9,
+               "a centred iris has |S22| = |S11|");
+
+    // Marcuvitz thin symmetric inductive window, d = a/2, full height:
+    // B/Y0 = (lambda_g/a) ctg^2(pi d / 2a)  =>  |S11| = 0.6558. The formula is
+    // itself first-order accurate, so a 5 % band is the honest comparison.
+    {
+        const double a_std = 22.86e-3;
+        const double b_std = 10.16e-3;
+        const em::FieldSolution inductive =
+            solver.solve(makeIrisRequest(a_std, b_std, 0.5 * a_std, b_std, 0.05e-3));
+        expectTrue(inductive.success, "thin inductive window solves");
+        expectNear(std::abs(inductive.scattering.s11), 0.6558, 0.05,
+                   "thin inductive window matches the Marcuvitz susceptance");
+    }
+
+    // Limiting cases: a tiny window reflects almost everything, a window nearly
+    // as large as the guide is almost transparent.
+    {
+        const em::FieldSolution tiny =
+            solver.solve(makeIrisRequest(a, b, 0.1 * a, 0.1 * b, 0.5e-3));
+        expectTrue(tiny.success && std::abs(tiny.scattering.s11) > 0.99 &&
+                       std::abs(tiny.scattering.s21) < 0.02,
+                   "a tiny window is an almost perfect reflector");
+        const em::FieldSolution open =
+            solver.solve(makeIrisRequest(a, b, 0.9 * a, 0.9 * b, 0.5e-3));
+        expectTrue(open.success && std::abs(open.scattering.s11) < 0.05 &&
+                       std::abs(open.scattering.s21) > 0.99,
+                   "a nearly full window is almost transparent");
+    }
+
+    // The reconstructed field satisfies Maxwell in the guide region: the modes
+    // are exact solutions, so the numerical-curl residual is at rounding level.
+    if (solution.field) {
+        const em::Vec3 position_m{2.0e-3, 1.0e-3, -8.0e-3};
+        const double step_m = 2.0e-7;
+        const double omega = 2.0 * em::pi * 10.0e9;
+        const em::Complex imaginary_unit(0.0, 1.0);
+        const em::FieldPhasor field = solution.field->evaluate(position_m);
+        const em::ComplexVec3 curl_e =
+            numericalCurlElectric(*solution.field, position_m, step_m);
+        const em::ComplexVec3 faraday_term =
+            scaled(field.magnetic_a_per_m,
+                   imaginary_unit * omega * em::vacuum_permeability_h_per_m);
+        const em::ComplexVec3 residual = curl_e + faraday_term;
+        const double scale = std::max(em::magnitude(curl_e), em::magnitude(faraday_term));
+        expectTrue(em::magnitude(residual) / scale < 1.0e-6,
+                   "mode-matching field satisfies the Faraday law");
+    }
 }
 
 void testFemGeometryGeneration()
@@ -1262,6 +1393,7 @@ int main()
     testPartitionSliceShadowAndPoynting();
     testIrisPlateWithAperture();
     testCircularIrisWithPost();
+    testModeMatchingIris();
     testFemGeometryGeneration();
 #ifdef KRUTIEV_WITH_MFEM
     testMfemEmptyGuide();

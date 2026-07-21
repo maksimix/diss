@@ -1180,6 +1180,23 @@ em::ComplexVec3 quantityPhasor(const em::FieldPhasor &field, FieldQuantity quant
                                                : field.electric_v_per_m;
 }
 
+// Locks an animated arrow to one axis: the stored phasor becomes d*(F.d), so
+// Re(phasor * e^{j*phase}) always lies along +/-d. The arrow then pulses and
+// reverses along the field line instead of sweeping around it.
+//
+// This is exact for a standing wave, where the field really does oscillate
+// along a fixed direction. In a travelling wave the field is elliptically
+// polarised and genuinely rotates; the component perpendicular to d is dropped
+// so that the arrows stay tangent to the drawn field lines.
+em::ComplexVec3 lockPhasorToDirection(const em::ComplexVec3 &phasor,
+                                      const em::Vec3 &direction)
+{
+    const em::Complex projection = phasor.x * direction.x +
+                                   phasor.y * direction.y +
+                                   phasor.z * direction.z;
+    return {projection * direction.x, projection * direction.y, projection * direction.z};
+}
+
 double maximumFieldEnvelope(const em::FieldSolution &solution,
                             FieldQuantity quantity,
                             const GenerationControl &control)
@@ -1279,7 +1296,7 @@ void appendVolumeVectorArrows(std::vector<VisualizationPrimitive> &primitives,
                 primitive.normalized_magnitude = std::min(1.0, normalized_magnitude);
                 primitive.animated = true;
                 primitive.anchor_m = center_m;
-                primitive.phasor = phasor;
+                primitive.phasor = lockPhasorToDirection(phasor, direction);
                 primitive.reference_magnitude = maximum_envelope;
                 primitive.arrow_length_m = base_length_m;
                 primitives.push_back(std::move(primitive));
@@ -1411,7 +1428,7 @@ void appendWallCurrentArrows(std::vector<VisualizationPrimitive> &primitives,
             primitive.normalized_magnitude = std::min(1.0, normalized_magnitude);
             primitive.animated = true;
             primitive.anchor_m = hit.point_m;
-            primitive.phasor = hit.phasor;
+            primitive.phasor = lockPhasorToDirection(hit.phasor, direction);
             primitive.reference_magnitude = maximum_envelope;
             primitive.arrow_length_m = arrow_base_m;
             primitives.push_back(std::move(primitive));
@@ -1530,7 +1547,7 @@ void appendPlateCurrentArrows(std::vector<VisualizationPrimitive> &primitives,
             primitive.normalized_magnitude = std::min(1.0, normalized_magnitude);
             primitive.animated = true;
             primitive.anchor_m = hit.point_m;
-            primitive.phasor = hit.phasor;
+            primitive.phasor = lockPhasorToDirection(hit.phasor, direction);
             primitive.reference_magnitude = maximum_magnitude;
             primitive.arrow_length_m = arrow_base_m;
             primitives.push_back(std::move(primitive));

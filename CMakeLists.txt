@@ -13,6 +13,7 @@ set(EM_CORE_SOURCES
     em/em_solver_dispatcher.cpp
     em/fem_frequency_domain_solver.cpp
     em/gmsh_tetrahedral_mesher.cpp
+    em/mode_matching_iris_solver.cpp
     em/rectangular_mode_field.cpp
     em/rectangular_waveguide_solver.cpp
     em/transverse_pec_partition_solver.cpp
@@ -67,10 +68,25 @@ add_test(NAME em_core_tests COMMAND em_core_tests)
 if(KRUTIEV_BUILD_GUI)
     find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets OpenGL OpenGLWidgets)
     qt_standard_project_setup()
+
+    # Вычислитель выражений списка параметров зависит только от QtCore, поэтому
+    # проверяется отдельным консольным тестом без окна.
+    add_executable(parameter_expression_tests
+        model_parameters.cpp
+        tests/parameter_expression_tests.cpp)
+    target_include_directories(parameter_expression_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(parameter_expression_tests PRIVATE Qt6::Core)
+    add_test(NAME parameter_expression_tests COMMAND parameter_expression_tests)
+
     qt_add_executable(krutiev
         calculation_worker.cpp
+        cst_ribbon.cpp
+        expression_spin_box.cpp
         main.cpp
         main_window.cpp
+        model_parameters.cpp
+        model_serialization.cpp
+        parameter_list_widget.cpp
         postprocessing/qt_field_glyph_adapter.cpp
         waveguide_calculator.cpp
         waveguide_opengl_widget.cpp)
