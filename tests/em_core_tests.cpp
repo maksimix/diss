@@ -1018,8 +1018,9 @@ void testCircularIrisWithPost()
     iris.aperture_shape = em::PlateApertureShape::Circular;
     iris.aperture_radius_m = 3.0e-3;
     iris.post_enabled = true;
-    iris.post_radius_m = 1.0e-3;
-    iris.post_length_m = 4.0e-3;
+    iris.post_width_m = 1.5e-3;
+    // From the plate bottom edge up to the centre of the hole.
+    iris.post_height_m = 0.5 * request.model.waveguide.inner_height_m;
     request.model.pec_plates.push_back(iris);
 
     expectTrue(em::plateHasOpening(iris) && em::plateHasPost(iris),
@@ -1034,15 +1035,22 @@ void testCircularIrisWithPost()
 
     const std::string script = em::GmshTetrahedralMesher::buildGeometryScript(request);
     expectTrue(script.find("Cylinder(") != std::string::npos,
-               "the round hole and the post are built from cylinders");
+               "the round hole is cut with a cylinder");
     expectTrue(script.find("iris100[] = BooleanDifference") != std::string::npos,
                "the round hole is cut out of the plate");
-    // Plate body, hole cutter and post: the post is a separate PEC body.
-    const std::size_t first_cylinder = script.find("Cylinder(");
-    expectTrue(script.find("Cylinder(", first_cylinder + 1) != std::string::npos,
-               "the post is emitted in addition to the hole cutter");
-    expectTrue(script.find("pecBodies[] += {102};") != std::string::npos,
-               "the post is added to the PEC bodies subtracted from the fluid");
+    // The stub lies in the plate plane and is welded back onto the plate, so it
+    // is a union with the perforated body rather than a separate PEC volume.
+    expectTrue(script.find("irisStub100[] = BooleanUnion") != std::string::npos,
+               "the stub is welded onto the perforated plate");
+    expectTrue(script.find("pecBodies[] += irisStub100[];") != std::string::npos,
+               "the plate with its stub is the PEC body subtracted from the fluid");
+
+    // The stub is metal: a point on it is not part of the opening.
+    const double bottom_m = -0.5 * iris.size_m.y;
+    expectTrue(em::insidePlateStub(iris, 0.0, bottom_m + 0.5 * iris.post_height_m),
+               "a point on the stub is recognised as metal");
+    expectTrue(!em::insidePlateStub(iris, 0.0, 0.5 * iris.size_m.y - 1.0e-4),
+               "a point above the stub is not metal");
 }
 
 void testFemGeometryGeneration()

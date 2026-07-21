@@ -93,6 +93,13 @@ private:
                       double max_z,
                       const QColor &color) const;
     void drawFields() const;
+    void drawPlateStub(const PecPlateParameters &plate,
+                       double half_x,
+                       double half_y,
+                       double half_z,
+                       const QColor &body_color,
+                       double body_alpha,
+                       const QColor &edge_color) const;
     void drawFieldSlice() const;
     void drawArrow(const FieldGlyph &glyph) const;
     void drawArrowHead(const QVector3D &position,

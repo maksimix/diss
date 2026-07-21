@@ -122,19 +122,19 @@ QString validateParameters(const WaveguideParameters &parameters)
                 return QStringLiteral("Окно должно целиком помещаться внутри пластины, не касаясь её краёв.");
             }
             if (plate.post_enabled) {
-                if (!positiveFinite(plate.post_radius_mm) ||
-                    !positiveFinite(plate.post_length_mm)) {
-                    return QStringLiteral("Радиус и длина штыря должны быть конечными и больше нуля.");
+                if (!positiveFinite(plate.post_width_mm) ||
+                    !positiveFinite(plate.post_height_mm)) {
+                    return QStringLiteral("Ширина и высота язычка должны быть конечными и больше нуля.");
                 }
-                if (!circular) {
-                    return QStringLiteral("Штырь поддерживается только для круглого окна.");
+                if (plate.post_width_mm > plate_width_mm) {
+                    return QStringLiteral("Язычок шире самой пластины.");
                 }
-                if (plate.post_radius_mm >= plate.aperture_radius_mm) {
-                    return QStringLiteral("Штырь должен быть тоньше отверстия, иначе он перекроет его.");
+                if (plate.post_height_mm > plate_height_mm) {
+                    return QStringLiteral("Язычок выше самой пластины.");
                 }
             }
         } else if (plate.enabled && plate.post_enabled) {
-            return QStringLiteral("Штырь задаётся вместе с окном в пластине.");
+            return QStringLiteral("Язычок задаётся вместе с окном в пластине.");
         }
     }
     if (!parameters.slot_enabled) {
@@ -263,8 +263,8 @@ em::SimulationRequest buildRequest(const WaveguideParameters &parameters,
         plate.aperture_offset_x_m = mmToM(plate_parameters.aperture_offset_x_mm);
         plate.aperture_offset_y_m = mmToM(plate_parameters.aperture_offset_y_mm);
         plate.post_enabled = plate_parameters.post_enabled;
-        plate.post_radius_m = mmToM(plate_parameters.post_radius_mm);
-        plate.post_length_m = mmToM(plate_parameters.post_length_mm);
+        plate.post_width_m = mmToM(plate_parameters.post_width_mm);
+        plate.post_height_m = mmToM(plate_parameters.post_height_mm);
         request.model.pec_plates.push_back(plate);
     }
     return request;

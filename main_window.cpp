@@ -1210,8 +1210,9 @@ void MainWindow::showPlateDialog(int plate_index, bool iris_template, bool round
         plate.aperture_offset_x_mm = 0.0;
         plate.aperture_offset_y_mm = 0.0;
         plate.post_enabled = true;
-        plate.post_radius_mm = 0.35 * radius;
-        plate.post_length_mm = std::max(2.0 * thickness, 0.6 * radius);
+        plate.post_width_mm = 0.5 * radius;
+        // From the plate bottom edge up to the centre of the hole.
+        plate.post_height_mm = 0.5 * inner_depth;
     } else if (iris_template) {
         // Diaphragm template: the plate spans the whole inner cross-section
         // (its edges touch all four walls) and carries a centred window.
@@ -1284,11 +1285,11 @@ void MainWindow::showPlateDialog(int plate_index, bool iris_template, bool round
     QDoubleSpinBox *aperture_radius_spin_box = createSpinBox(0.01, 10000.0, plate.aperture_radius_mm,
                                                              0.1, 3, QStringLiteral(" mm"), &dialog);
     QCheckBox *post_check_box =
-        new QCheckBox(QStringLiteral("Штырь в отверстии (соосный)"), &dialog);
+        new QCheckBox(QStringLiteral("Язычок снизу в окно (в плоскости пластины)"), &dialog);
     post_check_box->setChecked(plate.post_enabled);
-    QDoubleSpinBox *post_radius_spin_box = createSpinBox(0.01, 10000.0, plate.post_radius_mm,
-                                                         0.1, 3, QStringLiteral(" mm"), &dialog);
-    QDoubleSpinBox *post_length_spin_box = createSpinBox(0.01, 10000.0, plate.post_length_mm,
+    QDoubleSpinBox *post_width_spin_box = createSpinBox(0.01, 10000.0, plate.post_width_mm,
+                                                        0.1, 3, QStringLiteral(" mm"), &dialog);
+    QDoubleSpinBox *post_height_spin_box = createSpinBox(0.01, 10000.0, plate.post_height_mm,
                                                          0.1, 3, QStringLiteral(" mm"), &dialog);
     QDoubleSpinBox *aperture_width_spin_box = createSpinBox(0.01, 10000.0, plate.aperture_width_mm,
                                                             0.1, 3, QStringLiteral(" mm"), &dialog);
@@ -1309,10 +1310,10 @@ void MainWindow::showPlateDialog(int plate_index, bool iris_template, bool round
         aperture_radius_spin_box->setEnabled(on && circular);
         aperture_offset_x_spin_box->setEnabled(on);
         aperture_offset_y_spin_box->setEnabled(on);
-        post_check_box->setEnabled(on && circular);
-        const bool post_on = on && circular && post_check_box->isChecked();
-        post_radius_spin_box->setEnabled(post_on);
-        post_length_spin_box->setEnabled(post_on);
+        post_check_box->setEnabled(on);
+        const bool post_on = on && post_check_box->isChecked();
+        post_width_spin_box->setEnabled(post_on);
+        post_height_spin_box->setEnabled(post_on);
     };
     update_aperture_enabled();
     connect(aperture_check_box, &QCheckBox::toggled, &dialog, update_aperture_enabled);
@@ -1362,10 +1363,10 @@ void MainWindow::showPlateDialog(int plate_index, bool iris_template, bool round
     grid_layout->addWidget(aperture_offset_x_spin_box, 19, 0);
     grid_layout->addWidget(aperture_offset_y_spin_box, 19, 1);
     grid_layout->addWidget(post_check_box, 20, 0, 1, 2);
-    grid_layout->addWidget(new QLabel(QStringLiteral("Штырь: радиус:"), &dialog), 21, 0);
-    grid_layout->addWidget(new QLabel(QStringLiteral("Штырь: длина Z:"), &dialog), 21, 1);
-    grid_layout->addWidget(post_radius_spin_box, 22, 0);
-    grid_layout->addWidget(post_length_spin_box, 22, 1);
+    grid_layout->addWidget(new QLabel(QStringLiteral("Язычок: ширина X:"), &dialog), 21, 0);
+    grid_layout->addWidget(new QLabel(QStringLiteral("Язычок: высота снизу:"), &dialog), 21, 1);
+    grid_layout->addWidget(post_width_spin_box, 22, 0);
+    grid_layout->addWidget(post_height_spin_box, 22, 1);
     grid_layout->addWidget(new QLabel(QStringLiteral("Component:"), &dialog), 23, 0);
     grid_layout->addWidget(new QLabel(QStringLiteral("Material:"), &dialog), 23, 1);
     grid_layout->addWidget(component_combo_box, 24, 0);
@@ -1420,9 +1421,9 @@ void MainWindow::showPlateDialog(int plate_index, bool iris_template, bool round
         plate.aperture_radius_mm = aperture_radius_spin_box->value();
         plate.aperture_offset_x_mm = aperture_offset_x_spin_box->value();
         plate.aperture_offset_y_mm = aperture_offset_y_spin_box->value();
-        plate.post_enabled = post_check_box->isChecked() && plate.aperture_shape == 1;
-        plate.post_radius_mm = post_radius_spin_box->value();
-        plate.post_length_mm = post_length_spin_box->value();
+        plate.post_enabled = post_check_box->isChecked();
+        plate.post_width_mm = post_width_spin_box->value();
+        plate.post_height_mm = post_height_spin_box->value();
         if (plate.aperture_enabled) {
             const bool circular = plate.aperture_shape == 1;
             const double span_x =
@@ -1436,10 +1437,12 @@ void MainWindow::showPlateDialog(int plate_index, bool iris_template, bool round
                                      QStringLiteral("Окно должно целиком помещаться внутри пластины."));
                 return;
             }
-            if (plate.post_enabled && plate.post_radius_mm >= plate.aperture_radius_mm) {
+            if (plate.post_enabled &&
+                (plate.post_width_mm > x_max - x_min ||
+                 plate.post_height_mm > y_max - y_min)) {
                 QMessageBox::warning(&dialog,
                                      QStringLiteral("PEC Plate"),
-                                     QStringLiteral("Штырь должен быть тоньше отверстия."));
+                                     QStringLiteral("Язычок не помещается в пластину."));
                 return;
             }
         }

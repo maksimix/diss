@@ -320,26 +320,34 @@ std::string GmshTetrahedralMesher::buildGeometryScript(const SimulationRequest &
                                  plate.center_m);
             }
             script << "iris" << plate_tag << "[] = BooleanDifference{ Volume{" << plate_tag
-                   << "}; Delete; }{ Volume{" << window_tag << "}; Delete; };\n"
-                   << "pecBodies[] += iris" << plate_tag << "[];\n";
+                   << "}; Delete; }{ Volume{" << window_tag << "}; Delete; };\n";
+            if (plateHasPost(plate)) {
+                // The stub lies in the plate plane and grows out of its bottom
+                // edge, so it is welded back onto the perforated plate rather
+                // than added as a separate body.
+                const int stub_tag = next_tag++;
+                const double bottom_m = plate.center_m.y - 0.5 * plate.size_m.y;
+                const Vec3 stub_center{plate.center_m.x + plate.aperture_offset_x_m,
+                                       bottom_m + 0.5 * plate.post_height_m,
+                                       plate.center_m.z};
+                const Vec3 stub_size{plate.post_width_m,
+                                     plate.post_height_m,
+                                     plate.size_m.z};
+                appendRotatedBox(script,
+                                 stub_tag,
+                                 stub_center,
+                                 stub_size,
+                                 plate.rotation_rad,
+                                 plate.center_m);
+                script << "irisStub" << plate_tag << "[] = BooleanUnion{ Volume{iris"
+                       << plate_tag << "[]}; Delete; }{ Volume{" << stub_tag
+                       << "}; Delete; };\n"
+                       << "pecBodies[] += irisStub" << plate_tag << "[];\n";
+            } else {
+                script << "pecBodies[] += iris" << plate_tag << "[];\n";
+            }
         } else {
             script << "pecBodies[] += {" << plate_tag << "};\n";
-        }
-        if (plateHasPost(plate)) {
-            // The post stands free inside the window, so it is simply another
-            // PEC body: it never touches the perforated plate.
-            const int post_tag = next_tag++;
-            const Vec3 base{plate.center_m.x + plate.aperture_offset_x_m,
-                            plate.center_m.y + plate.aperture_offset_y_m,
-                            plate.center_m.z - 0.5 * plate.post_length_m};
-            appendRotatedCylinder(script,
-                                  post_tag,
-                                  base,
-                                  plate.post_length_m,
-                                  plate.post_radius_m,
-                                  plate.rotation_rad,
-                                  plate.center_m);
-            script << "pecBodies[] += {" << post_tag << "};\n";
         }
         has_pec_bodies = true;
     }

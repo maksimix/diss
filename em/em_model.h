@@ -73,11 +73,13 @@ struct PecPlateGeometry
     double aperture_radius_m = 0.0;     // circular window
     double aperture_offset_x_m = 0.0;   // window centre, from the plate centre
     double aperture_offset_y_m = 0.0;
-    // Optional post standing in the window, coaxial with it, its axis along the
-    // plate normal (the propagation axis for a transverse plate).
+    // Optional rectangular stub lying in the plane of the plate: it rises from
+    // the plate's bottom edge along the aperture centre line and reaches into
+    // the window. Its thickness along the plate normal equals the plate
+    // thickness, so it is part of the plate metal, not a free-standing body.
     bool post_enabled = false;
-    double post_radius_m = 0.0;
-    double post_length_m = 0.0;
+    double post_width_m = 0.0;    // along the plate local x
+    double post_height_m = 0.0;   // upwards from the plate bottom edge
 };
 
 // True when the plate actually has an opening through it.
@@ -93,7 +95,21 @@ inline bool plateHasOpening(const PecPlateGeometry &plate)
 
 inline bool plateHasPost(const PecPlateGeometry &plate)
 {
-    return plate.post_enabled && plate.post_radius_m > 0.0 && plate.post_length_m > 0.0;
+    return plate.post_enabled && plate.post_width_m > 0.0 && plate.post_height_m > 0.0;
+}
+
+// True for a point (in plate-local x/y, relative to the plate centre) that lies
+// on the stub, i.e. on metal that fills part of the window.
+inline bool insidePlateStub(const PecPlateGeometry &plate,
+                            double local_x_m,
+                            double local_y_m)
+{
+    if (!plateHasPost(plate)) {
+        return false;
+    }
+    const double bottom_m = -0.5 * plate.size_m.y;
+    return std::abs(local_x_m - plate.aperture_offset_x_m) <= 0.5 * plate.post_width_m &&
+           local_y_m >= bottom_m && local_y_m <= bottom_m + plate.post_height_m;
 }
 
 struct DielectricBlockGeometry

@@ -33,10 +33,11 @@ struct PecPlateParameters
     double aperture_radius_mm = 3.0;
     double aperture_offset_x_mm = 0.0;
     double aperture_offset_y_mm = 0.0;
-    // Соосный штырь внутри окна (ось вдоль нормали пластины).
+    // Прямоугольный язычок в плоскости пластины: снизу по центральной линии
+    // окна, толщина по z равна толщине пластины.
     bool post_enabled = false;
-    double post_radius_mm = 1.0;
-    double post_length_mm = 4.0;
+    double post_width_mm = 2.0;
+    double post_height_mm = 5.0;
 };
 
 struct WaveguideParameters

@@ -759,15 +759,14 @@ bool insidePlateAperture(const em::PecPlateGeometry &plate,
     if (!em::plateHasOpening(plate)) {
         return false;
     }
+    // The stub is metal again, so it does not count as an opening.
+    if (em::insidePlateStub(plate, local_x_m, local_y_m)) {
+        return false;
+    }
     const double dx_m = local_x_m - plate.aperture_offset_x_m;
     const double dy_m = local_y_m - plate.aperture_offset_y_m;
     if (plate.aperture_shape == em::PlateApertureShape::Circular) {
-        // The post itself is metal again, so it does not count as an opening.
-        const double radius_m = std::hypot(dx_m, dy_m);
-        if (em::plateHasPost(plate) && radius_m <= plate.post_radius_m) {
-            return false;
-        }
-        return radius_m <= plate.aperture_radius_m;
+        return std::hypot(dx_m, dy_m) <= plate.aperture_radius_m;
     }
     return std::abs(dx_m) <= 0.5 * plate.aperture_width_m &&
            std::abs(dy_m) <= 0.5 * plate.aperture_height_m;

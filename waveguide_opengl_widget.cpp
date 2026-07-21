@@ -748,32 +748,7 @@ void WaveguideOpenGLWidget::drawPecPlates() const
             }
             drawBoxEdges(-half_x, half_x, -half_y, half_y, -half_z, half_z, edge_color);
 
-            if (plate.post_enabled && plate.post_radius_mm > 0.0 &&
-                plate.post_length_mm > 0.0) {
-                const double pr = plate.post_radius_mm;
-                const double pz = 0.5 * plate.post_length_mm;
-                setColor(selected ? QColor(255, 196, 96) : QColor(196, 170, 120), 0.96);
-                glBegin(GL_QUADS);
-                for (int i = 0; i < segments; ++i) {
-                    const double a0 = 2.0 * pi * i / segments;
-                    const double a1 = 2.0 * pi * (i + 1) / segments;
-                    glVertex3d(cx + pr * std::cos(a0), cy + pr * std::sin(a0), -pz);
-                    glVertex3d(cx + pr * std::cos(a1), cy + pr * std::sin(a1), -pz);
-                    glVertex3d(cx + pr * std::cos(a1), cy + pr * std::sin(a1), pz);
-                    glVertex3d(cx + pr * std::cos(a0), cy + pr * std::sin(a0), pz);
-                }
-                glEnd();
-                for (int face = 0; face < 2; ++face) {
-                    const double z = face == 0 ? -pz : pz;
-                    glBegin(GL_TRIANGLE_FAN);
-                    glVertex3d(cx, cy, z);
-                    for (int i = 0; i <= segments; ++i) {
-                        const double a = 2.0 * pi * i / segments;
-                        glVertex3d(cx + pr * std::cos(a), cy + pr * std::sin(a), z);
-                    }
-                    glEnd();
-                }
-            }
+            drawPlateStub(plate, half_x, half_y, half_z, body_color, body_alpha, edge_color);
         } else if (has_window) {
             // Draw the diaphragm as four frame segments around the window so the
             // aperture reads as an actual opening.
@@ -801,6 +776,7 @@ void WaveguideOpenGLWidget::drawPecPlates() const
                 drawBoxEdges(segment[0], segment[1], segment[2], segment[3],
                              -half_z, half_z, edge_color);
             }
+            drawPlateStub(plate, half_x, half_y, half_z, body_color, body_alpha, edge_color);
         } else {
             drawBox(-half_x, half_x, -half_y, half_y, -half_z, half_z,
                     body_color, body_alpha);
@@ -1032,6 +1008,32 @@ void WaveguideOpenGLWidget::drawArrow(const FieldGlyph &glyph) const
                   color,
                   std::clamp(shaft_length * 0.24, 0.55, 1.35),
                   alpha);
+}
+
+void WaveguideOpenGLWidget::drawPlateStub(const PecPlateParameters &plate,
+                                          double half_x,
+                                          double half_y,
+                                          double half_z,
+                                          const QColor &body_color,
+                                          double body_alpha,
+                                          const QColor &edge_color) const
+{
+    if (!plate.post_enabled || plate.post_width_mm <= 0.0 || plate.post_height_mm <= 0.0) {
+        return;
+    }
+    // Rectangular stub in the plane of the plate, growing up from its bottom
+    // edge along the window centre line; same thickness as the plate.
+    const double x0 = plate.aperture_offset_x_mm - 0.5 * plate.post_width_mm;
+    const double x1 = plate.aperture_offset_x_mm + 0.5 * plate.post_width_mm;
+    const double y0 = -half_y;
+    const double y1 = std::min(half_y, -half_y + plate.post_height_mm);
+    if (x1 <= x0 || y1 <= y0) {
+        return;
+    }
+    Q_UNUSED(half_x);
+    drawBox(x0, x1, y0, y1, -half_z, half_z, body_color, body_alpha);
+    ::glLineWidth(2.0f);
+    drawBoxEdges(x0, x1, y0, y1, -half_z, half_z, edge_color);
 }
 
 void WaveguideOpenGLWidget::drawFieldSlice() const
