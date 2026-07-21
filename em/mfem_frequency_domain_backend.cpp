@@ -1,6 +1,6 @@
 #include "mfem_frequency_domain_backend.h"
 
-#include "rectangular_waveguide_solver.h"
+#include "analytic_waveguide_solver.h"
 
 #ifdef KRUTIEV_MFEM_CONFIG_FILE
 #define MFEM_CONFIG_FILE KRUTIEV_MFEM_CONFIG_FILE
@@ -408,7 +408,7 @@ mfem::Array<int> boundaryMarker(const mfem::Mesh &mesh, int attribute)
 
 Complex projectPortElectric(const IFieldEvaluator &field,
                             const IFieldEvaluator &mode,
-                            const RectangularWaveguideGeometry &geometry,
+                            const WaveguideGeometry &geometry,
                             double z_m)
 {
     constexpr int x_samples = 36;
@@ -576,7 +576,7 @@ FieldSolution MfemFrequencyDomainBackend::solve(const SimulationRequest &request
     incident_request.model.slot_geometries.clear();
     incident_request.model.pec_plates.clear();
     incident_request.model.dielectric_blocks.clear();
-    const FieldSolution incident = RectangularWaveguideSolver().solve(incident_request);
+    const FieldSolution incident = AnalyticWaveguideSolver().solve(incident_request);
     if (!incident.success || !incident.field) {
         solution.error_message = "Cannot construct the normalized incident port mode: " +
                                  incident.error_message;

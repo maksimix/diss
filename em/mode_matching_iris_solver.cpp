@@ -1,6 +1,6 @@
 #include "mode_matching_iris_solver.h"
 
-#include "rectangular_waveguide_solver.h"
+#include "analytic_waveguide_solver.h"
 
 #include <algorithm>
 #include <cmath>
@@ -304,7 +304,7 @@ FieldPhasor evaluateMode(const EvaluatorMode &entry, const Vec3 &position, doubl
 class ModeMatchingFieldEvaluator final : public IFieldEvaluator
 {
 public:
-    ModeMatchingFieldEvaluator(RectangularWaveguideGeometry geometry,
+    ModeMatchingFieldEvaluator(WaveguideGeometry geometry,
                                GuideFrame aperture,
                                double z1,
                                double z2,
@@ -365,7 +365,7 @@ public:
     }
 
 private:
-    RectangularWaveguideGeometry geometry_;
+    WaveguideGeometry geometry_;
     GuideFrame aperture_;
     double z1_ = 0.0;
     double z2_ = 0.0;
@@ -460,7 +460,7 @@ bool ModeMatchingIrisSolver::canSolve(const SimulationRequest &request, std::str
         return false;
     }
 
-    const RectangularWaveguideGeometry &guide = request.model.waveguide;
+    const WaveguideGeometry &guide = request.model.waveguide;
     const double plate_min_x = plate->center_m.x - 0.5 * plate->size_m.x;
     const double plate_max_x = plate->center_m.x + 0.5 * plate->size_m.x;
     const double plate_min_y = plate->center_m.y - 0.5 * plate->size_m.y;
@@ -525,7 +525,7 @@ FieldSolution ModeMatchingIrisSolver::solve(const SimulationRequest &request,
     SimulationRequest incident_request = request;
     incident_request.model.pec_plates.clear();
     incident_request.model.slot_geometries.clear();
-    FieldSolution incident = RectangularWaveguideSolver().solve(incident_request, control);
+    FieldSolution incident = AnalyticWaveguideSolver().solve(incident_request, control);
     if (!incident.success || incident.cancelled || !incident.has_selected_mode ||
         !incident.field) {
         incident.request = request;
@@ -540,7 +540,7 @@ FieldSolution ModeMatchingIrisSolver::solve(const SimulationRequest &request,
 
     control.reportProgress("Mode matching: building the mode sets...");
 
-    const RectangularWaveguideGeometry &guide = request.model.waveguide;
+    const WaveguideGeometry &guide = request.model.waveguide;
     const PecPlateGeometry *plate = nullptr;
     for (const PecPlateGeometry &candidate : request.model.pec_plates) {
         if (candidate.enabled) {

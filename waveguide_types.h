@@ -42,6 +42,10 @@ struct PecPlateParameters
 
 struct WaveguideParameters
 {
+    // Форма сечения: 0 — прямоугольное, 1 — круглое. У круглого используется
+    // radius_mm, у прямоугольного — width_mm и depth_mm.
+    int cross_section = 0;
+    double radius_mm = 10.0;
     double width_mm = 22.86;
     double length_mm = 50.0;
     double depth_mm = 10.16;

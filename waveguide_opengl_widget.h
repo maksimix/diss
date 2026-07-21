@@ -75,6 +75,12 @@ private:
     void setupProjection();
     void setupModelView();
     void drawWaveguide() const;
+    void drawCircularShell(double inner_radius,
+                           double outer_radius,
+                           double z0,
+                           double z1,
+                           const QColor &metal_color,
+                           const QColor &edge_color) const;
     void drawSlot() const;
     void drawPecPlates() const;
     void drawBox(double min_x,

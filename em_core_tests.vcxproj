@@ -89,13 +89,15 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClCompile Include="em\circular_mode_field.cpp" />
+    <ClCompile Include="em\cylindrical_bessel.cpp" />
     <ClCompile Include="em\em_solver_dispatcher.cpp" />
     <ClCompile Include="em\fem_frequency_domain_solver.cpp" />
     <ClCompile Include="em\gmsh_tetrahedral_mesher.cpp" />
     <ClCompile Include="em\mfem_frequency_domain_backend.cpp" Condition="'$(MfemRoot)'!=''" />
     <ClCompile Include="em\mode_matching_iris_solver.cpp" />
     <ClCompile Include="em\rectangular_mode_field.cpp" />
-    <ClCompile Include="em\rectangular_waveguide_solver.cpp" />
+    <ClCompile Include="em\analytic_waveguide_solver.cpp" />
     <ClCompile Include="em\transverse_pec_partition_solver.cpp" />
     <ClCompile Include="postprocessing\field_visualization_generator.cpp" />
     <ClCompile Include="postprocessing\slot_excitation_estimator.cpp" />
@@ -104,6 +106,8 @@
   <ItemGroup>
     <ClInclude Include="em\derived_fields.h" />
     <ClInclude Include="em\em_math.h" />
+    <ClInclude Include="em\circular_mode_field.h" />
+    <ClInclude Include="em\cylindrical_bessel.h" />
     <ClInclude Include="em\em_model.h" />
     <ClInclude Include="em\em_solution.h" />
     <ClInclude Include="em\em_solver.h" />
@@ -112,7 +116,7 @@
     <ClInclude Include="em\gmsh_tetrahedral_mesher.h" />
     <ClInclude Include="em\mfem_frequency_domain_backend.h" />
     <ClInclude Include="em\rectangular_mode_field.h" />
-    <ClInclude Include="em\rectangular_waveguide_solver.h" />
+    <ClInclude Include="em\analytic_waveguide_solver.h" />
     <ClInclude Include="em\transverse_pec_partition_solver.h" />
     <ClInclude Include="postprocessing\field_visualization_generator.h" />
     <ClInclude Include="postprocessing\slot_excitation_estimator.h" />

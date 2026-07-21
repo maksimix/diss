@@ -1,7 +1,7 @@
 #include "em_solver_dispatcher.h"
 
 #include "mode_matching_iris_solver.h"
-#include "rectangular_waveguide_solver.h"
+#include "analytic_waveguide_solver.h"
 #include "transverse_pec_partition_solver.h"
 
 #include <algorithm>
@@ -55,6 +55,27 @@ FieldSolution EmSolverDispatcher::solve(const SimulationRequest &request,
     const bool enabled_plates = hasEnabledPlates(request.model);
     const bool enabled_dielectrics = hasEnabledDielectrics(request.model);
 
+    // Круглое сечение пока поддержано только замкнутыми формулами пустого
+    // волновода: сеточный генератор строит прямоугольную трубу, а метод
+    // частичных областей и метод поперечных сечений выведены для прямоугольных
+    // мод. Молчаливый переход на FEM дал бы неверную геометрию, поэтому
+    // несовместимые случаи отклоняются с объяснением.
+    if (isCircular(request.model.waveguide)) {
+        if (enabled_plates || enabled_dielectrics || enabled_slots) {
+            return rejected(request,
+                            "Для круглого волновода пока поддержан только пустой тракт: "
+                            "пластины, диафрагмы, щели и диэлектрики доступны только в "
+                            "прямоугольном сечении.");
+        }
+        if (request.settings.solver_method != SolverMethod::Automatic &&
+            request.settings.solver_method != SolverMethod::AnalyticRectangular) {
+            return rejected(request,
+                            "Круглый волновод считается аналитически; выберите метод "
+                            "«Автоматически» или «Аналитический».");
+        }
+        return AnalyticWaveguideSolver().solve(request, control);
+    }
+
     // An explicitly chosen method is honoured verbatim: a method that cannot
     // represent this geometry reports why instead of silently falling back, so
     // the printed result always matches the method named in the setup dialog.
@@ -65,7 +86,7 @@ FieldSolution EmSolverDispatcher::solve(const SimulationRequest &request,
                             "Аналитический метод пустого волновода не учитывает пластины и "
                             "диэлектрики: отключите их или выберите другой метод.");
         }
-        return RectangularWaveguideSolver().solve(request, control);
+        return AnalyticWaveguideSolver().solve(request, control);
     case SolverMethod::TransversePartition: {
         std::string reason;
         if (!TransversePecPartitionSolver::canSolve(request, nullptr, &reason)) {
@@ -92,7 +113,7 @@ FieldSolution EmSolverDispatcher::solve(const SimulationRequest &request,
         (!enabled_slots ||
          request.settings.geometry_approximation_policy ==
              GeometryApproximationPolicy::UnperturbedBackgroundForSlots)) {
-        return RectangularWaveguideSolver().solve(request, control);
+        return AnalyticWaveguideSolver().solve(request, control);
     }
 
     if (enabled_plates && !enabled_dielectrics &&

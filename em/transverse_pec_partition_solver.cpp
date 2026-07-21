@@ -1,7 +1,7 @@
 #include "transverse_pec_partition_solver.h"
 
 #include "rectangular_mode_field.h"
-#include "rectangular_waveguide_solver.h"
+#include "analytic_waveguide_solver.h"
 
 #include <algorithm>
 #include <cmath>
@@ -80,7 +80,7 @@ bool TransversePecPartitionSolver::canSolve(const SimulationRequest &request,
         return false;
     }
 
-    const RectangularWaveguideGeometry &guide = request.model.waveguide;
+    const WaveguideGeometry &guide = request.model.waveguide;
     const double plate_min_x_m = plate.center_m.x - 0.5 * plate.size_m.x;
     const double plate_max_x_m = plate.center_m.x + 0.5 * plate.size_m.x;
     const double plate_min_y_m = plate.center_m.y - 0.5 * plate.size_m.y;
@@ -140,7 +140,7 @@ FieldSolution TransversePecPartitionSolver::solve(const SimulationRequest &reque
     SimulationRequest incident_request = request;
     incident_request.model.pec_plates.clear();
     incident_request.model.slot_geometries.clear();
-    FieldSolution solution = RectangularWaveguideSolver().solve(incident_request, control);
+    FieldSolution solution = AnalyticWaveguideSolver().solve(incident_request, control);
     solution.request = request;
     solution.diagnostics.backend_name = "Analytic full transverse PEC partition";
     if (!solution.success || solution.cancelled || !solution.has_selected_mode ||
@@ -158,7 +158,7 @@ FieldSolution TransversePecPartitionSolver::solve(const SimulationRequest &reque
         return solution;
     }
 
-    const RectangularWaveguideGeometry &guide = request.model.waveguide;
+    const WaveguideGeometry &guide = request.model.waveguide;
     const double input_port_z_m = -0.5 * guide.length_m;
     const double output_port_z_m = 0.5 * guide.length_m;
     const double distance_to_input_face_m = partition.input_face_z_m - input_port_z_m;

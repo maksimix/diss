@@ -951,6 +951,19 @@ void MainWindow::showWaveguideDialog()
                                                        4,
                                                        QStringLiteral(" GHz"),
                                                        &dialog);
+    QComboBox *cross_section_combo_box = new QComboBox(&dialog);
+    cross_section_combo_box->addItem(QStringLiteral("Прямоугольное"));
+    cross_section_combo_box->addItem(QStringLiteral("Круглое"));
+    cross_section_combo_box->setCurrentIndex(std::clamp(parameters_.cross_section, 0, 1));
+    QDoubleSpinBox *radius_spin_box = createSpinBox(0.01,
+                                                    10000.0,
+                                                    parameters_.radius_mm,
+                                                    0.1,
+                                                    3,
+                                                    QStringLiteral(" mm"),
+                                                    &dialog);
+    radius_spin_box->setToolTip(QStringLiteral(
+        "Наружный радиус круглого волновода; внутренний меньше на толщину стенки."));
     QComboBox *component_combo_box = new QComboBox(&dialog);
     component_combo_box->addItem(QStringLiteral("component1"));
     component_combo_box->setEnabled(false);
@@ -990,6 +1003,32 @@ void MainWindow::showWaveguideDialog()
     grid_layout->addWidget(component_combo_box, 11, 0, 1, 2);
     grid_layout->addWidget(new QLabel(QStringLiteral("Материал стенок:"), &dialog), 12, 0, 1, 2);
     grid_layout->addWidget(material_combo_box, 13, 0, 1, 2);
+    QLabel *cross_section_label = new QLabel(QStringLiteral("Сечение:"), &dialog);
+    QLabel *radius_label = new QLabel(QStringLiteral("Радиус:"), &dialog);
+    grid_layout->addWidget(cross_section_label, 14, 0);
+    grid_layout->addWidget(radius_label, 14, 1);
+    grid_layout->addWidget(cross_section_combo_box, 15, 0);
+    grid_layout->addWidget(radius_spin_box, 15, 1);
+
+    // У круглого сечения ширина и глубина не имеют смысла, а у прямоугольного —
+    // радиус. Ненужные поля прячутся, чтобы диалог не предлагал задать размер,
+    // который всё равно будет проигнорирован.
+    const auto update_cross_section_fields = [&](int index) {
+        const bool circular = index == 1;
+        radius_label->setVisible(circular);
+        radius_spin_box->setVisible(circular);
+        for (QWidget *widget : {static_cast<QWidget *>(x_min_spin_box),
+                                static_cast<QWidget *>(x_max_spin_box),
+                                static_cast<QWidget *>(y_min_spin_box),
+                                static_cast<QWidget *>(y_max_spin_box)}) {
+            widget->setEnabled(!circular);
+        }
+    };
+    update_cross_section_fields(cross_section_combo_box->currentIndex());
+    connect(cross_section_combo_box,
+            qOverload<int>(&QComboBox::currentIndexChanged),
+            &dialog,
+            update_cross_section_fields);
 
     QVBoxLayout *button_layout = new QVBoxLayout();
     QPushButton *ok_button = new QPushButton(QStringLiteral("OK"), &dialog);
@@ -1013,18 +1052,30 @@ void MainWindow::showWaveguideDialog()
         const double y_max = std::max(y_min_spin_box->value(), y_max_spin_box->value());
         const double z_min = std::min(z_min_spin_box->value(), z_max_spin_box->value());
         const double z_max = std::max(z_min_spin_box->value(), z_max_spin_box->value());
-        if (x_max <= x_min || y_max <= y_min || z_max <= z_min) {
+        const bool circular = cross_section_combo_box->currentIndex() == 1;
+        if (z_max <= z_min || (!circular && (x_max <= x_min || y_max <= y_min))) {
             QMessageBox::warning(&dialog,
                                  QStringLiteral("Brick"),
                                  QStringLiteral("X/Y/Z max must be greater than min."));
+            return false;
+        }
+        if (circular && radius_spin_box->value() <= wall_thickness_spin_box->value()) {
+            QMessageBox::warning(
+                &dialog,
+                QStringLiteral("Brick"),
+                QStringLiteral("Радиус должен быть больше толщины стенки."));
             return false;
         }
 
         waveguide_name_ = name_line_edit->text().trimmed().isEmpty()
                               ? QStringLiteral("wr-90")
                               : name_line_edit->text().trimmed();
-        parameters_.width_mm = x_max - x_min;
-        parameters_.depth_mm = y_max - y_min;
+        parameters_.cross_section = circular ? 1 : 0;
+        parameters_.radius_mm = radius_spin_box->value();
+        if (!circular) {
+            parameters_.width_mm = x_max - x_min;
+            parameters_.depth_mm = y_max - y_min;
+        }
         parameters_.length_mm = z_max - z_min;
         parameters_.wall_thickness_mm = wall_thickness_spin_box->value();
         parameters_.wall_conductivity_s_per_m =

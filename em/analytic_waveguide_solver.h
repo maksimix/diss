@@ -4,7 +4,7 @@
 
 namespace em
 {
-class RectangularWaveguideSolver final : public IEmSolver
+class AnalyticWaveguideSolver final : public IEmSolver
 {
 public:
     FieldSolution solve(const SimulationRequest &request,

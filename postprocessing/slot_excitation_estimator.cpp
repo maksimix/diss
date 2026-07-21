@@ -17,7 +17,7 @@ struct WallFrame
 };
 
 WallFrame wallFrame(em::WallSurface wall,
-                    const em::RectangularWaveguideGeometry &geometry)
+                    const em::WaveguideGeometry &geometry)
 {
     switch (wall) {
     case em::WallSurface::Top:
@@ -33,7 +33,7 @@ WallFrame wallFrame(em::WallSurface wall,
 }
 
 em::Vec3 wallPoint(em::WallSurface wall,
-                   const em::RectangularWaveguideGeometry &geometry,
+                   const em::WaveguideGeometry &geometry,
                    double u_m,
                    double z_m)
 {
@@ -56,7 +56,7 @@ em::ComplexVec3 currentAt(const em::FieldSolution &solution,
                           double u_m,
                           double z_m)
 {
-    const em::RectangularWaveguideGeometry &geometry = solution.request.model.waveguide;
+    const em::WaveguideGeometry &geometry = solution.request.model.waveguide;
     const double offset_m = std::max(1.0e-9,
                                      std::min(geometry.inner_width_m,
                                               geometry.inner_height_m) *
@@ -83,7 +83,7 @@ double SlotExcitationEstimator::normalizedCoupling(const em::FieldSolution &solu
         return 0.0;
     }
 
-    const em::RectangularWaveguideGeometry &geometry = solution.request.model.waveguide;
+    const em::WaveguideGeometry &geometry = solution.request.model.waveguide;
     const WallFrame frame = wallFrame(slot.wall, geometry);
     const double half_length_m = 0.5 * geometry.length_m;
     double maximum_current_a_per_m = 0.0;

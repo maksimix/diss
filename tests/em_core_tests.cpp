@@ -5,7 +5,8 @@
 #include "em/mfem_frequency_domain_backend.h"
 #endif
 #include "em/mode_matching_iris_solver.h"
-#include "em/rectangular_waveguide_solver.h"
+#include "em/analytic_waveguide_solver.h"
+#include "em/cylindrical_bessel.h"
 #include "em/transverse_pec_partition_solver.h"
 #include "postprocessing/field_visualization_generator.h"
 #include "postprocessing/slot_excitation_estimator.h"
@@ -87,7 +88,7 @@ em::SimulationRequest createRequest(double frequency_hz)
 }
 
 double integratePower(const em::IFieldEvaluator &field,
-                      const em::RectangularWaveguideGeometry &geometry,
+                      const em::WaveguideGeometry &geometry,
                       double z_m)
 {
     constexpr int x_samples = 100;
@@ -165,7 +166,7 @@ em::ComplexVec3 numericalCurlMagnetic(const em::IFieldEvaluator &field,
 void testTe10CutoffAndPower()
 {
     const em::SimulationRequest request = createRequest(10.0e9);
-    const em::FieldSolution solution = em::RectangularWaveguideSolver().solve(request);
+    const em::FieldSolution solution = em::AnalyticWaveguideSolver().solve(request);
     expectTrue(solution.success, "TE10 solution succeeds");
     expectTrue(solution.has_selected_mode, "TE10 is selected automatically");
     expectTrue(solution.selected_mode.family == em::ModeFamily::TransverseElectric &&
@@ -208,7 +209,7 @@ void testTe10CutoffAndPower()
 void testPecBoundaryCondition()
 {
     const em::SimulationRequest request = createRequest(10.0e9);
-    const em::FieldSolution solution = em::RectangularWaveguideSolver().solve(request);
+    const em::FieldSolution solution = em::AnalyticWaveguideSolver().solve(request);
     const double half_width_m = 0.5 * request.model.waveguide.inner_width_m;
     const double half_height_m = 0.5 * request.model.waveguide.inner_height_m;
     const double z_m = -0.013;
@@ -238,7 +239,7 @@ void testMaxwellResiduals(const em::ModeSelection &selection, double frequency_h
 {
     em::SimulationRequest request = createRequest(frequency_hz);
     request.excitation = selection;
-    const em::FieldSolution solution = em::RectangularWaveguideSolver().solve(request);
+    const em::FieldSolution solution = em::AnalyticWaveguideSolver().solve(request);
     expectTrue(solution.success && solution.has_selected_mode, "selected mode is solved");
     if (!solution.field) {
         return;
@@ -278,7 +279,7 @@ void testTm11AndDerivedFields()
     selection.n = 1;
     em::SimulationRequest request = createRequest(25.0e9);
     request.excitation = selection;
-    const em::FieldSolution solution = em::RectangularWaveguideSolver().solve(request);
+    const em::FieldSolution solution = em::AnalyticWaveguideSolver().solve(request);
     expectTrue(solution.success && solution.has_selected_mode, "TM11 solution succeeds");
     expectTrue(solution.selected_mode.propagating, "TM11 propagates at 25 GHz");
     expectNear(integratePower(*solution.field,
@@ -299,7 +300,7 @@ void testTm11AndDerivedFields()
 void testBelowCutoff()
 {
     const em::FieldSolution solution =
-        em::RectangularWaveguideSolver().solve(createRequest(5.0e9));
+        em::AnalyticWaveguideSolver().solve(createRequest(5.0e9));
     expectTrue(solution.success, "below-cutoff model remains a valid solve result");
     expectTrue(!solution.has_selected_mode, "no propagating mode is selected below cutoff");
     expectTrue(!solution.diagnostics.warnings.empty(), "below-cutoff result explains the state");
@@ -310,7 +311,7 @@ void testLossyMaterialAndValidation()
     em::SimulationRequest lossy_request = createRequest(10.0e9);
     lossy_request.model.filling_material.conductivity_s_per_m = 0.02;
     const em::FieldSolution lossy_solution =
-        em::RectangularWaveguideSolver().solve(lossy_request);
+        em::AnalyticWaveguideSolver().solve(lossy_request);
     expectTrue(lossy_solution.success && lossy_solution.has_selected_mode,
                "passive lossy filling is solved");
     expectTrue(std::real(lossy_solution.selected_mode.propagation_constant_per_m) > 0.0,
@@ -328,13 +329,13 @@ void testLossyMaterialAndValidation()
     em::SimulationRequest invalid_frequency_request = createRequest(10.0e9);
     invalid_frequency_request.frequency_hz =
         std::numeric_limits<double>::quiet_NaN();
-    expectTrue(!em::RectangularWaveguideSolver().solve(invalid_frequency_request).success,
+    expectTrue(!em::AnalyticWaveguideSolver().solve(invalid_frequency_request).success,
                "non-finite frequency is rejected");
 
     em::SimulationRequest active_material_request = createRequest(10.0e9);
     active_material_request.model.filling_material.relative_permittivity =
         em::Complex(1.0, 0.01);
-    expectTrue(!em::RectangularWaveguideSolver().solve(active_material_request).success,
+    expectTrue(!em::AnalyticWaveguideSolver().solve(active_material_request).success,
                "active material sign is rejected by passive solver");
 
     em::SimulationRequest invalid_tm_request = createRequest(10.0e9);
@@ -342,19 +343,19 @@ void testLossyMaterialAndValidation()
     invalid_tm_request.excitation.family = em::ModeFamily::TransverseMagnetic;
     invalid_tm_request.excitation.m = 1;
     invalid_tm_request.excitation.n = 0;
-    expectTrue(!em::RectangularWaveguideSolver().solve(invalid_tm_request).success,
+    expectTrue(!em::AnalyticWaveguideSolver().solve(invalid_tm_request).success,
                "nonexistent TM10 mode is rejected");
 
     em::SimulationRequest invalid_power_request = createRequest(10.0e9);
     invalid_power_request.settings.normalization_power_w = 0.0;
-    expectTrue(!em::RectangularWaveguideSolver().solve(invalid_power_request).success,
+    expectTrue(!em::AnalyticWaveguideSolver().solve(invalid_power_request).success,
                "zero normalization power is rejected");
 }
 
 void testVisualizationPrimitives()
 {
     const em::SimulationRequest request = createRequest(10.0e9);
-    const em::FieldSolution solution = em::RectangularWaveguideSolver().solve(request);
+    const em::FieldSolution solution = em::AnalyticWaveguideSolver().solve(request);
     const std::vector<postprocessing::VisualizationPrimitive> primitives =
         postprocessing::FieldVisualizationGenerator().generate(solution);
     int electric_count = 0;
@@ -414,7 +415,7 @@ void testVisualizationPrimitives()
 void testTe10ElectricFluxDensity()
 {
     const em::SimulationRequest request = createRequest(10.0e9);
-    const em::FieldSolution solution = em::RectangularWaveguideSolver().solve(request);
+    const em::FieldSolution solution = em::AnalyticWaveguideSolver().solve(request);
     expectTrue(solution.success && solution.field,
                "TE10 electric-density test has a field solution");
     if (!solution.field) {
@@ -503,7 +504,7 @@ void testSlotCurrentMaskAndExcitationEstimate()
     centered_slot.width_m = 1.0e-3;
     centered_request.model.slot_geometries.push_back(centered_slot);
     const em::FieldSolution centered_solution =
-        em::RectangularWaveguideSolver().solve(centered_request);
+        em::AnalyticWaveguideSolver().solve(centered_request);
     const postprocessing::SlotExcitationEstimator estimator;
     expectTrue(estimator.normalizedCoupling(centered_solution, centered_slot) < 1.0e-6,
                "centered longitudinal TE10 slot has zero first-order coupling");
@@ -513,7 +514,7 @@ void testSlotCurrentMaskAndExcitationEstimate()
     em::SimulationRequest offset_request = createRequest(10.0e9);
     offset_request.model.slot_geometries.push_back(offset_slot);
     const em::FieldSolution offset_solution =
-        em::RectangularWaveguideSolver().solve(offset_request);
+        em::AnalyticWaveguideSolver().solve(offset_request);
     expectTrue(estimator.normalizedCoupling(offset_solution, offset_slot) > 0.10,
                "offset longitudinal slot couples to crossing surface current");
 
@@ -522,7 +523,7 @@ void testSlotCurrentMaskAndExcitationEstimate()
     em::SimulationRequest transverse_request = createRequest(10.0e9);
     transverse_request.model.slot_geometries.push_back(transverse_slot);
     const em::FieldSolution transverse_solution =
-        em::RectangularWaveguideSolver().solve(transverse_request);
+        em::AnalyticWaveguideSolver().solve(transverse_request);
     expectTrue(estimator.normalizedCoupling(transverse_solution, transverse_slot) > 0.25,
                "transverse slot couples to longitudinal surface current");
 
@@ -551,7 +552,7 @@ void testCooperativeCancellation()
     em::SolveControl solve_control;
     solve_control.cancellation_requested = []() { return true; };
     const em::FieldSolution cancelled_solution =
-        em::RectangularWaveguideSolver().solve(createRequest(10.0e9), solve_control);
+        em::AnalyticWaveguideSolver().solve(createRequest(10.0e9), solve_control);
     expectTrue(cancelled_solution.cancelled, "solver reports cooperative cancellation");
     expectTrue(!cancelled_solution.success && !cancelled_solution.field,
                "cancelled solver result cannot be consumed as a field solution");
@@ -562,12 +563,12 @@ void testCooperativeCancellation()
         return ++cancellation_poll_count > 4;
     };
     const em::FieldSolution interrupted_solution =
-        em::RectangularWaveguideSolver().solve(createRequest(10.0e9), delayed_control);
+        em::AnalyticWaveguideSolver().solve(createRequest(10.0e9), delayed_control);
     expectTrue(interrupted_solution.cancelled && cancellation_poll_count > 4,
                "solver polls cancellation during computation");
 
     const em::FieldSolution solution =
-        em::RectangularWaveguideSolver().solve(createRequest(10.0e9));
+        em::AnalyticWaveguideSolver().solve(createRequest(10.0e9));
     postprocessing::GenerationControl generation_control;
     generation_control.cancellation_requested = []() { return true; };
     const std::vector<postprocessing::VisualizationPrimitive> primitives =
@@ -782,7 +783,7 @@ void testConductorLossAndQ()
 {
     em::SimulationRequest request = createRequest(10.0e9);
     request.model.waveguide.wall_conductivity_s_per_m = 5.8e7;   // copper
-    const em::FieldSolution solution = em::RectangularWaveguideSolver().solve(request);
+    const em::FieldSolution solution = em::AnalyticWaveguideSolver().solve(request);
     expectTrue(solution.success && solution.has_selected_mode, "lossy-wall TE10 solves");
 
     const double a = request.model.waveguide.inner_width_m;
@@ -823,7 +824,7 @@ void testConductorLossAndQ()
                    std::to_string(quality_factor));
 
     const em::FieldSolution lossless =
-        em::RectangularWaveguideSolver().solve(createRequest(10.0e9));
+        em::AnalyticWaveguideSolver().solve(createRequest(10.0e9));
     expectNear(lossless.diagnostics.conductor_attenuation_np_per_m, 0.0, 1.0e-15,
                "perfect walls report zero conductor attenuation");
     expectNear(std::abs(lossless.scattering.s21), 1.0, 1.0e-12,
@@ -835,7 +836,7 @@ void testConductorLossAndQ()
 void testFieldSliceAndAnimation()
 {
     const em::SimulationRequest request = createRequest(10.0e9);
-    const em::FieldSolution solution = em::RectangularWaveguideSolver().solve(request);
+    const em::FieldSolution solution = em::AnalyticWaveguideSolver().solve(request);
     const postprocessing::FieldVisualizationGenerator generator;
     const postprocessing::FieldSliceData slice =
         generator.generateSlice(solution, postprocessing::SlicePlaneKind::HorizontalXZ);
@@ -1361,8 +1362,186 @@ void testMfemCenteredPecPost()
 #endif
 }
 
+em::SimulationRequest createCircularRequest(double frequency_hz, double radius_m)
+{
+    em::SimulationRequest request;
+    request.frequency_hz = frequency_hz;
+    request.model.waveguide.cross_section = em::WaveguideCrossSection::Circular;
+    request.model.waveguide.inner_radius_m = radius_m;
+    request.model.waveguide.length_m = 50.0e-3;
+    request.model.waveguide.wall_thickness_m = 0.1e-3;
+    request.settings.maximum_m = 3;
+    request.settings.maximum_n = 3;
+    request.settings.normalization_power_w = 1.0;
+    return request;
+}
+
+void testCircularBesselRoots()
+{
+    // Табличные значения нулей J_m и J_m' (Abramowitz & Stegun, табл. 9.5).
+    expectNear(em::besselJZero(0, 1), 2.4048255577, 1.0e-8, "p_01 = 2.40483");
+    expectNear(em::besselJZero(0, 2), 5.5200781103, 1.0e-8, "p_02 = 5.52008");
+    expectNear(em::besselJZero(1, 1), 3.8317059702, 1.0e-8, "p_11 = 3.83171");
+    expectNear(em::besselJZero(2, 1), 5.1356223019, 1.0e-8, "p_21 = 5.13562");
+    expectNear(em::besselJDerivativeZero(1, 1), 1.8411837814, 1.0e-8, "p'_11 = 1.84118");
+    expectNear(em::besselJDerivativeZero(2, 1), 3.0542369282, 1.0e-8, "p'_21 = 3.05424");
+    expectNear(em::besselJDerivativeZero(0, 1), 3.8317059702, 1.0e-8, "p'_01 = 3.83171");
+    expectNear(em::besselJDerivativeZero(1, 2), 5.3314427735, 1.0e-8, "p'_12 = 5.33144");
+
+    // Найденные корни действительно обнуляют свою функцию.
+    expectNear(em::besselJ(0, em::besselJZero(0, 1)), 0.0, 1.0e-12, "J0 в своём нуле равен нулю");
+    expectNear(em::besselJDerivative(1, em::besselJDerivativeZero(1, 1)),
+               0.0,
+               1.0e-12,
+               "J1' в своём нуле равен нулю");
+}
+
+void testCircularWaveguideModes()
+{
+    // Радиус подобран так, чтобы на 10 ГГц распространялась только TE11:
+    // f_c(TE11) = 1.8412 c / (2 pi a) = 8.79 ГГц, f_c(TM01) = 11.5 ГГц.
+    const double radius_m = 10.0e-3;
+    const em::SimulationRequest request = createCircularRequest(10.0e9, radius_m);
+    const em::FieldSolution solution = em::AnalyticWaveguideSolver().solve(request);
+    expectTrue(solution.success, "круглый волновод считается");
+    expectTrue(solution.has_selected_mode, "мода круглого волновода выбрана");
+    expectTrue(solution.selected_mode.family == em::ModeFamily::TransverseElectric &&
+                   solution.selected_mode.m == 1 && solution.selected_mode.n == 1,
+               "низшая мода круглого волновода — TE11");
+
+    const double expected_te11_hz =
+        1.8411837814 * em::speed_of_light_m_per_s / (2.0 * em::pi * radius_m);
+    expectNear(solution.selected_mode.cutoff_frequency_hz,
+               expected_te11_hz,
+               expected_te11_hz * 1.0e-9,
+               "частота отсечки TE11");
+
+    // Следующая мода по частоте отсечки — TM01 с нулём J_0.
+    const double expected_tm01_hz =
+        2.4048255577 * em::speed_of_light_m_per_s / (2.0 * em::pi * radius_m);
+    const auto tm01 = std::find_if(solution.available_modes.begin(),
+                                   solution.available_modes.end(),
+                                   [](const em::ModeDescriptor &mode) {
+                                       return mode.family == em::ModeFamily::TransverseMagnetic &&
+                                              mode.m == 0 && mode.n == 1;
+                                   });
+    expectTrue(tm01 != solution.available_modes.end(), "TM01 присутствует в наборе мод");
+    if (tm01 != solution.available_modes.end()) {
+        expectNear(tm01->cutoff_frequency_hz,
+                   expected_tm01_hz,
+                   expected_tm01_hz * 1.0e-9,
+                   "частота отсечки TM01");
+        expectTrue(!tm01->propagating, "TM01 на 10 ГГц ещё заперта");
+    }
+
+    // Мощность нормирована на 1 Вт: независимый полярный интеграл вектора
+    // Пойнтинга по сечению.
+    if (solution.field) {
+        constexpr int radial_samples = 200;
+        constexpr int azimuthal_samples = 240;
+        const double dr_m = radius_m / radial_samples;
+        const double dphi_rad = 2.0 * em::pi / azimuthal_samples;
+        double power_w = 0.0;
+        for (int radial_index = 0; radial_index < radial_samples; ++radial_index) {
+            const double r_m = (radial_index + 0.5) * dr_m;
+            for (int azimuthal_index = 0; azimuthal_index < azimuthal_samples;
+                 ++azimuthal_index) {
+                const double phi_rad = (azimuthal_index + 0.5) * dphi_rad;
+                const em::FieldPhasor sample = solution.field->evaluate(
+                    {r_m * std::cos(phi_rad), r_m * std::sin(phi_rad), -0.02});
+                power_w += em::timeAveragePoynting(sample.electric_v_per_m,
+                                                   sample.magnetic_a_per_m)
+                               .z *
+                           r_m * dr_m * dphi_rad;
+            }
+        }
+        expectNear(power_w, 1.0, 5.0e-3, "мощность круглой моды нормирована на 1 Вт");
+    }
+}
+
+void testCircularPecBoundaryAndMaxwell()
+{
+    const double radius_m = 10.0e-3;
+    em::SimulationRequest request = createCircularRequest(10.0e9, radius_m);
+    const em::FieldSolution solution = em::AnalyticWaveguideSolver().solve(request);
+    if (!solution.field) {
+        fail("круглая мода не дала поля");
+        return;
+    }
+
+    // На идеально проводящей стенке тангенциальное электрическое поле (E_phi и
+    // E_z) должно обращаться в ноль; нормальная составляющая E_r — нет.
+    double maximum_tangential = 0.0;
+    double maximum_total = 0.0;
+    for (const double phi_rad : {0.3, 1.1, 2.7, 4.2, 5.6}) {
+        const double sample_radius_m = radius_m * (1.0 - 1.0e-7);
+        const em::FieldPhasor sample = solution.field->evaluate(
+            {sample_radius_m * std::cos(phi_rad), sample_radius_m * std::sin(phi_rad), -0.013});
+        const em::Complex azimuthal = -sample.electric_v_per_m.x * std::sin(phi_rad) +
+                                      sample.electric_v_per_m.y * std::cos(phi_rad);
+        const double tangential =
+            std::sqrt(std::norm(azimuthal) + std::norm(sample.electric_v_per_m.z));
+        maximum_tangential = std::max(maximum_tangential, tangential);
+        maximum_total = std::max(maximum_total, em::magnitude(sample.electric_v_per_m));
+    }
+    expectTrue(maximum_total > 0.0, "поле у стенки круглого волновода не нулевое");
+    expectTrue(maximum_tangential < 1.0e-6 * std::max(1.0, maximum_total),
+               "тангенциальное E на стенке круглого волновода обращается в ноль");
+
+    // Уравнения Максвелла в точке внутри сечения.
+    const em::Vec3 position_m{0.0031, -0.0017, -0.0063};
+    const double step_m = 2.0e-7;
+    const em::FieldPhasor field = solution.field->evaluate(position_m);
+    const em::Complex imaginary_unit(0.0, 1.0);
+    const double omega = 2.0 * em::pi * request.frequency_hz;
+    const em::ComplexVec3 curl_e = numericalCurlElectric(*solution.field, position_m, step_m);
+    const em::ComplexVec3 curl_h = numericalCurlMagnetic(*solution.field, position_m, step_m);
+    const em::ComplexVec3 faraday_term =
+        scaled(field.magnetic_a_per_m, imaginary_unit * omega * em::vacuum_permeability_h_per_m);
+    const em::ComplexVec3 ampere_term =
+        scaled(field.electric_v_per_m, imaginary_unit * omega * em::vacuum_permittivity_f_per_m);
+    const double faraday_scale = std::max(em::magnitude(curl_e), em::magnitude(faraday_term));
+    const double ampere_scale = std::max(em::magnitude(curl_h), em::magnitude(ampere_term));
+    expectTrue(em::magnitude(curl_e + faraday_term) < 1.0e-5 * faraday_scale,
+               "закон Фарадея выполняется для круглой моды");
+    expectTrue(em::magnitude(curl_h - ampere_term) < 1.0e-5 * ampere_scale,
+               "закон Ампера выполняется для круглой моды");
+}
+
+void testCircularDispatchPolicy()
+{
+    em::EmSolverDispatcher dispatcher(std::make_shared<TestFemBackend>());
+
+    const em::FieldSolution empty = dispatcher.solve(createCircularRequest(10.0e9, 10.0e-3));
+    expectTrue(empty.success, "пустой круглый волновод считается диспетчером");
+    expectTrue(empty.diagnostics.backend_name == "Analytic circular-waveguide TE/TM",
+               "круглый волновод уходит в аналитический решатель");
+
+    // Пластины в круглом сечении пока не поддержаны: диспетчер обязан отказать
+    // с объяснением, а не молча посчитать прямоугольную геометрию в FEM.
+    em::SimulationRequest with_plate = createCircularRequest(10.0e9, 10.0e-3);
+    em::PecPlateGeometry plate;
+    plate.enabled = true;
+    plate.size_m = {5.0e-3, 5.0e-3, 0.5e-3};
+    with_plate.model.pec_plates.push_back(plate);
+    const em::FieldSolution rejected_plate = dispatcher.solve(with_plate);
+    expectTrue(!rejected_plate.success && !rejected_plate.error_message.empty(),
+               "пластина в круглом волноводе отклоняется с сообщением");
+
+    // Явно выбранный метод, не работающий с круглым сечением, тоже отклоняется.
+    em::SimulationRequest forced_fem = createCircularRequest(10.0e9, 10.0e-3);
+    forced_fem.settings.solver_method = em::SolverMethod::FiniteElement;
+    const em::FieldSolution rejected_fem = dispatcher.solve(forced_fem);
+    expectTrue(!rejected_fem.success && !rejected_fem.error_message.empty(),
+               "FEM для круглого волновода отклоняется с сообщением");
+}
+
 int main()
 {
+    testCircularBesselRoots();
+    testCircularWaveguideModes();
+    testCircularPecBoundaryAndMaxwell();
+    testCircularDispatchPolicy();
     testTe10CutoffAndPower();
     testPecBoundaryCondition();
 

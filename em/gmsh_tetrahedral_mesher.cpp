@@ -100,7 +100,7 @@ void appendRotatedCylinder(std::ostringstream &script,
 void appendSlotCutter(std::ostringstream &script,
                       int tag,
                       const SlotGeometry &slot,
-                      const RectangularWaveguideGeometry &waveguide)
+                      const WaveguideGeometry &waveguide)
 {
     const double wall = waveguide.wall_thickness_m;
     Vec3 center;

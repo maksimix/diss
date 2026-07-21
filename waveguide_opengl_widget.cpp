@@ -63,13 +63,23 @@ void WaveguideOpenGLWidget::setCalculationResult(const WaveguideCalculationResul
 void WaveguideOpenGLWidget::setModelPreview(const WaveguideParameters &parameters)
 {
     result_.parameters = parameters;
-    result_.inner_width_mm = std::max(0.0,
-                                      parameters.width_mm - 2.0 * parameters.wall_thickness_mm);
-    result_.inner_depth_mm = std::max(0.0,
-                                      parameters.depth_mm - 2.0 * parameters.wall_thickness_mm);
-    result_.valid = parameters.width_mm > 0.0 &&
-                    parameters.depth_mm > 0.0 &&
-                    parameters.length_mm > 0.0;
+    if (parameters.cross_section == 1) {
+        // У круглого сечения внутренние «ширина» и «глубина» равны внутреннему
+        // диаметру: это описанный квадрат, по которому строится и рамка вида.
+        const double inner_diameter_mm =
+            std::max(0.0, 2.0 * (parameters.radius_mm - parameters.wall_thickness_mm));
+        result_.inner_width_mm = inner_diameter_mm;
+        result_.inner_depth_mm = inner_diameter_mm;
+        result_.valid = parameters.radius_mm > 0.0 && parameters.length_mm > 0.0;
+    } else {
+        result_.inner_width_mm =
+            std::max(0.0, parameters.width_mm - 2.0 * parameters.wall_thickness_mm);
+        result_.inner_depth_mm =
+            std::max(0.0, parameters.depth_mm - 2.0 * parameters.wall_thickness_mm);
+        result_.valid = parameters.width_mm > 0.0 &&
+                        parameters.depth_mm > 0.0 &&
+                        parameters.length_mm > 0.0;
+    }
     update();
 }
 
@@ -606,8 +616,96 @@ void WaveguideOpenGLWidget::notifySlotEdited()
     }
 }
 
+// Кольцевая стенка круглого волновода: боковые поверхности двух соосных
+// цилиндров и торцевые кольца между ними.
+void WaveguideOpenGLWidget::drawCircularShell(double inner_radius,
+                                              double outer_radius,
+                                              double z0,
+                                              double z1,
+                                              const QColor &metal_color,
+                                              const QColor &edge_color) const
+{
+    constexpr int segment_count = 64;
+    const auto angle_at = [](int index) {
+        return 2.0 * pi * index / segment_count;
+    };
+
+    setColor(metal_color, 0.22);
+    glBegin(GL_QUADS);
+    for (int index = 0; index < segment_count; ++index) {
+        const double a0 = angle_at(index);
+        const double a1 = angle_at(index + 1);
+        const double c0 = std::cos(a0);
+        const double s0 = std::sin(a0);
+        const double c1 = std::cos(a1);
+        const double s1 = std::sin(a1);
+
+        // Внешняя боковая поверхность.
+        glVertex3d(outer_radius * c0, outer_radius * s0, z0);
+        glVertex3d(outer_radius * c1, outer_radius * s1, z0);
+        glVertex3d(outer_radius * c1, outer_radius * s1, z1);
+        glVertex3d(outer_radius * c0, outer_radius * s0, z1);
+
+        // Внутренняя боковая поверхность (стенка канала).
+        glVertex3d(inner_radius * c0, inner_radius * s0, z0);
+        glVertex3d(inner_radius * c1, inner_radius * s1, z0);
+        glVertex3d(inner_radius * c1, inner_radius * s1, z1);
+        glVertex3d(inner_radius * c0, inner_radius * s0, z1);
+
+        // Торцевые кольца.
+        for (const double z : {z0, z1}) {
+            glVertex3d(inner_radius * c0, inner_radius * s0, z);
+            glVertex3d(outer_radius * c0, outer_radius * s0, z);
+            glVertex3d(outer_radius * c1, outer_radius * s1, z);
+            glVertex3d(inner_radius * c1, inner_radius * s1, z);
+        }
+    }
+    glEnd();
+
+    ::glLineWidth(1.4f);
+    setColor(edge_color, 0.5);
+    for (const double radius : {inner_radius, outer_radius}) {
+        for (const double z : {z0, z1}) {
+            glBegin(GL_LINE_LOOP);
+            for (int index = 0; index < segment_count; ++index) {
+                const double angle = angle_at(index);
+                glVertex3d(radius * std::cos(angle), radius * std::sin(angle), z);
+            }
+            glEnd();
+        }
+    }
+}
+
 void WaveguideOpenGLWidget::drawWaveguide() const
 {
+    const QColor shell_metal_color(116, 132, 148);
+    const QColor shell_edge_color(212, 226, 240);
+    if (result_.parameters.cross_section == 1) {
+        const double outer_radius = result_.parameters.radius_mm;
+        const double inner_radius = std::max(0.0, 0.5 * result_.inner_width_mm);
+        const double half_length = 0.5 * result_.parameters.length_mm;
+        drawCircularShell(inner_radius,
+                          outer_radius,
+                          -half_length,
+                          half_length,
+                          shell_metal_color,
+                          shell_edge_color);
+
+        // Подсветка входного и выходного отверстий, как у прямоугольного тракта.
+        ::glLineWidth(2.0f);
+        setColor(QColor(128, 210, 255), 0.72);
+        constexpr int segment_count = 64;
+        for (const double z : {-half_length, half_length}) {
+            glBegin(GL_LINE_LOOP);
+            for (int index = 0; index < segment_count; ++index) {
+                const double angle = 2.0 * pi * index / segment_count;
+                glVertex3d(inner_radius * std::cos(angle), inner_radius * std::sin(angle), z);
+            }
+            glEnd();
+        }
+        return;
+    }
+
     const double outer_width = result_.parameters.width_mm;
     const double outer_depth = result_.parameters.depth_mm;
     const double length = result_.parameters.length_mm;
@@ -1243,8 +1341,11 @@ double WaveguideOpenGLWidget::modelRadiusMm() const
         return 60.0;
     }
 
-    const double x = result_.parameters.width_mm;
-    const double y = result_.parameters.depth_mm;
+    const bool circular = result_.parameters.cross_section == 1;
+    const double x = circular ? 2.0 * result_.parameters.radius_mm
+                              : result_.parameters.width_mm;
+    const double y = circular ? 2.0 * result_.parameters.radius_mm
+                              : result_.parameters.depth_mm;
     const double z = result_.parameters.length_mm;
     return 0.5 * std::sqrt(x * x + y * y + z * z);
 }

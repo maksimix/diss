@@ -61,15 +61,47 @@ em::WallSurface toEmWallSurface(int surface)
     }
 }
 
+bool isCircularSection(const WaveguideParameters &parameters)
+{
+    return parameters.cross_section == 1;
+}
+
 QString validateParameters(const WaveguideParameters &parameters)
 {
-    if (!positiveFinite(parameters.length_mm) ||
-        !positiveFinite(parameters.width_mm) ||
-        !positiveFinite(parameters.depth_mm)) {
-        return QStringLiteral("Размеры волновода должны быть конечными и больше нуля.");
+    if (!positiveFinite(parameters.length_mm)) {
+        return QStringLiteral("Длина волновода должна быть конечной и больше нуля.");
     }
     if (!positiveFinite(parameters.wall_thickness_mm)) {
         return QStringLiteral("Толщина стенки должна быть конечной и больше нуля.");
+    }
+    if (isCircularSection(parameters)) {
+        if (!positiveFinite(parameters.radius_mm)) {
+            return QStringLiteral("Радиус волновода должен быть конечным и больше нуля.");
+        }
+        if (parameters.radius_mm <= parameters.wall_thickness_mm) {
+            return QStringLiteral("Толщина стенки перекрывает внутреннюю полость волновода.");
+        }
+        // Круглое сечение пока считается только как пустой тракт: вставки в нём
+        // не поддержаны ни одним решателем, поэтому ошибка выдаётся здесь, а не
+        // после долгого расчёта.
+        const bool has_plates = std::any_of(parameters.pec_plates.cbegin(),
+                                            parameters.pec_plates.cend(),
+                                            [](const PecPlateParameters &plate) {
+                                                return plate.enabled;
+                                            });
+        if (has_plates || parameters.slot_enabled) {
+            return QStringLiteral(
+                "В круглом волноводе пока поддержан только пустой тракт: отключите щель и "
+                "пластины или вернитесь к прямоугольному сечению.");
+        }
+        if (!positiveFinite(parameters.frequency_ghz)) {
+            return QStringLiteral("Частота должна быть конечной и больше нуля.");
+        }
+        return {};
+    }
+    if (!positiveFinite(parameters.width_mm) ||
+        !positiveFinite(parameters.depth_mm)) {
+        return QStringLiteral("Размеры волновода должны быть конечными и больше нуля.");
     }
     if (parameters.width_mm <= 2.0 * parameters.wall_thickness_mm ||
         parameters.depth_mm <= 2.0 * parameters.wall_thickness_mm) {
@@ -235,6 +267,11 @@ em::SimulationRequest buildRequest(const WaveguideParameters &parameters,
 {
     em::SimulationRequest request;
     request.frequency_hz = parameters.frequency_ghz * 1.0e9;
+    if (isCircularSection(parameters)) {
+        request.model.waveguide.cross_section = em::WaveguideCrossSection::Circular;
+        // Для круглого сечения inner_width_mm несёт внутренний диаметр.
+        request.model.waveguide.inner_radius_m = mmToM(0.5 * inner_width_mm);
+    }
     request.model.waveguide.inner_width_m = mmToM(inner_width_mm);
     request.model.waveguide.inner_height_m = mmToM(inner_height_mm);
     request.model.waveguide.length_m = mmToM(parameters.length_mm);
@@ -325,12 +362,24 @@ WaveguideCalculationResult WaveguideCalculator::calculate(
         return result;
     }
 
-    result.inner_width_mm = parameters.width_mm - 2.0 * parameters.wall_thickness_mm;
-    result.inner_depth_mm = parameters.depth_mm - 2.0 * parameters.wall_thickness_mm;
-    result.area_mm2 = result.inner_width_mm * result.inner_depth_mm;
+    // У круглого сечения inner_width_mm и inner_depth_mm — внутренний диаметр
+    // по обеим осям: описанный квадрат сечения. Это позволяет отрисовке и
+    // постобработке пользоваться теми же границами, а площадь и объём считаются
+    // по кругу.
+    const bool circular = isCircularSection(parameters);
+    const double inner_radius_mm = parameters.radius_mm - parameters.wall_thickness_mm;
+    result.inner_width_mm = circular
+                                ? 2.0 * inner_radius_mm
+                                : parameters.width_mm - 2.0 * parameters.wall_thickness_mm;
+    result.inner_depth_mm = circular
+                                ? 2.0 * inner_radius_mm
+                                : parameters.depth_mm - 2.0 * parameters.wall_thickness_mm;
+    result.area_mm2 = circular ? em::pi * inner_radius_mm * inner_radius_mm
+                               : result.inner_width_mm * result.inner_depth_mm;
     result.cavity_volume_mm3 = result.area_mm2 * parameters.length_mm;
-    const double outer_volume_mm3 = parameters.width_mm * parameters.depth_mm *
-                                    parameters.length_mm;
+    const double outer_volume_mm3 =
+        circular ? em::pi * parameters.radius_mm * parameters.radius_mm * parameters.length_mm
+                 : parameters.width_mm * parameters.depth_mm * parameters.length_mm;
     result.metal_volume_mm3 = std::max(0.0,
                                        outer_volume_mm3 - result.cavity_volume_mm3);
     for (const PecPlateParameters &plate : parameters.pec_plates) {

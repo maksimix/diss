@@ -10,12 +10,14 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 set(EM_CORE_SOURCES
+    em/circular_mode_field.cpp
+    em/cylindrical_bessel.cpp
     em/em_solver_dispatcher.cpp
     em/fem_frequency_domain_solver.cpp
     em/gmsh_tetrahedral_mesher.cpp
     em/mode_matching_iris_solver.cpp
     em/rectangular_mode_field.cpp
-    em/rectangular_waveguide_solver.cpp
+    em/analytic_waveguide_solver.cpp
     em/transverse_pec_partition_solver.cpp
     postprocessing/field_visualization_generator.cpp
     postprocessing/slot_excitation_estimator.cpp)

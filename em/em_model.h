@@ -29,16 +29,72 @@ struct Material
     double conductivity_s_per_m = 0.0;
 };
 
-struct RectangularWaveguideGeometry
+enum class WaveguideCrossSection
 {
+    Rectangular,
+    Circular
+};
+
+struct WaveguideGeometry
+{
+    WaveguideCrossSection cross_section = WaveguideCrossSection::Rectangular;
+    // Прямоугольное сечение.
     double inner_width_m = 0.0;
     double inner_height_m = 0.0;
+    // Круглое сечение.
+    double inner_radius_m = 0.0;
     double length_m = 0.0;
     double wall_thickness_m = 0.0;
     // Finite wall conductivity for the perturbation conductor-loss model.
     // 0 (or negative) means a perfect electric conductor: lossless walls.
     double wall_conductivity_s_per_m = 0.0;
 };
+
+inline bool isCircular(const WaveguideGeometry &geometry)
+{
+    return geometry.cross_section == WaveguideCrossSection::Circular;
+}
+
+// Полуразмеры описанного прямоугольника сечения. Для круглого волновода это
+// радиус по обеим осям, поэтому сетки и рамки, построенные по этим границам,
+// остаются корректными — точки вне сечения отсекает insideCrossSection().
+inline double crossSectionHalfWidth(const WaveguideGeometry &geometry)
+{
+    return isCircular(geometry) ? geometry.inner_radius_m : 0.5 * geometry.inner_width_m;
+}
+
+inline double crossSectionHalfHeight(const WaveguideGeometry &geometry)
+{
+    return isCircular(geometry) ? geometry.inner_radius_m : 0.5 * geometry.inner_height_m;
+}
+
+inline double crossSectionArea(const WaveguideGeometry &geometry)
+{
+    return isCircular(geometry)
+               ? pi * geometry.inner_radius_m * geometry.inner_radius_m
+               : geometry.inner_width_m * geometry.inner_height_m;
+}
+
+inline bool insideCrossSection(const WaveguideGeometry &geometry,
+                               double x_m,
+                               double y_m,
+                               double tolerance_m = 0.0)
+{
+    if (isCircular(geometry)) {
+        const double radius_m = geometry.inner_radius_m + tolerance_m;
+        return x_m * x_m + y_m * y_m <= radius_m * radius_m;
+    }
+    return std::abs(x_m) <= 0.5 * geometry.inner_width_m + tolerance_m &&
+           std::abs(y_m) <= 0.5 * geometry.inner_height_m + tolerance_m;
+}
+
+// Периметр стенки, по которому берётся контурный интеграл потерь.
+inline double crossSectionPerimeter(const WaveguideGeometry &geometry)
+{
+    return isCircular(geometry)
+               ? 2.0 * pi * geometry.inner_radius_m
+               : 2.0 * (geometry.inner_width_m + geometry.inner_height_m);
+}
 
 struct SlotGeometry
 {
@@ -153,7 +209,7 @@ struct FemSolverSettings
 
 struct EmModel
 {
-    RectangularWaveguideGeometry waveguide;
+    WaveguideGeometry waveguide;
     Material filling_material;
     std::vector<SlotGeometry> slot_geometries;
     std::vector<PecPlateGeometry> pec_plates;

@@ -83,19 +83,18 @@ em::Vec3 addScaled(const em::Vec3 &position,
     return position + direction * scale;
 }
 
-bool insideVolume(const em::RectangularWaveguideGeometry &geometry,
+bool insideVolume(const em::WaveguideGeometry &geometry,
                   const em::Vec3 &position_m)
 {
     const double tolerance_m = 1.0e-10;
-    return position_m.x >= -0.5 * geometry.inner_width_m - tolerance_m &&
-           position_m.x <= 0.5 * geometry.inner_width_m + tolerance_m &&
-           position_m.y >= -0.5 * geometry.inner_height_m - tolerance_m &&
-           position_m.y <= 0.5 * geometry.inner_height_m + tolerance_m &&
+    // Сечение может быть и круглым: проверка формы вынесена в модель, поэтому
+    // обрезка линий поля по стенке одинаково работает для обоих случаев.
+    return em::insideCrossSection(geometry, position_m.x, position_m.y, tolerance_m) &&
            position_m.z >= -0.5 * geometry.length_m - tolerance_m &&
            position_m.z <= 0.5 * geometry.length_m + tolerance_m;
 }
 
-em::Vec3 lastInsidePoint(const em::RectangularWaveguideGeometry &geometry,
+em::Vec3 lastInsidePoint(const em::WaveguideGeometry &geometry,
                          const em::Vec3 &inside_point_m,
                          const em::Vec3 &outside_point_m)
 {
@@ -187,7 +186,7 @@ std::vector<em::Vec3> traceVolumeDirection(const em::FieldSolution &solution,
                                            int maximum_steps,
                                            const GenerationControl &control)
 {
-    const em::RectangularWaveguideGeometry &geometry = solution.request.model.waveguide;
+    const em::WaveguideGeometry &geometry = solution.request.model.waveguide;
     std::vector<em::Vec3> points;
     em::Vec3 position_m = seed_m;
 
@@ -261,7 +260,7 @@ double maximumVolumeMagnitude(const em::FieldSolution &solution,
                               double phase_rad,
                               const GenerationControl &control)
 {
-    const em::RectangularWaveguideGeometry &geometry = solution.request.model.waveguide;
+    const em::WaveguideGeometry &geometry = solution.request.model.waveguide;
     double maximum_magnitude = 0.0;
     for (int x_index = 0; x_index < 9; ++x_index) {
         if (control.isCancellationRequested()) {
@@ -313,7 +312,7 @@ void appendTe10ElectricFluxArrows(std::vector<VisualizationPrimitive> &primitive
                                   double phase_rad,
                                   const GenerationControl &control)
 {
-    const em::RectangularWaveguideGeometry &geometry = solution.request.model.waveguide;
+    const em::WaveguideGeometry &geometry = solution.request.model.waveguide;
     double maximum_magnitude = 0.0;
     for (int z_index = 0; z_index < 11; ++z_index) {
         if (control.isCancellationRequested()) {
@@ -394,7 +393,7 @@ void appendVolumeLines(std::vector<VisualizationPrimitive> &primitives,
                        double phase_rad,
                        const GenerationControl &control)
 {
-    const em::RectangularWaveguideGeometry &geometry = solution.request.model.waveguide;
+    const em::WaveguideGeometry &geometry = solution.request.model.waveguide;
     const double maximum_magnitude = maximumVolumeMagnitude(solution,
                                                              quantity,
                                                              phase_rad,
@@ -463,7 +462,7 @@ void appendVolumeLines(std::vector<VisualizationPrimitive> &primitives,
 }
 
 em::Vec3 surfacePoint(const WallDefinition &wall,
-                      const em::RectangularWaveguideGeometry &geometry,
+                      const em::WaveguideGeometry &geometry,
                       double u_m,
                       double z_m)
 {
@@ -513,7 +512,7 @@ VectorSample surfaceCurrentAt(const em::FieldSolution &solution,
         return {};
     }
 
-    const em::RectangularWaveguideGeometry &geometry = solution.request.model.waveguide;
+    const em::WaveguideGeometry &geometry = solution.request.model.waveguide;
     const double inside_offset_m =
         std::max(1.0e-9, std::min(geometry.inner_width_m, geometry.inner_height_m) * 1.0e-6);
     const em::Vec3 evaluation_point_m =
@@ -605,7 +604,7 @@ std::vector<em::Vec3> traceSurfaceDirection(const em::FieldSolution &solution,
 {
     std::vector<em::Vec3> points_m;
     SurfaceState state = seed;
-    const em::RectangularWaveguideGeometry &geometry = solution.request.model.waveguide;
+    const em::WaveguideGeometry &geometry = solution.request.model.waveguide;
     for (int step_index = 0; step_index < 420; ++step_index) {
         if (control.isCancellationRequested()) {
             return {};
@@ -683,7 +682,7 @@ VectorSample plateCurrentAt(const em::FieldSolution &solution,
                             const PlateState &state,
                             double phase_rad)
 {
-    const em::RectangularWaveguideGeometry &geometry = solution.request.model.waveguide;
+    const em::WaveguideGeometry &geometry = solution.request.model.waveguide;
     const double input_face_z_m = plate.center_m.z - 0.5 * plate.size_m.z;
     const double sample_offset_m =
         std::max(1.0e-9,
@@ -772,7 +771,7 @@ bool insidePlateAperture(const em::PecPlateGeometry &plate,
            std::abs(dy_m) <= 0.5 * plate.aperture_height_m;
 }
 
-bool insidePlateFace(const em::RectangularWaveguideGeometry &geometry,
+bool insidePlateFace(const em::WaveguideGeometry &geometry,
                      const em::PecPlateGeometry &plate,
                      const PlateState &state)
 {
@@ -799,7 +798,7 @@ std::vector<em::Vec3> tracePlateDirection(const em::FieldSolution &solution,
                                           double minimum_magnitude,
                                           const GenerationControl &control)
 {
-    const em::RectangularWaveguideGeometry &geometry = solution.request.model.waveguide;
+    const em::WaveguideGeometry &geometry = solution.request.model.waveguide;
     const double input_face_z_m = plate.center_m.z - 0.5 * plate.size_m.z;
     std::vector<em::Vec3> points_m;
     PlateState state = seed;
@@ -836,7 +835,7 @@ double maximumPlateCurrent(const em::FieldSolution &solution,
                            double phase_rad,
                            const GenerationControl &control)
 {
-    const em::RectangularWaveguideGeometry &geometry = solution.request.model.waveguide;
+    const em::WaveguideGeometry &geometry = solution.request.model.waveguide;
     double maximum_magnitude = 0.0;
     for (int x_index = 0; x_index < 13; ++x_index) {
         if (control.isCancellationRequested()) {
@@ -863,7 +862,7 @@ void appendPlateCurrentLines(std::vector<VisualizationPrimitive> &primitives,
                              double phase_rad,
                              const GenerationControl &control)
 {
-    const em::RectangularWaveguideGeometry &geometry = solution.request.model.waveguide;
+    const em::WaveguideGeometry &geometry = solution.request.model.waveguide;
     const double step_m = std::min(geometry.inner_width_m,
                                    geometry.inner_height_m) /
                           72.0;
@@ -944,7 +943,13 @@ void appendSurfaceCurrentLines(std::vector<VisualizationPrimitive> &primitives,
                                double phase_rad,
                                const GenerationControl &control)
 {
-    const em::RectangularWaveguideGeometry &geometry = solution.request.model.waveguide;
+    const em::WaveguideGeometry &geometry = solution.request.model.waveguide;
+    if (em::isCircular(geometry)) {
+        // Токи по стенке разложены по четырём плоским граням; у цилиндрической
+        // стенки параметризация другая (азимут вместо координаты вдоль грани),
+        // поэтому для круглого сечения глифы стеночных токов не строятся.
+        return;
+    }
     const std::array<WallDefinition, 4> walls{{
         {em::WallSurface::Top, {0.0, -1.0, 0.0}, 0.5 * geometry.inner_width_m},
         {em::WallSurface::Right, {-1.0, 0.0, 0.0}, 0.5 * geometry.inner_height_m},
@@ -1034,7 +1039,10 @@ void appendWallElectricArrows(std::vector<VisualizationPrimitive> &primitives,
     if (maximum_electric <= vector_tolerance) {
         return;
     }
-    const em::RectangularWaveguideGeometry &geometry = solution.request.model.waveguide;
+    const em::WaveguideGeometry &geometry = solution.request.model.waveguide;
+    if (em::isCircular(geometry)) {
+        return;   // см. appendSurfaceCurrentLines: параметризация стенки другая
+    }
     const std::array<WallDefinition, 4> walls{{
         {em::WallSurface::Top, {0.0, -1.0, 0.0}, 0.5 * geometry.inner_width_m},
         {em::WallSurface::Right, {-1.0, 0.0, 0.0}, 0.5 * geometry.inner_height_m},
@@ -1096,7 +1104,7 @@ void appendPoyntingArrows(std::vector<VisualizationPrimitive> &primitives,
                           const em::FieldSolution &solution,
                           const GenerationControl &control)
 {
-    const em::RectangularWaveguideGeometry &geometry = solution.request.model.waveguide;
+    const em::WaveguideGeometry &geometry = solution.request.model.waveguide;
     const double maximum_magnitude = maximumVolumeMagnitude(solution,
                                                              FieldQuantity::Poynting,
                                                              0.0,
@@ -1109,7 +1117,7 @@ void appendPoyntingArrows(std::vector<VisualizationPrimitive> &primitives,
     // (e.g. behind a full short) the net flux is identically zero, so the field
     // magnitude collapses to rounding noise. Suppress the arrows entirely when
     // the peak power density is a tiny fraction of one guided watt.
-    const double cross_section_m2 = geometry.inner_width_m * geometry.inner_height_m;
+    const double cross_section_m2 = em::crossSectionArea(geometry);
     const double reference_power_density =
         cross_section_m2 > 0.0
             ? std::max(solution.request.settings.normalization_power_w, 1.0e-12) /
@@ -1201,7 +1209,7 @@ double maximumFieldEnvelope(const em::FieldSolution &solution,
                             FieldQuantity quantity,
                             const GenerationControl &control)
 {
-    const em::RectangularWaveguideGeometry &geometry = solution.request.model.waveguide;
+    const em::WaveguideGeometry &geometry = solution.request.model.waveguide;
     double maximum = 0.0;
     for (int x_index = 0; x_index < 9; ++x_index) {
         if (control.isCancellationRequested()) {
@@ -1240,7 +1248,7 @@ void appendVolumeVectorArrows(std::vector<VisualizationPrimitive> &primitives,
                               double phase_rad,
                               const GenerationControl &control)
 {
-    const em::RectangularWaveguideGeometry &geometry = solution.request.model.waveguide;
+    const em::WaveguideGeometry &geometry = solution.request.model.waveguide;
     const double maximum_envelope = maximumFieldEnvelope(solution, quantity, control);
     if (maximum_envelope <= vector_tolerance) {
         return;
@@ -1341,7 +1349,10 @@ void appendWallCurrentArrows(std::vector<VisualizationPrimitive> &primitives,
                              double phase_rad,
                              const GenerationControl &control)
 {
-    const em::RectangularWaveguideGeometry &geometry = solution.request.model.waveguide;
+    const em::WaveguideGeometry &geometry = solution.request.model.waveguide;
+    if (em::isCircular(geometry)) {
+        return;   // см. appendSurfaceCurrentLines: параметризация стенки другая
+    }
     const std::array<WallDefinition, 4> walls{{
         {em::WallSurface::Top, {0.0, -1.0, 0.0}, 0.5 * geometry.inner_width_m},
         {em::WallSurface::Right, {-1.0, 0.0, 0.0}, 0.5 * geometry.inner_height_m},
@@ -1444,7 +1455,7 @@ void appendPlateCurrentArrows(std::vector<VisualizationPrimitive> &primitives,
                               double phase_rad,
                               const GenerationControl &control)
 {
-    const em::RectangularWaveguideGeometry &geometry = solution.request.model.waveguide;
+    const em::WaveguideGeometry &geometry = solution.request.model.waveguide;
     const double offset_m =
         std::max(1.0e-9,
                  std::min(geometry.inner_width_m, geometry.inner_height_m) * 1.0e-6);
@@ -1666,7 +1677,7 @@ FieldSliceData FieldVisualizationGenerator::generateSlice(
         return slice;
     }
 
-    const em::RectangularWaveguideGeometry &geometry = solution.request.model.waveguide;
+    const em::WaveguideGeometry &geometry = solution.request.model.waveguide;
     const em::Vec3 v_axis{0.0, 0.0, 1.0};       // the slice always spans z
     const double v_span_m = geometry.length_m;
     em::Vec3 u_axis;

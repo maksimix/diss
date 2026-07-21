@@ -1,5 +1,7 @@
-#include "rectangular_waveguide_solver.h"
+#include "analytic_waveguide_solver.h"
 
+#include "circular_mode_field.h"
+#include "cylindrical_bessel.h"
 #include "rectangular_mode_field.h"
 
 #include <algorithm>
@@ -7,6 +9,7 @@
 #include <limits>
 #include <memory>
 #include <sstream>
+#include <vector>
 
 namespace em
 {
@@ -47,34 +50,127 @@ bool finiteComplex(const Complex &value)
     return std::isfinite(std::real(value)) && std::isfinite(std::imag(value));
 }
 
-double integrateForwardPower(const IFieldEvaluator &field,
-                             const RectangularWaveguideGeometry &geometry,
-                             double z_m,
-                             const SolveControl &control)
+// Квадратура по сечению: прямоугольник разбивается равномерной сеткой,
+// круг — полярной (r, phi) сеткой, где вес ячейки r * dr * dphi. Полярная
+// сетка предпочтительнее декартовой с отбраковкой: она точно покрывает круг и
+// не даёт «ступенчатую» границу, из-за которой интеграл мощности сходился бы
+// заметно медленнее.
+struct QuadratureSample
 {
+    double x_m = 0.0;
+    double y_m = 0.0;
+    double weight_m2 = 0.0;
+};
+
+std::vector<QuadratureSample> crossSectionQuadrature(const WaveguideGeometry &geometry)
+{
+    std::vector<QuadratureSample> samples;
+    if (isCircular(geometry)) {
+        constexpr int radial_samples = 64;
+        constexpr int azimuthal_samples = 128;
+        const double dr_m = geometry.inner_radius_m / radial_samples;
+        const double dphi_rad = 2.0 * pi / azimuthal_samples;
+        samples.reserve(static_cast<size_t>(radial_samples) * azimuthal_samples);
+        for (int radial_index = 0; radial_index < radial_samples; ++radial_index) {
+            const double radius_m = (radial_index + 0.5) * dr_m;
+            const double weight_m2 = radius_m * dr_m * dphi_rad;
+            for (int azimuthal_index = 0; azimuthal_index < azimuthal_samples;
+                 ++azimuthal_index) {
+                const double azimuth_rad = (azimuthal_index + 0.5) * dphi_rad;
+                samples.push_back({radius_m * std::cos(azimuth_rad),
+                                   radius_m * std::sin(azimuth_rad),
+                                   weight_m2});
+            }
+        }
+        return samples;
+    }
+
     constexpr int x_samples = 80;
     constexpr int y_samples = 56;
     const double dx_m = geometry.inner_width_m / x_samples;
     const double dy_m = geometry.inner_height_m / y_samples;
-    double power_w = 0.0;
-
+    samples.reserve(static_cast<size_t>(x_samples) * y_samples);
     for (int x_index = 0; x_index < x_samples; ++x_index) {
+        const double x_m = -0.5 * geometry.inner_width_m + (x_index + 0.5) * dx_m;
+        for (int y_index = 0; y_index < y_samples; ++y_index) {
+            const double y_m = -0.5 * geometry.inner_height_m + (y_index + 0.5) * dy_m;
+            samples.push_back({x_m, y_m, dx_m * dy_m});
+        }
+    }
+    return samples;
+}
+
+// Точки на стенке для контурного интеграла |H_tangential|^2. Касательных две:
+// лежащая в плоскости сечения (даётся здесь) и продольная z, общая для всех
+// стенок.
+struct WallSample
+{
+    double x_m = 0.0;
+    double y_m = 0.0;
+    Vec3 in_plane_tangent;
+    double weight_m = 0.0;
+};
+
+std::vector<WallSample> wallQuadrature(const WaveguideGeometry &geometry)
+{
+    std::vector<WallSample> samples;
+    // Точки сдвигаются внутрь на малую долю размера: ровно на стенке
+    // вычислитель поля стоит на границе своей области определения.
+    if (isCircular(geometry)) {
+        constexpr int azimuthal_samples = 256;
+        const double inset_m = std::max(1.0e-9, geometry.inner_radius_m * 1.0e-6);
+        const double radius_m = geometry.inner_radius_m - inset_m;
+        const double dphi_rad = 2.0 * pi / azimuthal_samples;
+        const double weight_m = geometry.inner_radius_m * dphi_rad;
+        samples.reserve(azimuthal_samples);
+        for (int index = 0; index < azimuthal_samples; ++index) {
+            const double azimuth_rad = (index + 0.5) * dphi_rad;
+            samples.push_back({radius_m * std::cos(azimuth_rad),
+                               radius_m * std::sin(azimuth_rad),
+                               Vec3{-std::sin(azimuth_rad), std::cos(azimuth_rad), 0.0},
+                               weight_m});
+        }
+        return samples;
+    }
+
+    constexpr int x_samples = 80;
+    constexpr int y_samples = 56;
+    const double dx_m = geometry.inner_width_m / x_samples;
+    const double dy_m = geometry.inner_height_m / y_samples;
+    const double inset_m =
+        std::max(1.0e-9, std::min(geometry.inner_width_m, geometry.inner_height_m) * 1.0e-6);
+    samples.reserve(2 * (x_samples + y_samples));
+    for (int x_index = 0; x_index < x_samples; ++x_index) {
+        const double x_m = -0.5 * geometry.inner_width_m + (x_index + 0.5) * dx_m;
+        for (const double wall_y_m : {0.5 * geometry.inner_height_m - inset_m,
+                                      -0.5 * geometry.inner_height_m + inset_m}) {
+            samples.push_back({x_m, wall_y_m, Vec3{1.0, 0.0, 0.0}, dx_m});
+        }
+    }
+    for (int y_index = 0; y_index < y_samples; ++y_index) {
+        const double y_m = -0.5 * geometry.inner_height_m + (y_index + 0.5) * dy_m;
+        for (const double wall_x_m : {0.5 * geometry.inner_width_m - inset_m,
+                                      -0.5 * geometry.inner_width_m + inset_m}) {
+            samples.push_back({wall_x_m, y_m, Vec3{0.0, 1.0, 0.0}, dy_m});
+        }
+    }
+    return samples;
+}
+
+double integrateForwardPower(const IFieldEvaluator &field,
+                             const WaveguideGeometry &geometry,
+                             double z_m,
+                             const SolveControl &control)
+{
+    double power_w = 0.0;
+    for (const QuadratureSample &sample : crossSectionQuadrature(geometry)) {
         if (control.isCancellationRequested()) {
             return std::numeric_limits<double>::quiet_NaN();
         }
-        const double x_m = -0.5 * geometry.inner_width_m +
-                           (x_index + 0.5) * dx_m;
-        for (int y_index = 0; y_index < y_samples; ++y_index) {
-            const double y_m = -0.5 * geometry.inner_height_m +
-                               (y_index + 0.5) * dy_m;
-            const FieldPhasor sample = field.evaluate({x_m, y_m, z_m});
-            power_w += timeAveragePoynting(sample.electric_v_per_m,
-                                           sample.magnetic_a_per_m)
-                           .z *
-                       dx_m * dy_m;
-        }
+        const FieldPhasor value = field.evaluate({sample.x_m, sample.y_m, z_m});
+        power_w += timeAveragePoynting(value.electric_v_per_m, value.magnetic_a_per_m).z *
+                   sample.weight_m2;
     }
-
     return power_w;
 }
 
@@ -95,72 +191,48 @@ struct GuideEnergetics
 // Cross-section and wall integrals used by the perturbation conductor-loss and
 // stored-energy formulas, evaluated on the transverse plane at z_m.
 GuideEnergetics integrateEnergetics(const IFieldEvaluator &field,
-                                    const RectangularWaveguideGeometry &geometry,
+                                    const WaveguideGeometry &geometry,
                                     double z_m,
                                     const SolveControl &control)
 {
     GuideEnergetics result;
-    constexpr int x_samples = 80;
-    constexpr int y_samples = 56;
-    const double dx_m = geometry.inner_width_m / x_samples;
-    const double dy_m = geometry.inner_height_m / y_samples;
-
-    for (int x_index = 0; x_index < x_samples; ++x_index) {
+    for (const QuadratureSample &sample : crossSectionQuadrature(geometry)) {
         if (control.isCancellationRequested()) {
             result.finite = false;
             return result;
         }
-        const double x_m = -0.5 * geometry.inner_width_m + (x_index + 0.5) * dx_m;
-        for (int y_index = 0; y_index < y_samples; ++y_index) {
-            const double y_m = -0.5 * geometry.inner_height_m + (y_index + 0.5) * dy_m;
-            const FieldPhasor sample = field.evaluate({x_m, y_m, z_m});
-            const double e2 = std::norm(sample.electric_v_per_m.x) +
-                              std::norm(sample.electric_v_per_m.y) +
-                              std::norm(sample.electric_v_per_m.z);
-            const double h2 = std::norm(sample.magnetic_a_per_m.x) +
-                              std::norm(sample.magnetic_a_per_m.y) +
-                              std::norm(sample.magnetic_a_per_m.z);
-            result.cross_section_e2 += e2 * dx_m * dy_m;
-            result.cross_section_h2 += h2 * dx_m * dy_m;
-            result.axial_power_w += timeAveragePoynting(sample.electric_v_per_m,
-                                                        sample.magnetic_a_per_m)
-                                        .z *
-                                    dx_m * dy_m;
-        }
+        const FieldPhasor value = field.evaluate({sample.x_m, sample.y_m, z_m});
+        const double e2 = std::norm(value.electric_v_per_m.x) +
+                          std::norm(value.electric_v_per_m.y) +
+                          std::norm(value.electric_v_per_m.z);
+        const double h2 = std::norm(value.magnetic_a_per_m.x) +
+                          std::norm(value.magnetic_a_per_m.y) +
+                          std::norm(value.magnetic_a_per_m.z);
+        result.cross_section_e2 += e2 * sample.weight_m2;
+        result.cross_section_h2 += h2 * sample.weight_m2;
+        result.axial_power_w +=
+            timeAveragePoynting(value.electric_v_per_m, value.magnetic_a_per_m).z *
+            sample.weight_m2;
     }
 
-    const double inset_m =
-        std::max(1.0e-9, std::min(geometry.inner_width_m, geometry.inner_height_m) * 1.0e-6);
-    const double top_y_m = 0.5 * geometry.inner_height_m - inset_m;
-    const double bottom_y_m = -0.5 * geometry.inner_height_m + inset_m;
-    for (int x_index = 0; x_index < x_samples; ++x_index) {
-        const double x_m = -0.5 * geometry.inner_width_m + (x_index + 0.5) * dx_m;
-        for (double wall_y_m : {top_y_m, bottom_y_m}) {
-            const ComplexVec3 magnetic = field.evaluate({x_m, wall_y_m, z_m}).magnetic_a_per_m;
-            result.perimeter_tangential_h2 +=
-                (std::norm(magnetic.x) + std::norm(magnetic.z)) * dx_m;
-        }
-    }
-    const double right_x_m = 0.5 * geometry.inner_width_m - inset_m;
-    const double left_x_m = -0.5 * geometry.inner_width_m + inset_m;
-    for (int y_index = 0; y_index < y_samples; ++y_index) {
-        const double y_m = -0.5 * geometry.inner_height_m + (y_index + 0.5) * dy_m;
-        for (double wall_x_m : {right_x_m, left_x_m}) {
-            const ComplexVec3 magnetic = field.evaluate({wall_x_m, y_m, z_m}).magnetic_a_per_m;
-            result.perimeter_tangential_h2 +=
-                (std::norm(magnetic.y) + std::norm(magnetic.z)) * dy_m;
-        }
+    for (const WallSample &sample : wallQuadrature(geometry)) {
+        const ComplexVec3 magnetic =
+            field.evaluate({sample.x_m, sample.y_m, z_m}).magnetic_a_per_m;
+        const Complex tangential = magnetic.x * sample.in_plane_tangent.x +
+                                   magnetic.y * sample.in_plane_tangent.y;
+        result.perimeter_tangential_h2 +=
+            (std::norm(tangential) + std::norm(magnetic.z)) * sample.weight_m;
     }
     return result;
 }
 }
 
-std::vector<ModeDescriptor> RectangularWaveguideSolver::enumerateModes(
+std::vector<ModeDescriptor> AnalyticWaveguideSolver::enumerateModes(
     const SimulationRequest &request,
     const SolveControl &control) const
 {
     std::vector<ModeDescriptor> modes;
-    const RectangularWaveguideGeometry &geometry = request.model.waveguide;
+    const WaveguideGeometry &geometry = request.model.waveguide;
     const Material &material = request.model.filling_material;
     const double relative_permittivity = std::max(numerical_tolerance,
                                                    std::real(material.relative_permittivity));
@@ -183,6 +255,53 @@ std::vector<ModeDescriptor> RectangularWaveguideSolver::enumerateModes(
     const int maximum_n = std::max(request.settings.maximum_n,
                                    request.excitation.automatic ? 1 : request.excitation.n);
 
+    // Общая часть: по критическому волновому числу строятся частота отсечки и
+    // постоянная распространения. Отличается только набор k_c.
+    const auto make_mode = [&](ModeFamily family, int m, int n, double cutoff_wavenumber_per_m) {
+        ModeDescriptor mode;
+        mode.family = family;
+        mode.m = m;
+        mode.n = n;
+        mode.cutoff_wavenumber_per_m = cutoff_wavenumber_per_m;
+        mode.cutoff_frequency_hz =
+            material_wave_speed_m_per_s * cutoff_wavenumber_per_m / (2.0 * pi);
+        mode.propagation_constant_per_m =
+            passiveSquareRoot(cutoff_wavenumber_per_m * cutoff_wavenumber_per_m -
+                              medium_wavenumber_squared_per_m2);
+        mode.propagating = request.frequency_hz > mode.cutoff_frequency_hz;
+        return mode;
+    };
+
+    if (isCircular(geometry)) {
+        // Круглый волновод: k_c = p'_mn / a для TE и p_mn / a для TM, где p'_mn
+        // и p_mn — нули J_m' и J_m. Азимутальный индекс m считается от нуля, а
+        // радиальный n — от единицы, поэтому низшая мода это TE11.
+        const double radius_m = geometry.inner_radius_m;
+        for (int m = 0; m <= maximum_m; ++m) {
+            if (control.isCancellationRequested()) {
+                break;
+            }
+            for (int n = 1; n <= std::max(1, maximum_n); ++n) {
+                const double te_root = besselJDerivativeZero(m, n);
+                if (te_root > 0.0) {
+                    modes.push_back(make_mode(ModeFamily::TransverseElectric,
+                                              m,
+                                              n,
+                                              te_root / radius_m));
+                }
+                const double tm_root = besselJZero(m, n);
+                if (tm_root > 0.0) {
+                    modes.push_back(make_mode(ModeFamily::TransverseMagnetic,
+                                              m,
+                                              n,
+                                              tm_root / radius_m));
+                }
+            }
+        }
+        std::sort(modes.begin(), modes.end(), modeLess);
+        return modes;
+    }
+
     for (int m = 0; m <= maximum_m; ++m) {
         if (control.isCancellationRequested()) {
             break;
@@ -196,25 +315,12 @@ std::vector<ModeDescriptor> RectangularWaveguideSolver::enumerateModes(
             const double ky_per_m = n * pi / geometry.inner_height_m;
             const double cutoff_wavenumber_per_m =
                 std::sqrt(kx_per_m * kx_per_m + ky_per_m * ky_per_m);
-            const double cutoff_frequency_hz =
-                material_wave_speed_m_per_s * cutoff_wavenumber_per_m / (2.0 * pi);
-
-            ModeDescriptor te_mode;
-            te_mode.family = ModeFamily::TransverseElectric;
-            te_mode.m = m;
-            te_mode.n = n;
-            te_mode.cutoff_frequency_hz = cutoff_frequency_hz;
-            te_mode.cutoff_wavenumber_per_m = cutoff_wavenumber_per_m;
-            te_mode.propagation_constant_per_m =
-                passiveSquareRoot(cutoff_wavenumber_per_m * cutoff_wavenumber_per_m -
-                                  medium_wavenumber_squared_per_m2);
-            te_mode.propagating = request.frequency_hz > cutoff_frequency_hz;
-            modes.push_back(te_mode);
+            modes.push_back(
+                make_mode(ModeFamily::TransverseElectric, m, n, cutoff_wavenumber_per_m));
 
             if (m > 0 && n > 0) {
-                ModeDescriptor tm_mode = te_mode;
-                tm_mode.family = ModeFamily::TransverseMagnetic;
-                modes.push_back(tm_mode);
+                modes.push_back(
+                    make_mode(ModeFamily::TransverseMagnetic, m, n, cutoff_wavenumber_per_m));
             }
         }
     }
@@ -223,7 +329,7 @@ std::vector<ModeDescriptor> RectangularWaveguideSolver::enumerateModes(
     return modes;
 }
 
-FieldSolution RectangularWaveguideSolver::solve(const SimulationRequest &request,
+FieldSolution AnalyticWaveguideSolver::solve(const SimulationRequest &request,
                                                 const SolveControl &control) const
 {
     FieldSolution solution;
@@ -244,12 +350,18 @@ FieldSolution RectangularWaveguideSolver::solve(const SimulationRequest &request
         return cancel();
     }
 
-    const RectangularWaveguideGeometry &geometry = request.model.waveguide;
-    if (!std::isfinite(geometry.inner_width_m) ||
-        !std::isfinite(geometry.inner_height_m) ||
-        !std::isfinite(geometry.length_m) ||
+    const WaveguideGeometry &geometry = request.model.waveguide;
+    const bool circular = isCircular(geometry);
+    solution.diagnostics.backend_name = circular
+                                            ? "Analytic circular-waveguide TE/TM"
+                                            : "Analytic rectangular-waveguide TE/TM";
+    const bool cross_section_valid =
+        circular ? (std::isfinite(geometry.inner_radius_m) && geometry.inner_radius_m > 0.0)
+                 : (std::isfinite(geometry.inner_width_m) &&
+                    std::isfinite(geometry.inner_height_m) &&
+                    geometry.inner_width_m > 0.0 && geometry.inner_height_m > 0.0);
+    if (!cross_section_valid || !std::isfinite(geometry.length_m) ||
         !std::isfinite(geometry.wall_thickness_m) ||
-        geometry.inner_width_m <= 0.0 || geometry.inner_height_m <= 0.0 ||
         geometry.length_m <= 0.0 || geometry.wall_thickness_m < 0.0) {
         solution.error_message = "Waveguide inner dimensions and length must be positive.";
         return solution;
@@ -276,12 +388,17 @@ FieldSolution RectangularWaveguideSolver::solve(const SimulationRequest &request
         solution.error_message = "Mode limits and normalization power are invalid.";
         return solution;
     }
-    if (!request.excitation.automatic &&
-        (request.excitation.m < 0 || request.excitation.n < 0 ||
-         (request.excitation.family == ModeFamily::TransverseElectric &&
-          request.excitation.m == 0 && request.excitation.n == 0) ||
-         (request.excitation.family == ModeFamily::TransverseMagnetic &&
-          (request.excitation.m == 0 || request.excitation.n == 0)))) {
+    // Допустимые пары индексов у сечений разные: в круглом волноводе радиальный
+    // индекс n начинается с единицы, а азимутальный m = 0 разрешён обоим
+    // семействам (например, TE01 и TM01 — реальные моды круглого волновода).
+    const bool invalid_indices =
+        circular ? (request.excitation.m < 0 || request.excitation.n < 1)
+                 : (request.excitation.m < 0 || request.excitation.n < 0 ||
+                    (request.excitation.family == ModeFamily::TransverseElectric &&
+                     request.excitation.m == 0 && request.excitation.n == 0) ||
+                    (request.excitation.family == ModeFamily::TransverseMagnetic &&
+                     (request.excitation.m == 0 || request.excitation.n == 0)));
+    if (!request.excitation.automatic && invalid_indices) {
         solution.error_message = "The requested TE/TM mode indices are invalid.";
         return solution;
     }
@@ -314,9 +431,19 @@ FieldSolution RectangularWaveguideSolver::solve(const SimulationRequest &request
             modeName(solution.selected_mode) + " is evanescent at the requested frequency.");
     }
 
-    auto unit_field = std::make_shared<RectangularModeFieldEvaluator>(request,
-                                                                      solution.selected_mode,
-                                                                      1.0);
+    const auto make_field = [&request, circular](const ModeDescriptor &mode, Complex amplitude) {
+        return circular ? std::static_pointer_cast<const IFieldEvaluator>(
+                              std::make_shared<CircularModeFieldEvaluator>(request,
+                                                                           mode,
+                                                                           amplitude))
+                        : std::static_pointer_cast<const IFieldEvaluator>(
+                              std::make_shared<RectangularModeFieldEvaluator>(request,
+                                                                              mode,
+                                                                              amplitude));
+    };
+
+    const std::shared_ptr<const IFieldEvaluator> unit_field =
+        make_field(solution.selected_mode, 1.0);
     const double input_z_m = -0.5 * geometry.length_m;
     const GuideEnergetics unit_energetics =
         integrateEnergetics(*unit_field, geometry, input_z_m, control);
@@ -364,9 +491,7 @@ FieldSolution RectangularWaveguideSolver::solve(const SimulationRequest &request
     }
     solution.diagnostics.conductor_attenuation_np_per_m = conductor_attenuation_np_per_m;
 
-    solution.field = std::make_shared<RectangularModeFieldEvaluator>(request,
-                                                                     solution.selected_mode,
-                                                                     amplitude);
+    solution.field = make_field(solution.selected_mode, amplitude);
     solution.forward_longitudinal_amplitude = amplitude;
     solution.diagnostics.input_power_w =
         integrateForwardPower(*solution.field, geometry, input_z_m, control);

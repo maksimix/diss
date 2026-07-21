@@ -83,6 +83,8 @@ PecPlateParameters plateFromJson(const QJsonObject &object)
 QJsonObject parametersToJson(const WaveguideParameters &parameters)
 {
     QJsonObject waveguide;
+    waveguide[QStringLiteral("cross_section")] = parameters.cross_section;
+    waveguide[QStringLiteral("radius_mm")] = parameters.radius_mm;
     waveguide[QStringLiteral("width_mm")] = parameters.width_mm;
     waveguide[QStringLiteral("depth_mm")] = parameters.depth_mm;
     waveguide[QStringLiteral("length_mm")] = parameters.length_mm;
@@ -122,6 +124,10 @@ WaveguideParameters parametersFromJson(const QJsonObject &root)
 {
     WaveguideParameters parameters;
     const QJsonObject waveguide = root.value(QStringLiteral("waveguide")).toObject();
+    parameters.cross_section =
+        waveguide.value(QStringLiteral("cross_section")).toInt(parameters.cross_section);
+    parameters.radius_mm =
+        waveguide.value(QStringLiteral("radius_mm")).toDouble(parameters.radius_mm);
     parameters.width_mm = waveguide.value(QStringLiteral("width_mm")).toDouble(parameters.width_mm);
     parameters.depth_mm = waveguide.value(QStringLiteral("depth_mm")).toDouble(parameters.depth_mm);
     parameters.length_mm =

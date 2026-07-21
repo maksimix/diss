@@ -97,7 +97,7 @@ def build(path):
     # ------------------------------------------------------------- титул
     d.add("title", "Математика расчёта полей в прямоугольном волноводе")
     d.add("sub", "Методика в точности повторяет реализацию программы krutiev: "
-                 "аналитические решатели (em/rectangular_waveguide_solver, em/transverse_pec_partition_solver, "
+                 "аналитические решатели (em/analytic_waveguide_solver, em/transverse_pec_partition_solver, "
                  "em/rectangular_mode_field), конечноэлементный решатель (em/mfem_frequency_domain_backend, "
                  "em/gmsh_tetrahedral_mesher) и постобработку (postprocessing/*). Все контрольные соотношения "
                  "закреплены тестами tests/em_core_tests.cpp.")
@@ -128,7 +128,7 @@ def build(path):
     d.add("item", "— TE-моды существуют при (m,n) ≠ (0,0); TM-моды требуют m ≥ 1 и n ≥ 1;")
     d.add("item", "— при автоматическом выборе берётся первая распространяющаяся мода в порядке роста fc "
                   "(при равенстве отсечек TE предшествует TM); обычно это TE10.")
-    d.add("note", "Код: em/rectangular_waveguide_solver.cpp (enumerateModes, passiveSquareRoot). Тест: невязка β для TE10 < 1e-12.")
+    d.add("note", "Код: em/analytic_waveguide_solver.cpp (enumerateModes, passiveSquareRoot). Тест: невязка β для TE10 < 1e-12.")
 
     # ------------------------------------------------------------- 3
     d.add("h1", "3. Поля мод (суперпозиция прямой и обратной волн)")
@@ -154,7 +154,7 @@ def build(path):
                   "выбирается так, чтобы падающая волна несла ровно P0 = 1 Вт на входном порту z1 = −L/2 "
                   "(P_unit — мощность при единичной амплитуде):")
     d.add("math", r"$A = \sqrt{P_0 / P_{unit}}$")
-    d.add("note", "Код: em/rectangular_waveguide_solver.cpp (integrateForwardPower). Тест: P(z1) = 1 ± 2e-12 Вт для TE10 и TM11.")
+    d.add("note", "Код: em/analytic_waveguide_solver.cpp (integrateForwardPower). Тест: P(z1) = 1 ± 2e-12 Вт для TE10 и TM11.")
 
     # ------------------------------------------------------------- 5
     d.add("h1", "5. Пустой волновод: S-параметры и баланс мощности")
