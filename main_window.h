@@ -9,6 +9,7 @@
 #include <QtWidgets/QMainWindow>
 
 class CalculationWorker;
+class CstPanel;
 class FieldColorBar;
 class ParameterListWidget;
 class RibbonBar;
@@ -37,6 +38,9 @@ public:
 
 signals:
     void requestCalculation(int request_id, const WaveguideParameters &parameters);
+
+protected:
+    void closeEvent(QCloseEvent *event) override;
 
 private slots:
     void openModelFile();
@@ -67,6 +71,7 @@ private:
     QString formatModeTable(const WaveguideCalculationResult &result) const;
     void applyInteractiveSlotParameters(const WaveguideParameters &parameters);
     void rebuildObjectTree();
+    void filterObjectTree(const QString &text);
     void handleObjectSelectionChanged();
     void updateModelPreview();
     void handleObjectDoubleClick(QTreeWidgetItem *item, int column);
@@ -82,10 +87,17 @@ private:
     void setStatus(const QString &message, bool error);
     void createRibbon();
     void createParameterDock();
+    void createStatusBar();
+    QString documentName() const;
     // Приводит подписи и доступность кнопок ленты к текущему состоянию:
     // запущен ли расчёт и есть ли несохранённые изменения геометрии.
     void updateSimulationActionState();
     QString solverMethodName(int method) const;
+    QString linearSolverMethodName(int method) const;
+    // Ожидаемая цена уровня качества: одна и та же строка идёт в подсказку ленты
+    // и в диалог настройки решателя, чтобы числа не разъезжались.
+    QString accuracyLevelHint(int level) const;
+    QString linearSolverHint(int method) const;
     void applyLoadedParameters(const WaveguideParameters &parameters);
     void showResult(const WaveguideCalculationResult &result);
     bool writeModel(const QString &path);
@@ -102,7 +114,9 @@ private:
     QComboBox *slice_plane_combo_box_ = nullptr;
     QComboBox *accuracy_combo_box_ = nullptr;
     QComboBox *solver_method_combo_box_ = nullptr;
+    QComboBox *linear_solver_combo_box_ = nullptr;
     RibbonBar *ribbon_bar_ = nullptr;
+    CstPanel *navigation_panel_ = nullptr;
     QAction *start_simulation_action_ = nullptr;
     QDockWidget *parameter_dock_ = nullptr;
     ParameterListWidget *parameter_list_widget_ = nullptr;
@@ -119,7 +133,10 @@ private:
     QString slot_name_ = QStringLiteral("figure_1");
     QString excitation_name_ = QStringLiteral("signal1");
 
-    QThread worker_thread_;
+    // Поток живёт в куче, а не полем: расчёт может не успеть остановиться к
+    // закрытию окна, а ~QThread на работающем потоке — это qFatal. Тогда объект
+    // сознательно утекает, см. ~MainWindow.
+    QThread *worker_thread_ = nullptr;
     CalculationWorker *worker_ = nullptr;
     QTimer progress_timer_;
     QElapsedTimer calculation_elapsed_timer_;

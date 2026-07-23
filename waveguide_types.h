@@ -57,6 +57,10 @@ struct WaveguideParameters
     // Метод расчёта: 0 — автоматически, 1 — аналитический (пустой волновод),
     // 2 — поперечные сечения, 3 — частичные области, 4 — метод конечных элементов.
     int solver_method = 0;
+    // Линейный решатель FEM: 0 — автоматически, 1 — прямой (разложение),
+    // 2 — итерационный (GMRES). На измельчённой сетке итерационный не сходится,
+    // поэтому автоматический выбор берёт прямой, пока хватает памяти.
+    int linear_solver_method = 0;
     double frequency_ghz = 10.0;
     bool slot_enabled = false;
     double slot_length_mm = 12.0;
@@ -208,6 +212,12 @@ struct WaveguideCalculationResult
     double s21_magnitude = 0.0;
     double power_balance_relative_error = 0.0;
     QString solver_backend;
+    // Диагностика FEM: заполняется и при неудачном расчёте, чтобы по сообщению
+    // об ошибке было видно, на какой сетке он шёл.
+    int mesh_tetrahedron_count = 0;
+    int fem_unknown_count = 0;
+    int linear_iterations = 0;
+    double linear_relative_residual = 0.0;
     QVector<QString> solver_warnings;
 
     QVector<FieldGlyph> field_glyphs;

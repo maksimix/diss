@@ -1,24 +1,41 @@
 #include "cst_ribbon.h"
 
+#include <QtCore/QStringListModel>
 #include <QtGui/QAction>
 #include <QtGui/QPainter>
 #include <QtGui/QPainterPath>
 #include <QtGui/QPixmap>
 #include <QtGui/QPolygonF>
+#include <QtGui/QShortcut>
+#include <QtWidgets/QCompleter>
+#include <QtWidgets/QGridLayout>
 #include <QtWidgets/QHBoxLayout>
 #include <QtWidgets/QLabel>
+#include <QtWidgets/QLineEdit>
+#include <QtWidgets/QMenu>
+#include <QtWidgets/QMessageBox>
 #include <QtWidgets/QStackedWidget>
 #include <QtWidgets/QTabBar>
 #include <QtWidgets/QToolButton>
 #include <QtWidgets/QVBoxLayout>
 
 #include <cmath>
+#include <utility>
 
 namespace
 {
 constexpr int icon_size = 32;
+constexpr int grid_icon_size = 24;
 // M_PI не объявлена в MSVC без _USE_MATH_DEFINES, поэтому константа своя.
 constexpr double pi = 3.14159265358979323846;
+
+// Палитра повторяет таблицу стилей окна (cstStyleSheet в main_window.cpp):
+// синяя полоса вкладок, серые рамки панелей, светлый заголовок.
+const QColor header_text(0xff, 0xff, 0xff);
+const QColor panel_caption_bg(0xf0, 0xf0, 0xf0);
+const QColor panel_border(0xc4, 0xc4, 0xc4);
+const QColor group_separator(0xdc, 0xdc, 0xdc);
+const QColor caption_text(0x1f, 0x1f, 0x1f);
 
 void drawFolder(QPainter &painter)
 {
@@ -51,6 +68,15 @@ void drawWaveguideBox(QPainter &painter, const QColor &face)
     painter.drawPolygon(front);
     painter.setBrush(face.darker(115));
     painter.drawPolygon(side);
+}
+
+void drawChevron(QPainter &painter, bool up)
+{
+    painter.setPen(QPen(header_text, 2.6, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+    painter.setBrush(Qt::NoBrush);
+    const double top = up ? 12.0 : 20.0;
+    const double bottom = up ? 20.0 : 12.0;
+    painter.drawPolyline(QPolygonF({QPointF(8, bottom), QPointF(16, top), QPointF(24, bottom)}));
 }
 
 void paintRibbonIcon(QPainter &painter, RibbonIcon icon)
@@ -154,6 +180,17 @@ void paintRibbonIcon(QPainter &painter, RibbonIcon icon)
                                        QPointF(28, 24),
                                        QPointF(4, 24)}));
         break;
+    case RibbonIcon::ProfileStep:
+        // Уступ на одной стенке: та же заготовка профиля, но несимметричная.
+        painter.setPen(QPen(QColor(70, 100, 130), 1.6));
+        painter.setBrush(QColor(175, 205, 230));
+        painter.drawPolygon(QPolygonF({QPointF(4, 8),
+                                       QPointF(16, 8),
+                                       QPointF(16, 14),
+                                       QPointF(28, 14),
+                                       QPointF(28, 24),
+                                       QPointF(4, 24)}));
+        break;
     case RibbonIcon::Excitation:
         painter.setPen(QPen(QColor(200, 120, 40), 2.0));
         painter.drawPolyline(QPolygonF({QPointF(3, 16),
@@ -183,16 +220,104 @@ void paintRibbonIcon(QPainter &painter, RibbonIcon icon)
         painter.drawPolyline(
             QPolygonF({QPointF(9, 22), QPointF(14, 15), QPointF(18, 19), QPointF(23, 9)}));
         break;
+    case RibbonIcon::Project:
+        // Значок документа на вкладке модели: лист с бегущей волной.
+        painter.setPen(QPen(QColor(120, 130, 140), 1.4));
+        painter.setBrush(QColor(252, 252, 252));
+        painter.drawRect(QRectF(5, 5, 22, 22));
+        painter.setPen(QPen(QColor(40, 150, 130), 2.2));
+        painter.setBrush(Qt::NoBrush);
+        painter.drawPolyline(QPolygonF({QPointF(7, 20),
+                                        QPointF(11, 12),
+                                        QPointF(16, 20),
+                                        QPointF(21, 12),
+                                        QPointF(25, 18)}));
+        break;
+    case RibbonIcon::Tree:
+        painter.setPen(QPen(QColor(120, 130, 140), 1.4));
+        painter.drawLine(QPointF(8, 6), QPointF(8, 24));
+        painter.drawLine(QPointF(8, 12), QPointF(14, 12));
+        painter.drawLine(QPointF(8, 18), QPointF(14, 18));
+        painter.drawLine(QPointF(8, 24), QPointF(14, 24));
+        painter.setBrush(QColor(150, 185, 215));
+        painter.drawRect(QRectF(14, 4, 12, 5));
+        painter.drawRect(QRectF(14, 10, 12, 4));
+        painter.drawRect(QRectF(14, 16, 12, 4));
+        painter.drawRect(QRectF(14, 22, 12, 4));
+        break;
+    case RibbonIcon::Search:
+        // Лупа живёт внутри белого поля поиска, поэтому она тёмная.
+        painter.setPen(QPen(QColor(0x4a, 0x5a, 0x68), 2.4));
+        painter.setBrush(Qt::NoBrush);
+        painter.drawEllipse(QPointF(14, 14), 8.0, 8.0);
+        painter.drawLine(QPointF(20, 20), QPointF(27, 27));
+        break;
+    case RibbonIcon::Help: {
+        painter.setPen(header_text);
+        QFont font = painter.font();
+        font.setPointSizeF(20.0);
+        font.setBold(true);
+        painter.setFont(font);
+        painter.drawText(QRectF(0, 0, 32, 32), Qt::AlignCenter, QStringLiteral("?"));
+        break;
+    }
+    case RibbonIcon::Collapse:
+        drawChevron(painter, true);
+        break;
+    case RibbonIcon::Expand:
+        drawChevron(painter, false);
+        break;
     }
 }
-}
 
-QIcon ribbonIcon(RibbonIcon icon)
+QIcon closeCrossIcon()
 {
-    QPixmap pixmap(icon_size, icon_size);
+    QPixmap pixmap(12, 12);
     pixmap.fill(Qt::transparent);
     QPainter painter(&pixmap);
     painter.setRenderHint(QPainter::Antialiasing, true);
+    painter.setPen(QPen(QColor(0x40, 0x40, 0x40), 1.4));
+    painter.drawLine(QPointF(3, 3), QPointF(9, 9));
+    painter.drawLine(QPointF(9, 3), QPointF(3, 9));
+    painter.end();
+    return QIcon(pixmap);
+}
+
+// Перенос строки нужен только крупным кнопкам: в мелкой кнопке и в подсказке
+// подпись идёт одной строкой.
+QString singleLineText(const QAction *action)
+{
+    QString text = action->text();
+    text.replace(QLatin1Char('\n'), QLatin1Char(' '));
+    return text.simplified();
+}
+
+// Подпись команды для строки поиска.
+QString actionSearchText(const QAction *action)
+{
+    QString text = singleLineText(action);
+    text.remove(QLatin1Char('&'));
+    return text;
+}
+
+RibbonBar *findRibbonBar(QWidget *widget)
+{
+    for (QWidget *parent = widget; parent != nullptr; parent = parent->parentWidget()) {
+        if (RibbonBar *bar = qobject_cast<RibbonBar *>(parent)) {
+            return bar;
+        }
+    }
+    return nullptr;
+}
+}
+
+QIcon ribbonIcon(RibbonIcon icon, int size)
+{
+    QPixmap pixmap(size, size);
+    pixmap.fill(Qt::transparent);
+    QPainter painter(&pixmap);
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    painter.scale(size / static_cast<double>(icon_size), size / static_cast<double>(icon_size));
     paintRibbonIcon(painter, icon);
     painter.end();
     return QIcon(pixmap);
@@ -202,8 +327,8 @@ RibbonGroup::RibbonGroup(const QString &title, QWidget *parent)
     : QWidget(parent)
 {
     QVBoxLayout *outer = new QVBoxLayout(this);
-    outer->setContentsMargins(4, 3, 4, 2);
-    outer->setSpacing(2);
+    outer->setContentsMargins(5, 3, 5, 1);
+    outer->setSpacing(1);
 
     QWidget *content = new QWidget(this);
     content_layout_ = new QHBoxLayout(content);
@@ -213,7 +338,7 @@ RibbonGroup::RibbonGroup(const QString &title, QWidget *parent)
 
     QLabel *caption = new QLabel(title, this);
     caption->setAlignment(Qt::AlignHCenter | Qt::AlignVCenter);
-    caption->setStyleSheet(QStringLiteral("color: #4c4c4c; font-size: 8pt;"));
+    caption->setObjectName(QStringLiteral("cstRibbonGroupCaption"));
     outer->addWidget(caption);
 }
 
@@ -222,11 +347,18 @@ void RibbonGroup::paintEvent(QPaintEvent *)
     // Разделитель справа от группы — та же вертикальная линия, что отделяет
     // блоки ленты в CST.
     QPainter painter(this);
-    painter.setPen(QColor(214, 214, 214));
-    painter.drawLine(width() - 1, 4, width() - 1, height() - 6);
+    painter.setPen(group_separator);
+    painter.drawLine(width() - 1, 3, width() - 1, height() - 5);
 }
 
-QToolButton *RibbonGroup::addLargeButton(QAction *action, RibbonIcon icon)
+void RibbonGroup::registerForSearch(QAction *action)
+{
+    if (RibbonBar *bar = findRibbonBar(this)) {
+        bar->registerSearchAction(action);
+    }
+}
+
+QToolButton *RibbonGroup::addLargeButton(QAction *action, RibbonIcon icon, QMenu *menu)
 {
     action->setIcon(ribbonIcon(icon));
     QToolButton *button = new QToolButton(this);
@@ -237,9 +369,19 @@ QToolButton *RibbonGroup::addLargeButton(QAction *action, RibbonIcon icon)
     button->setMinimumWidth(56);
     button->setMaximumWidth(96);
     button->setMinimumHeight(64);
+    if (menu != nullptr) {
+        // Меню остаётся всплывающим окном и принадлежит вызывающей стороне:
+        // сделать его потомком кнопки нельзя — Qt нарисует пункты прямо на
+        // ленте вместо выпадающего списка.
+        button->setMenu(menu);
+        button->setPopupMode(QToolButton::MenuButtonPopup);
+    }
     content_layout_->addWidget(button, 0, Qt::AlignTop);
     small_column_ = nullptr;
     small_button_count_ = 0;
+    icon_grid_ = nullptr;
+    icon_button_count_ = 0;
+    registerForSearch(action);
     return button;
 }
 
@@ -252,8 +394,25 @@ QVBoxLayout *RibbonGroup::smallButtonColumn()
         small_column_->addStretch(1);
         content_layout_->addLayout(small_column_);
         small_button_count_ = 0;
+        icon_grid_ = nullptr;
+        icon_button_count_ = 0;
     }
     return small_column_;
+}
+
+QGridLayout *RibbonGroup::iconGrid()
+{
+    if (icon_grid_ == nullptr) {
+        icon_grid_ = new QGridLayout();
+        icon_grid_->setContentsMargins(0, 0, 0, 0);
+        icon_grid_->setSpacing(1);
+        content_layout_->addLayout(icon_grid_);
+        content_layout_->setAlignment(icon_grid_, Qt::AlignVCenter);
+        icon_button_count_ = 0;
+        small_column_ = nullptr;
+        small_button_count_ = 0;
+    }
+    return icon_grid_;
 }
 
 QToolButton *RibbonGroup::addSmallButton(QAction *action, RibbonIcon icon)
@@ -264,9 +423,39 @@ QToolButton *RibbonGroup::addSmallButton(QAction *action, RibbonIcon icon)
     button->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
     button->setIconSize(QSize(16, 16));
     button->setAutoRaise(true);
+    // Двухстрочная подпись крупной кнопки растянула бы ряд мелких кнопок втрое,
+    // поэтому здесь она разворачивается в строку и следит за сменой текста.
+    const auto apply_single_line = [button, action]() {
+        button->setText(singleLineText(action));
+    };
+    apply_single_line();
+    connect(action, &QAction::changed, button, apply_single_line);
     QVBoxLayout *column = smallButtonColumn();
     column->insertWidget(small_button_count_, button);
     ++small_button_count_;
+    registerForSearch(action);
+    return button;
+}
+
+QToolButton *RibbonGroup::addIconButton(QAction *action, RibbonIcon icon)
+{
+    action->setIcon(ribbonIcon(icon));
+    QToolButton *button = new QToolButton(this);
+    button->setDefaultAction(action);
+    button->setToolButtonStyle(Qt::ToolButtonIconOnly);
+    button->setIconSize(QSize(grid_icon_size, grid_icon_size));
+    button->setAutoRaise(true);
+    button->setFixedSize(grid_icon_size + 6, grid_icon_size + 6);
+    // Подпись у кнопки не видна, поэтому название команды уходит в подсказку.
+    button->setToolTip(action->toolTip().isEmpty()
+                           ? actionSearchText(action)
+                           : QStringLiteral("%1 — %2")
+                                 .arg(actionSearchText(action), action->toolTip()));
+
+    QGridLayout *grid = iconGrid();
+    grid->addWidget(button, icon_button_count_ % 2, icon_button_count_ / 2);
+    ++icon_button_count_;
+    registerForSearch(action);
     return button;
 }
 
@@ -310,18 +499,108 @@ RibbonBar::RibbonBar(QWidget *parent)
     layout->setContentsMargins(0, 0, 0, 0);
     layout->setSpacing(0);
 
-    tab_bar_ = new QTabBar(this);
+    // Синяя полоса: слева вкладки, справа поиск команд и кнопки сворачивания
+    // ленты и справки — как шапка CST Studio Suite.
+    QWidget *header = new QWidget(this);
+    header->setObjectName(QStringLiteral("cstRibbonHeader"));
+    QHBoxLayout *header_layout = new QHBoxLayout(header);
+    header_layout->setContentsMargins(2, 0, 6, 0);
+    header_layout->setSpacing(4);
+
+    tab_bar_ = new QTabBar(header);
     tab_bar_->setExpanding(false);
     tab_bar_->setDrawBase(false);
     tab_bar_->setObjectName(QStringLiteral("cstRibbonTabBar"));
+    header_layout->addWidget(tab_bar_, 0, Qt::AlignBottom);
+    header_layout->addStretch(1);
+
+    search_edit_ = new QLineEdit(header);
+    search_edit_->setObjectName(QStringLiteral("cstRibbonSearch"));
+    search_edit_->setPlaceholderText(QStringLiteral("Поиск команды (Alt+Q)"));
+    search_edit_->setFixedWidth(190);
+    search_edit_->addAction(ribbonIcon(RibbonIcon::Search, 14), QLineEdit::TrailingPosition);
+    header_layout->addWidget(search_edit_, 0, Qt::AlignVCenter);
+
+    search_model_ = new QStringListModel(this);
+    QCompleter *completer = new QCompleter(search_model_, this);
+    completer->setCaseSensitivity(Qt::CaseInsensitive);
+    completer->setFilterMode(Qt::MatchContains);
+    completer->setCompletionMode(QCompleter::PopupCompletion);
+    search_edit_->setCompleter(completer);
+    connect(completer,
+            qOverload<const QString &>(&QCompleter::activated),
+            this,
+            &RibbonBar::activateSearchResult);
+    connect(search_edit_, &QLineEdit::returnPressed, this, [this]() {
+        activateSearchResult(search_edit_->text());
+    });
+
+    QShortcut *search_shortcut = new QShortcut(QKeySequence(Qt::ALT | Qt::Key_Q), this);
+    connect(search_shortcut, &QShortcut::activated, this, [this]() {
+        search_edit_->setFocus();
+        search_edit_->selectAll();
+    });
+
+    collapse_button_ = new QToolButton(header);
+    collapse_button_->setObjectName(QStringLiteral("cstRibbonHeaderButton"));
+    collapse_button_->setIconSize(QSize(12, 12));
+    collapse_button_->setAutoRaise(true);
+    header_layout->addWidget(collapse_button_, 0, Qt::AlignVCenter);
+
+    QToolButton *help_button = new QToolButton(header);
+    help_button->setObjectName(QStringLiteral("cstRibbonHeaderButton"));
+    help_button->setIcon(ribbonIcon(RibbonIcon::Help, 12));
+    help_button->setIconSize(QSize(12, 12));
+    help_button->setAutoRaise(true);
+    help_button->setToolTip(QStringLiteral("Горячие клавиши и подсказки"));
+    header_layout->addWidget(help_button, 0, Qt::AlignVCenter);
+    connect(help_button, &QToolButton::clicked, this, [this]() {
+        QMessageBox::information(
+            this,
+            QStringLiteral("Подсказка"),
+            QStringLiteral("F5 — запустить расчёт\n"
+                           "Ctrl+O / Ctrl+S — открыть и сохранить модель\n"
+                           "Alt+Q — строка поиска команд ленты\n\n"
+                           "Двойной щелчок по объекту в Navigation Tree открывает его "
+                           "свойства, стрелка справа от кнопки ленты — дополнительные "
+                           "команды."));
+    });
 
     pages_ = new QStackedWidget(this);
     pages_->setObjectName(QStringLiteral("cstRibbonPages"));
 
-    layout->addWidget(tab_bar_);
+    // Вкладка открытой модели под лентой: в CST она показывает имя проекта.
+    document_tab_bar_ = new QTabBar(this);
+    document_tab_bar_->setObjectName(QStringLiteral("cstDocumentTabBar"));
+    document_tab_bar_->setExpanding(false);
+    document_tab_bar_->setDrawBase(false);
+    document_tab_bar_->setUsesScrollButtons(false);
+    document_tab_bar_->addTab(ribbonIcon(RibbonIcon::Project, 14), QString());
+
+    layout->addWidget(header);
     layout->addWidget(pages_);
+    layout->addWidget(document_tab_bar_);
 
     connect(tab_bar_, &QTabBar::currentChanged, pages_, &QStackedWidget::setCurrentIndex);
+    connect(collapse_button_, &QToolButton::clicked, this, [this]() {
+        setRibbonCollapsed(pages_->isVisible());
+    });
+    // Свёрнутая лента разворачивается щелчком по вкладке, как в CST.
+    connect(tab_bar_, &QTabBar::tabBarClicked, this, [this]() {
+        if (!pages_->isVisible()) {
+            setRibbonCollapsed(false);
+        }
+    });
+    setRibbonCollapsed(false);
+}
+
+void RibbonBar::setRibbonCollapsed(bool collapsed)
+{
+    pages_->setVisible(!collapsed);
+    collapse_button_->setIcon(
+        ribbonIcon(collapsed ? RibbonIcon::Expand : RibbonIcon::Collapse, 12));
+    collapse_button_->setToolTip(collapsed ? QStringLiteral("Развернуть ленту")
+                                           : QStringLiteral("Свернуть ленту"));
 }
 
 RibbonTab *RibbonBar::addRibbonTab(const QString &title)
@@ -336,4 +615,100 @@ void RibbonBar::setCurrentTabIndex(int index)
 {
     tab_bar_->setCurrentIndex(index);
     pages_->setCurrentIndex(index);
+}
+
+void RibbonBar::setDocumentName(const QString &name)
+{
+    document_tab_bar_->setTabText(0, name);
+}
+
+void RibbonBar::registerSearchAction(QAction *action)
+{
+    if (action == nullptr || search_actions_.contains(action)) {
+        return;
+    }
+
+    search_actions_.append(action);
+    QStringList names;
+    names.reserve(search_actions_.size());
+    for (const QAction *known : std::as_const(search_actions_)) {
+        names.append(actionSearchText(known));
+    }
+    search_model_->setStringList(names);
+}
+
+void RibbonBar::activateSearchResult(const QString &text)
+{
+    const QString wanted = text.simplified();
+    for (QAction *action : std::as_const(search_actions_)) {
+        if (actionSearchText(action).compare(wanted, Qt::CaseInsensitive) == 0) {
+            search_edit_->clear();
+            search_edit_->clearFocus();
+            action->trigger();
+            return;
+        }
+    }
+}
+
+CstPanelHeader::CstPanelHeader(const QString &title, QWidget *parent)
+    : QWidget(parent)
+    , title_(title)
+{
+    setFixedHeight(20);
+    QHBoxLayout *layout = new QHBoxLayout(this);
+    layout->setContentsMargins(6, 0, 2, 0);
+    layout->addStretch(1);
+
+    close_button_ = new QToolButton(this);
+    close_button_->setObjectName(QStringLiteral("cstPanelCloseButton"));
+    close_button_->setIcon(closeCrossIcon());
+    close_button_->setIconSize(QSize(12, 12));
+    close_button_->setFixedSize(16, 16);
+    close_button_->setAutoRaise(true);
+    close_button_->setVisible(false);
+    close_button_->setToolTip(QStringLiteral("Скрыть панель"));
+    layout->addWidget(close_button_);
+    connect(close_button_, &QToolButton::clicked, this, &CstPanelHeader::closeRequested);
+}
+
+void CstPanelHeader::setClosable(bool closable)
+{
+    close_button_->setVisible(closable);
+}
+
+void CstPanelHeader::paintEvent(QPaintEvent *)
+{
+    QPainter painter(this);
+    painter.fillRect(rect(), panel_caption_bg);
+    painter.setPen(panel_border);
+    painter.drawLine(0, height() - 1, width(), height() - 1);
+    painter.setPen(caption_text);
+    painter.drawText(rect().adjusted(6, 0, -20, 0), Qt::AlignVCenter | Qt::AlignLeft, title_);
+}
+
+CstPanel::CstPanel(const QString &title, QWidget *parent)
+    : QWidget(parent)
+{
+    setObjectName(QStringLiteral("cstPanel"));
+    // Рамку панели рисует таблица стилей, а наследник QWidget получает её
+    // только с этим атрибутом.
+    setAttribute(Qt::WA_StyledBackground, true);
+    layout_ = new QVBoxLayout(this);
+    layout_->setContentsMargins(0, 0, 0, 0);
+    layout_->setSpacing(0);
+
+    header_ = new CstPanelHeader(title, this);
+    layout_->addWidget(header_);
+    connect(header_, &CstPanelHeader::closeRequested, this, &CstPanel::closeRequested);
+}
+
+void CstPanel::setContent(QWidget *content)
+{
+    content->setParent(this);
+    layout_->addWidget(content, 1);
+}
+
+void CstPanel::setClosable(bool closable)
+{
+    header_->setClosable(closable);
 }

@@ -1,5 +1,18 @@
 #include "mfem_frequency_domain_backend.h"
 
+// Before anything else, so that no other header can pull <windows.h> in without
+// these guards: the min/max macros collide with std::min/std::max used all over
+// this file. Only GlobalMemoryStatusEx is wanted from it.
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#endif
+
 #include "analytic_waveguide_solver.h"
 
 #ifdef KRUTIEV_MFEM_CONFIG_FILE
@@ -7,11 +20,26 @@
 #endif
 #include <mfem.hpp>
 
+#ifdef KRUTIEV_WITH_EIGEN
+#ifdef _MSC_VER
+// Eigen is noisy under /W4: constant conditionals in its template dispatch and
+// locals that shadow class members. Not our code, and not worth 80 warnings.
+#pragma warning(push)
+#pragma warning(disable : 4127 4458)
+#endif
+#include <Eigen/SparseCore>
+#include <Eigen/SparseLU>
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
+#endif
+
 #include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <future>
 #include <iomanip>
 #include <limits>
 #include <memory>
@@ -254,21 +282,140 @@ public:
             initial_norm_ = std::max(static_cast<double>(norm), 1.0e-300);
         }
         if (final || iteration % 100 == 0) {
+            // MFEM hands the monitor the norm of M(b - A x), not of b - A x, so
+            // it is a different number from SolverDiagnostics::
+            // linear_relative_residual and has to be named differently or the
+            // two get compared.
             std::ostringstream stage;
             stage << label_ << ": iteration " << iteration << " of "
-                  << maximum_iterations_ << ", relative residual "
+                  << maximum_iterations_ << ", preconditioned relative residual "
                   << std::scientific << std::setprecision(2)
                   << norm / initial_norm_;
             control_.reportProgress(stage.str());
         }
+        if (control_.isCancellationRequested()) {
+            // The one way out of an MFEM Krylov solve: IterativeSolver stops as
+            // soon as its controller claims convergence. Nothing downstream may
+            // trust that claim, so the flag below is what the caller reads.
+            cancelled_ = true;
+            converged = true;
+        }
     }
+
+    bool wasCancelled() const { return cancelled_; }
 
 private:
     const SolveControl &control_;
     std::string label_;
     int maximum_iterations_ = 0;
     double initial_norm_ = 0.0;
+    bool cancelled_ = false;
 };
+
+// Peak process memory of the sparse LU factorisation on the real 2N x 2N block
+// system, in gigabytes, as a function of the complex unknown count N. Fill-in
+// grows faster than the matrix, so this is a power law and not a line, and the
+// exponent is chosen to keep the curve above every measured point: an
+// underestimate means a half-hour factorisation that ends in thrashing or
+// bad_alloc, an overestimate only sends the model to the iterative solver or to
+// a clear refusal. Peaks measured in Release, estimate in brackets:
+//   21953 unknowns 0.69 GB (0.74)   63033 3.56 GB (4.92)
+//  104839 unknowns 6.01 GB (12.2)  112246 10.89 GB (13.8)
+// and, on earlier runs of the same models, 30k 1.3 GB, 53k 3.1, 57k 3.6,
+// 81k 7.8, 110k 11.0, 142k 18.8, 179k 23.1. Two models of equal size can differ
+// by a factor of two in fill-in (104839 and 112246 above), which is why the
+// curve is an envelope rather than a fit through the middle.
+double estimatedDirectMemoryGb(int unknown_count)
+{
+    constexpr double reference_unknowns = 30000.0;
+    constexpr double reference_gigabytes = 1.3;
+    constexpr double growth_exponent = 1.79;
+    const double unknowns = std::max(1.0, static_cast<double>(unknown_count));
+    return reference_gigabytes *
+           std::pow(unknowns / reference_unknowns, growth_exponent);
+}
+
+// Wall time of the same factorisation. Good for one significant figure and no
+// more: measured against estimate it came out 13.5 s (13), 282 s (179), 397 s
+// (639) and 926 s (758) on the four models above, i.e. wrong by up to a factor
+// of 1.6 in both directions. It exists to tell the user roughly how long the
+// silence will last, not to promise anything.
+double estimatedDirectSeconds(int unknown_count)
+{
+    constexpr double reference_unknowns = 30000.0;
+    constexpr double reference_seconds = 28.0;
+    constexpr double growth_exponent = 2.5;
+    const double unknowns = std::max(1.0, static_cast<double>(unknown_count));
+    return reference_seconds *
+           std::pow(unknowns / reference_unknowns, growth_exponent);
+}
+
+// Free physical memory: what decides whether the factorisation fits, as opposed
+// to what is installed. 0 means the platform could not be asked.
+double availablePhysicalMemoryGb()
+{
+#ifdef _WIN32
+    MEMORYSTATUSEX status;
+    status.dwLength = sizeof(status);
+    if (GlobalMemoryStatusEx(&status)) {
+        return static_cast<double>(status.ullAvailPhys) /
+               (1024.0 * 1024.0 * 1024.0);
+    }
+#endif
+    return 0.0;
+}
+
+struct MeshSizeSpread
+{
+    double smallest_m = 0.0;
+    double largest_m = 0.0;
+    double contrast = 1.0;
+    // Extremes, reported alongside the percentiles so that a mesh whose worst
+    // cells are far outside the working range is visible rather than averaged
+    // away.
+    double minimum_m = 0.0;
+    double maximum_m = 0.0;
+};
+
+// The cell size contrast of the mesh. Local refinement is what creates it, and
+// it - not the unknown count - is what decides whether the Gauss-Seidel
+// preconditioned GMRES can solve the system at all. Measured on the iris model
+// of this project (22.66 x 9.96 x 50 mm, 0.5 mm plate, round window, stub):
+// contrast 6.8:1 converges in 5140 iterations to 2.2e-6 in 124 s and lands
+// within 7 digits of the factorised answer, 8:1 was measured to need 7087
+// iterations for 4.3e-6, and 20.7:1 does not converge at all (8000 iterations,
+// residual stuck at 2.0e-3 after 615 s of wasted time).
+// Taken between percentiles and not between the extremes: every boolean cut
+// leaves gmsh a few sliver tetrahedra, and a handful of slivers must not decide
+// which solver runs.
+MeshSizeSpread measureMeshSizeSpread(mfem::Mesh &mesh)
+{
+    MeshSizeSpread spread;
+    const int element_count = mesh.GetNE();
+    if (element_count <= 0) {
+        return spread;
+    }
+    std::vector<double> element_sizes_m;
+    element_sizes_m.reserve(static_cast<std::size_t>(element_count));
+    for (int element = 0; element < element_count; ++element) {
+        element_sizes_m.push_back(mesh.GetElementSize(element, 0));
+    }
+    std::sort(element_sizes_m.begin(), element_sizes_m.end());
+    const auto percentile = [&element_sizes_m, element_count](double fraction) {
+        const double position = fraction * (element_count - 1);
+        const std::size_t index = static_cast<std::size_t>(
+            std::clamp(position, 0.0, static_cast<double>(element_count - 1)));
+        return element_sizes_m[index];
+    };
+    spread.smallest_m = percentile(0.01);
+    spread.largest_m = percentile(0.99);
+    spread.minimum_m = element_sizes_m.front();
+    spread.maximum_m = element_sizes_m.back();
+    if (spread.smallest_m > 0.0) {
+        spread.contrast = spread.largest_m / spread.smallest_m;
+    }
+    return spread;
+}
 
 bool findPoint(const FemState &state,
                const Vec3 &position,
@@ -406,6 +553,89 @@ mfem::Array<int> boundaryMarker(const mfem::Mesh &mesh, int attribute)
     return marker;
 }
 
+#ifdef KRUTIEV_WITH_EIGEN
+// Factorises the real 2N x 2N block form of the complex system and solves it.
+// Returns an empty string on success, otherwise the reason the caller has to
+// fall back on the Krylov solver.
+std::string solveWithSparseLu(const mfem::ComplexSparseMatrix &complex_matrix,
+                              const mfem::Vector &right_vector,
+                              mfem::Vector &solution_vector)
+{
+    try {
+        Eigen::SparseMatrix<double, Eigen::ColMajor, int> matrix;
+        int block_size = 0;
+        {
+            // GetSystemMatrix() allocates a fresh CSR triple and hands ownership
+            // to the returned SparseMatrix, which owns and frees all three
+            // arrays. It is released as soon as Eigen holds its own copy: the
+            // factorization that follows needs every byte it can get.
+            const std::unique_ptr<mfem::SparseMatrix> block_matrix(
+                complex_matrix.GetSystemMatrix());
+            if (!block_matrix || !block_matrix->Finalized()) {
+                return "the complex system did not produce a finalized block matrix";
+            }
+            // The block rows are assembled real part first, imaginary part
+            // second, which is already ascending, but the flag on the freshly
+            // wrapped CSR says otherwise and Eigen's mapped view trusts the
+            // stored order.
+            block_matrix->SortColumnIndices();
+
+            block_size = block_matrix->Height();
+            if (block_size != right_vector.Size() ||
+                block_size != solution_vector.Size() ||
+                block_size != block_matrix->Width()) {
+                return "block matrix and right-hand side sizes disagree";
+            }
+            const int nonzero_count = block_matrix->GetI()[block_size];
+            const Eigen::Map<const Eigen::SparseMatrix<double, Eigen::RowMajor, int>>
+                mapped_rows(block_size,
+                            block_size,
+                            nonzero_count,
+                            block_matrix->GetI(),
+                            block_matrix->GetJ(),
+                            block_matrix->GetData());
+            matrix = mapped_rows;
+        }
+
+        Eigen::SparseLU<Eigen::SparseMatrix<double, Eigen::ColMajor, int>,
+                        Eigen::COLAMDOrdering<int>>
+            factorization;
+        // No info() check between these two calls. Eigen's SparseLU leaves
+        // m_info uninitialised in its constructor and analyzePattern() never
+        // writes it - every assignment to m_info is inside factorize(). Reading
+        // it here returned stack garbage in Release and rejected the direct
+        // solver on every real model with an empty reason string ("sparse LU
+        // symbolic analysis failed: "), 3 runs out of 3 on 4 models between
+        // 63033 and 106439 unknowns, while small test models happened to pass.
+        // In Debug the same read tripped Eigen's m_isInitialized assert.
+        factorization.analyzePattern(matrix);
+        factorization.factorize(matrix);
+        if (factorization.info() != Eigen::Success) {
+            return "sparse LU factorization failed: " + factorization.lastErrorMessage();
+        }
+        const Eigen::Map<const Eigen::VectorXd> right_hand_side(right_vector.HostRead(),
+                                                                block_size);
+        const Eigen::VectorXd result = factorization.solve(right_hand_side);
+        // info() says nothing here either - SparseLU::_solve_impl does not touch
+        // m_info - so the back substitution is checked on its output instead.
+        // The caller then measures the true residual, which is the real verdict.
+        if (!result.allFinite()) {
+            return "sparse LU back substitution produced a non-finite solution";
+        }
+        std::copy(result.data(), result.data() + block_size, solution_vector.HostWrite());
+    } catch (const std::bad_alloc &) {
+        return "sparse LU ran out of memory";
+    } catch (const std::exception &exception) {
+        // Not a reliable memory guard on its own: with allocation denied hard
+        // enough, Eigen's factorization faults instead of throwing (measured
+        // under a 500 MB process commit cap on a 23325-unknown system). The
+        // memory budget in FemSolverSettings is what actually keeps us out of it.
+        return std::string("sparse LU failed: ") + exception.what();
+    }
+    return {};
+}
+#endif
+
 Complex projectPortElectric(const IFieldEvaluator &field,
                             const IFieldEvaluator &mode,
                             const WaveguideGeometry &geometry,
@@ -466,6 +696,14 @@ FieldSolution MfemFrequencyDomainBackend::solve(const SimulationRequest &request
         return solution;
     }
 
+    // Gmsh runs as a blocking child process, so this is the first moment after
+    // it that a cancellation can be honoured at all.
+    if (control.isCancellationRequested()) {
+        solution.cancelled = true;
+        solution.error_message = "Calculation cancelled.";
+        return solution;
+    }
+
     auto state = std::make_shared<FemState>();
     try {
         state->mesh = std::make_unique<mfem::Mesh>(mesh_files.mesh_path.string().c_str(), 1, 1);
@@ -499,12 +737,107 @@ FieldSolution MfemFrequencyDomainBackend::solve(const SimulationRequest &request
 
     solution.diagnostics.mesh_tetrahedron_count = state->mesh->GetNE();
     solution.diagnostics.fem_unknown_count = state->space->GetTrueVSize();
+    const MeshSizeSpread mesh_spread = measureMeshSizeSpread(*state->mesh);
     {
         std::ostringstream stage;
         stage << "FEM mesh ready: " << solution.diagnostics.mesh_tetrahedron_count
               << " tetrahedra, " << solution.diagnostics.fem_unknown_count
-              << " unknowns.";
+              << " unknowns, cells " << std::fixed << std::setprecision(3)
+              << mesh_spread.smallest_m * 1.0e3 << " to "
+              << mesh_spread.largest_m * 1.0e3 << " mm (extremes "
+              << mesh_spread.minimum_m * 1.0e3 << " / "
+              << mesh_spread.maximum_m * 1.0e3 << "), size contrast "
+              << std::setprecision(1) << mesh_spread.contrast << ":1.";
         control.reportProgress(stage.str());
+    }
+
+    // Which solver can actually deliver an answer here. The direct path is
+    // bounded by memory; the iterative path is bounded by the cell size
+    // contrast, which local refinement raises together with the unknown count -
+    // so a threshold on unknowns, as used before, sent exactly the refined
+    // models to the solver that cannot solve them.
+    const int unknown_count = solution.diagnostics.fem_unknown_count;
+    const double estimated_memory_gb = estimatedDirectMemoryGb(unknown_count);
+    const double estimated_direct_seconds = estimatedDirectSeconds(unknown_count);
+    double memory_budget_gb = request.settings.fem.direct_solver_memory_budget_gb;
+    if (!(memory_budget_gb > 0.0)) {
+        const double available_gb = availablePhysicalMemoryGb();
+        // The remaining fifth is for everything else on the machine; the
+        // estimate above is already a peak for the whole process. A platform
+        // that cannot be asked is assumed small - 4 GB is the 64k-unknown point
+        // of the measured table, so the assumption still allows real models.
+        constexpr double unknown_platform_budget_gb = 4.0;
+        memory_budget_gb = available_gb > 0.0 ? 0.8 * available_gb
+                                              : unknown_platform_budget_gb;
+    }
+    // 8:1 is the highest contrast measured to converge, and only just: 7087
+    // iterations against the 8000 the first attempt and the retry allow
+    // together. 20.7:1 does not converge at any iteration count tried.
+    constexpr double iterative_contrast_limit = 8.0;
+    const bool direct_fits_memory = estimated_memory_gb <= memory_budget_gb;
+    const bool iterative_can_converge = mesh_spread.contrast <= iterative_contrast_limit;
+
+    const LinearSolverMethod requested_method = request.settings.fem.linear_solver_method;
+    bool plan_is_direct = requested_method == LinearSolverMethod::Direct;
+#ifdef KRUTIEV_WITH_EIGEN
+    if (requested_method == LinearSolverMethod::Automatic) {
+        plan_is_direct = direct_fits_memory || !iterative_can_converge;
+    }
+#else
+    plan_is_direct = false;
+#endif
+    if (requested_method == LinearSolverMethod::Automatic && !direct_fits_memory &&
+        !iterative_can_converge) {
+        // Neither path can finish this model, and saying so now costs seconds
+        // instead of the quarter of an hour the iterative solver used to spend
+        // before admitting the same thing.
+        std::ostringstream error;
+        error << std::fixed << std::setprecision(1)
+              << "No linear solver can handle this model: the mesh cell size "
+                 "contrast is " << mesh_spread.contrast
+              << ":1, above the " << std::setprecision(0) << iterative_contrast_limit
+              << ":1 the iterative solver still converges at, and factorizing "
+              << unknown_count << " unknowns directly needs about "
+              << std::setprecision(1) << estimated_memory_gb << " GB against "
+              << memory_budget_gb
+              << " GB available. Lower the accuracy level: a coarser mesh, "
+                 "fewer elements across the smallest feature, a smaller minimum "
+                 "size ratio or first-order elements all reduce both numbers.";
+        solution.error_message = error.str();
+        return solution;
+    }
+    {
+        std::ostringstream stage;
+        stage << "Linear solver: " << (plan_is_direct ? "sparse LU" : "GMRES")
+              << " (direct needs about " << std::fixed << std::setprecision(1)
+              << estimated_memory_gb << " GB of " << memory_budget_gb
+              << " GB available and about " << std::setprecision(0)
+              << estimated_direct_seconds << " s; iterative needs a cell size "
+                 "contrast of at most " << std::setprecision(0)
+              << iterative_contrast_limit << ":1, this mesh has "
+              << std::setprecision(1) << mesh_spread.contrast << ":1).";
+        control.reportProgress(stage.str());
+    }
+    if (plan_is_direct && !direct_fits_memory) {
+        std::ostringstream memory_warning;
+        memory_warning << std::fixed << std::setprecision(1)
+                       << "Factorizing " << unknown_count
+                       << " unknowns is estimated to need " << estimated_memory_gb
+                       << " GB against " << memory_budget_gb
+                       << " GB available; the machine may start swapping.";
+        solution.diagnostics.warnings.push_back(memory_warning.str());
+        control.reportProgress(memory_warning.str());
+    }
+    if (!plan_is_direct && !iterative_can_converge) {
+        std::ostringstream contrast_warning;
+        contrast_warning << std::fixed << std::setprecision(1)
+                         << "Mesh cell size contrast " << mesh_spread.contrast
+                         << ":1 is above the " << std::setprecision(0)
+                         << iterative_contrast_limit
+                         << ":1 at which the preconditioned GMRES was last "
+                            "measured to converge; it may stall.";
+        solution.diagnostics.warnings.push_back(contrast_warning.str());
+        control.reportProgress(contrast_warning.str());
     }
 
     const auto &waveguide = request.model.waveguide;
@@ -622,6 +955,11 @@ FieldSolution MfemFrequencyDomainBackend::solve(const SimulationRequest &request
 
     mfem::Array<int> essential_dofs;
     state->space->GetEssentialTrueDofs(pec_marker, essential_dofs);
+    if (control.isCancellationRequested()) {
+        solution.cancelled = true;
+        solution.error_message = "Calculation cancelled.";
+        return solution;
+    }
     control.reportProgress("Assembling the complex H(curl) FEM system...");
     form.Assemble(0);
     mfem::OperatorPtr system_operator;
@@ -639,99 +977,239 @@ FieldSolution MfemFrequencyDomainBackend::solve(const SimulationRequest &request
         return solution;
     }
 
-    MaxwellMatrixCoefficient positive_curl(state->materials, pml, state->omega,
-                                             MaxwellMatrixCoefficient::Term::Curl,
-                                             false, true);
-    MaxwellMatrixCoefficient positive_mass(state->materials, pml, state->omega,
-                                             MaxwellMatrixCoefficient::Term::Mass,
-                                             false, true);
-    mfem::BilinearForm preconditioner_form(state->space.get());
-    preconditioner_form.AddDomainIntegrator(new mfem::CurlCurlIntegrator(positive_curl));
-    preconditioner_form.AddDomainIntegrator(new mfem::VectorFEMassIntegrator(positive_mass));
-    preconditioner_form.Assemble();
-    mfem::OperatorPtr preconditioner_operator;
-    preconditioner_form.SetDiagonalPolicy(mfem::Operator::DIAG_ONE);
-    preconditioner_form.FormSystemMatrix(essential_dofs, preconditioner_operator);
-    mfem::GSSmoother real_smoother(*preconditioner_operator.As<mfem::SparseMatrix>());
-    mfem::ScaledOperator imaginary_smoother(&real_smoother, -1.0);
-    mfem::Array<int> block_offsets(3);
-    block_offsets[0] = 0;
-    block_offsets[1] = state->space->GetTrueVSize();
-    block_offsets[2] = state->space->GetTrueVSize();
-    block_offsets.PartialSum();
-    mfem::BlockDiagonalPreconditioner block_preconditioner(block_offsets);
-    block_preconditioner.SetDiagonalBlock(0, &real_smoother);
-    block_preconditioner.SetDiagonalBlock(1, &imaginary_smoother);
-
-    mfem::GMRESSolver solver;
-    solver.SetPrintLevel(-1);
-    solver.SetKDim(200);
-    solver.SetMaxIter(request.settings.fem.maximum_iterations);
-    solver.SetRelTol(request.settings.fem.relative_tolerance);
-    solver.SetAbsTol(0.0);
-    solver.SetOperator(*system_operator);
-    solver.SetPreconditioner(block_preconditioner);
-    SolveProgressMonitor solve_monitor(control,
-                                       "GMRES",
-                                       request.settings.fem.maximum_iterations);
-    solver.SetMonitor(solve_monitor);
-    control.reportProgress("GMRES: solving the linear system...");
-    solver.Mult(right_vector, solution_vector);
+    // Computed the same way for both solvers, from the operator itself rather
+    // than from anything a solver reports: for the direct path it is also the
+    // proof that the real 2N x 2N block layout matches the complex operator.
     const auto explicitRelativeResidual = [&]() {
         mfem::Vector residual(right_vector.Size());
         system_operator->Mult(solution_vector, residual);
         residual -= right_vector;
         return residual.Norml2() / right_norm;
     };
-    int total_iterations = solver.GetNumIterations();
-    double relative_residual = explicitRelativeResidual();
-    const double accepted_tolerance = std::max(request.settings.fem.relative_tolerance,
-                                               1.0e-6);
-    constexpr double usable_relative_residual = 1.0e-3;
-    if (!solver.GetConverged() && relative_residual > accepted_tolerance) {
-        // The GS-preconditioned indefinite system often stalls near 1e-4,
-        // which is still far below the FEM discretization error, so the retry
-        // aims at a genuinely relaxed target instead of repeating the same
-        // unreachable tolerance. A cold restart with the larger Krylov space
-        // converges further than warming up from the stalled iterate.
-        const double relaxed_tolerance = std::clamp(accepted_tolerance * 100.0,
-                                                    1.0e-4,
-                                                    usable_relative_residual);
-        const int retry_iterations = std::max(6000,
-                                              3 * request.settings.fem.maximum_iterations);
-        mfem::GMRESSolver retry_solver;
-        retry_solver.SetPrintLevel(-1);
-        retry_solver.SetKDim(500);
-        retry_solver.SetMaxIter(retry_iterations);
-        retry_solver.SetRelTol(relaxed_tolerance);
-        retry_solver.SetAbsTol(0.0);
-        retry_solver.SetOperator(*system_operator);
-        retry_solver.SetPreconditioner(block_preconditioner);
-        SolveProgressMonitor retry_monitor(control,
-                                           "GMRES retry (relaxed tolerance)",
-                                           retry_iterations);
-        retry_solver.SetMonitor(retry_monitor);
-        control.reportProgress("GMRES did not converge, retrying with a relaxed tolerance...");
-        retry_solver.Mult(right_vector, solution_vector);
-        total_iterations += retry_solver.GetNumIterations();
-        relative_residual = explicitRelativeResidual();
-        if (!(relative_residual <= usable_relative_residual)) {
-            solution.diagnostics.linear_iterations = total_iterations;
-            solution.diagnostics.linear_relative_residual = relative_residual;
-            std::ostringstream error;
-            error << "MFEM GMRES did not converge: relative residual="
-                  << relative_residual << ", iterations=" << total_iterations << ".";
-            solution.error_message = error.str();
+
+    if (control.isCancellationRequested()) {
+        solution.cancelled = true;
+        solution.error_message = "Calculation cancelled.";
+        return solution;
+    }
+
+    bool solved_directly = false;
+    int total_iterations = 0;
+    double relative_residual = 0.0;
+#ifdef KRUTIEV_WITH_EIGEN
+    if (plan_is_direct) {
+        mfem::ComplexSparseMatrix *complex_matrix =
+            system_operator.Is<mfem::ComplexSparseMatrix>();
+        std::string failure;
+        bool cancelled_while_factorizing = false;
+        if (complex_matrix == nullptr) {
+            failure = "the assembled system is not a serial complex sparse matrix";
+        } else {
+            std::ostringstream stage;
+            stage << "Sparse LU: factorizing " << unknown_count
+                  << " unknowns, expect roughly " << std::fixed << std::setprecision(0)
+                  << estimated_direct_seconds << " s and " << std::setprecision(1)
+                  << estimated_memory_gb << " GB...";
+            control.reportProgress(stage.str());
+            // Eigen's factorisation is one blocking call with no callback, so it
+            // cannot be interrupted. Running it on its own thread at least keeps
+            // this one free to show that the program is alive and to notice a
+            // cancellation; the cancellation is acted on only once the call
+            // returns, because killing the thread would leak the factors and
+            // leave Eigen's allocator in an undefined state.
+            std::future<std::string> factorization =
+                std::async(std::launch::async, [&]() {
+                    return solveWithSparseLu(*complex_matrix, right_vector,
+                                             solution_vector);
+                });
+            constexpr auto heartbeat_period = std::chrono::seconds(10);
+            const auto factorization_start = std::chrono::steady_clock::now();
+            while (factorization.wait_for(heartbeat_period) !=
+                   std::future_status::ready) {
+                const double elapsed_s = std::chrono::duration<double>(
+                                             std::chrono::steady_clock::now() -
+                                             factorization_start)
+                                             .count();
+                cancelled_while_factorizing = cancelled_while_factorizing ||
+                                              control.isCancellationRequested();
+                std::ostringstream beat;
+                beat << "Sparse LU: factorizing, " << std::fixed << std::setprecision(0)
+                     << elapsed_s << " s of roughly " << estimated_direct_seconds
+                     << " s elapsed"
+                     << (cancelled_while_factorizing
+                             ? " (cancelled, but the factorization cannot be "
+                               "interrupted and has to finish)"
+                             : "")
+                     << ".";
+                control.reportProgress(beat.str());
+            }
+            failure = factorization.get();
+        }
+        if (cancelled_while_factorizing || control.isCancellationRequested()) {
+            solution.cancelled = true;
+            solution.error_message = "Calculation cancelled.";
             return solution;
         }
-        if (relative_residual > relaxed_tolerance) {
-            std::ostringstream stall_warning;
-            stall_warning << "GMRES stalled at relative residual " << relative_residual
-                          << " (requested " << request.settings.fem.relative_tolerance
-                          << "); fields and S-parameters are approximate.";
-            solution.diagnostics.warnings.push_back(stall_warning.str());
+        if (failure.empty()) {
+            relative_residual = explicitRelativeResidual();
+            // The direct path used to have no acceptance test at all: whatever
+            // came out was reported as success, and with the solution vector
+            // deliberately doubled inside the solver it still returned success
+            // and a full set of S-parameters at a relative residual of 1.00.
+            // A factorisation that worked leaves 1e-13 to 1e-14 on these systems
+            // (measured 1.2e-14 to 2.6e-13 over 1453 to 112246 unknowns), so the
+            // bar can sit five orders above that and still be eight orders below
+            // a broken one. With the same corruption in place the check now
+            // rejects the factorisation and GMRES solves the system instead.
+            constexpr double direct_residual_limit = 1.0e-8;
+            if (relative_residual <= direct_residual_limit) {
+                solved_directly = true;
+            } else {
+                std::ostringstream residual_failure;
+                residual_failure << std::scientific << std::setprecision(3)
+                                 << "the factorization left a relative residual of "
+                                 << relative_residual << ", above the "
+                                 << direct_residual_limit << " a working one leaves";
+                failure = residual_failure.str();
+                relative_residual = 0.0;
+            }
+        }
+        if (!failure.empty()) {
+            // A failed factorization leaves the vector half overwritten, so the
+            // Krylov solver must not inherit it as an initial guess.
+            solution_vector = 0.0;
+            std::ostringstream fallback_warning;
+            fallback_warning << "Direct solver unavailable (" << failure
+                             << "); solved with preconditioned GMRES instead.";
+            solution.diagnostics.warnings.push_back(fallback_warning.str());
+            // Also on the live channel: the Krylov fallback can run for minutes
+            // and the user should know why before it finishes.
+            control.reportProgress(fallback_warning.str());
         }
     }
+#else
+    if (requested_method == LinearSolverMethod::Direct) {
+        solution.diagnostics.warnings.push_back(
+            "Direct solver requested but this build has no Eigen; solved with "
+            "preconditioned GMRES instead.");
+    }
+#endif
+
+    if (!solved_directly) {
+        MaxwellMatrixCoefficient positive_curl(state->materials, pml, state->omega,
+                                                 MaxwellMatrixCoefficient::Term::Curl,
+                                                 false, true);
+        MaxwellMatrixCoefficient positive_mass(state->materials, pml, state->omega,
+                                                 MaxwellMatrixCoefficient::Term::Mass,
+                                                 false, true);
+        mfem::BilinearForm preconditioner_form(state->space.get());
+        preconditioner_form.AddDomainIntegrator(new mfem::CurlCurlIntegrator(positive_curl));
+        preconditioner_form.AddDomainIntegrator(new mfem::VectorFEMassIntegrator(positive_mass));
+        preconditioner_form.Assemble();
+        mfem::OperatorPtr preconditioner_operator;
+        preconditioner_form.SetDiagonalPolicy(mfem::Operator::DIAG_ONE);
+        preconditioner_form.FormSystemMatrix(essential_dofs, preconditioner_operator);
+        // Three Gauss-Seidel sweeps per application instead of the default one. The
+        // extra sweeps cost little next to a GMRES iteration on this indefinite
+        // system but shorten the Krylov space a lot: on the empty 22.86x10.16 mm
+        // guide at 10 GHz with a 3 mm mesh, GMRES needs 870 iterations with one
+        // sweep and 194 with three (7.1 s vs 2.6 s); with the 11x5 mm iris it is
+        // 1357 versus 238 iterations (12.5 s vs 3.3 s).
+        constexpr int smoother_sweep_count = 3;
+        mfem::GSSmoother real_smoother(*preconditioner_operator.As<mfem::SparseMatrix>(),
+                                       0,
+                                       smoother_sweep_count);
+        mfem::ScaledOperator imaginary_smoother(&real_smoother, -1.0);
+        mfem::Array<int> block_offsets(3);
+        block_offsets[0] = 0;
+        block_offsets[1] = state->space->GetTrueVSize();
+        block_offsets[2] = state->space->GetTrueVSize();
+        block_offsets.PartialSum();
+        mfem::BlockDiagonalPreconditioner block_preconditioner(block_offsets);
+        block_preconditioner.SetDiagonalBlock(0, &real_smoother);
+        block_preconditioner.SetDiagonalBlock(1, &imaginary_smoother);
+
+        mfem::GMRESSolver solver;
+        solver.SetPrintLevel(-1);
+        solver.SetKDim(200);
+        solver.SetMaxIter(request.settings.fem.maximum_iterations);
+        solver.SetRelTol(request.settings.fem.relative_tolerance);
+        solver.SetAbsTol(0.0);
+        solver.SetOperator(*system_operator);
+        solver.SetPreconditioner(block_preconditioner);
+        SolveProgressMonitor solve_monitor(control,
+                                           "GMRES",
+                                           request.settings.fem.maximum_iterations);
+        solver.SetMonitor(solve_monitor);
+        control.reportProgress("GMRES: solving the linear system...");
+        solver.Mult(right_vector, solution_vector);
+        if (solve_monitor.wasCancelled()) {
+            solution.cancelled = true;
+            solution.error_message = "Calculation cancelled.";
+            return solution;
+        }
+        total_iterations = solver.GetNumIterations();
+        relative_residual = explicitRelativeResidual();
+        const double accepted_tolerance = std::max(request.settings.fem.relative_tolerance,
+                                                   1.0e-6);
+        constexpr double usable_relative_residual = 1.0e-3;
+        if (!solver.GetConverged() && relative_residual > accepted_tolerance) {
+            // The GS-preconditioned indefinite system often stalls near 1e-4,
+            // which is still far below the FEM discretization error, so the retry
+            // aims at a genuinely relaxed target instead of repeating the same
+            // unreachable tolerance. A cold restart with the larger Krylov space
+            // converges further than warming up from the stalled iterate.
+            const double relaxed_tolerance = std::clamp(accepted_tolerance * 100.0,
+                                                        1.0e-4,
+                                                        usable_relative_residual);
+            const int retry_iterations = std::max(6000,
+                                                  3 * request.settings.fem.maximum_iterations);
+            mfem::GMRESSolver retry_solver;
+            retry_solver.SetPrintLevel(-1);
+            retry_solver.SetKDim(500);
+            retry_solver.SetMaxIter(retry_iterations);
+            retry_solver.SetRelTol(relaxed_tolerance);
+            retry_solver.SetAbsTol(0.0);
+            retry_solver.SetOperator(*system_operator);
+            retry_solver.SetPreconditioner(block_preconditioner);
+            SolveProgressMonitor retry_monitor(control,
+                                               "GMRES retry (relaxed tolerance)",
+                                               retry_iterations);
+            retry_solver.SetMonitor(retry_monitor);
+            control.reportProgress("GMRES did not converge, retrying with a relaxed tolerance...");
+            retry_solver.Mult(right_vector, solution_vector);
+            if (retry_monitor.wasCancelled()) {
+                solution.cancelled = true;
+                solution.error_message = "Calculation cancelled.";
+                return solution;
+            }
+            total_iterations += retry_solver.GetNumIterations();
+            relative_residual = explicitRelativeResidual();
+            if (!(relative_residual <= usable_relative_residual)) {
+                solution.diagnostics.linear_iterations = total_iterations;
+                solution.diagnostics.linear_relative_residual = relative_residual;
+                std::ostringstream error;
+                error << "MFEM GMRES did not converge: true relative residual="
+                      << relative_residual << ", iterations=" << total_iterations << ".";
+                solution.error_message = error.str();
+                return solution;
+            }
+            if (relative_residual > relaxed_tolerance) {
+                std::ostringstream stall_warning;
+                stall_warning << "GMRES stalled at true relative residual "
+                              << relative_residual << " (the requested "
+                              << request.settings.fem.relative_tolerance
+                              << " applies to the preconditioned one); fields and "
+                                 "S-parameters are approximate.";
+                solution.diagnostics.warnings.push_back(stall_warning.str());
+            }
+        }
+    }
+    // linear_iterations stays 0 for the direct solver, so the method itself has
+    // to be named somewhere the user can see it.
+    solution.diagnostics.backend_name = solved_directly
+                                            ? "MFEM complex H(curl) FEM, Eigen SparseLU"
+                                            : "MFEM complex H(curl) FEM, preconditioned GMRES";
     solution.diagnostics.linear_iterations = total_iterations;
     solution.diagnostics.linear_relative_residual = relative_residual;
     form.RecoverFEMSolution(solution_vector, right_hand_side, *state->electric);
@@ -741,8 +1219,13 @@ FieldSolution MfemFrequencyDomainBackend::solve(const SimulationRequest &request
     const double sampling_offset = std::max(1.0e-8, waveguide.length_m * 1.0e-6);
     const double input_z = -0.5 * waveguide.length_m + sampling_offset;
     const double output_z = 0.5 * waveguide.length_m - sampling_offset;
+    // Both S-parameters are referenced to the physical port planes, exactly as
+    // in the analytic and mode-matching backends: only the small sampling
+    // offset is de-embedded, never the guide length itself. De-embedding the
+    // whole length here made an empty guide report S21 = 1 instead of
+    // exp(-gamma L), so the same structure changed phase with the solver.
     const double input_distance = sampling_offset;
-    const double output_distance = waveguide.length_m - sampling_offset;
+    const double output_distance = sampling_offset;
     const Complex input_projection =
         projectPortElectric(*solution.field, *incident.field, waveguide, input_z);
     const Complex output_projection =
@@ -752,16 +1235,76 @@ FieldSolution MfemFrequencyDomainBackend::solve(const SimulationRequest &request
         (input_projection - incident_at_input) *
         std::exp(Complex(0.0, -beta * input_distance));
     solution.scattering.s21 =
-        output_projection * std::exp(Complex(0.0, beta * output_distance));
-    solution.diagnostics.incident_power_w = request.settings.normalization_power_w;
-    solution.diagnostics.reflected_power_w =
-        std::norm(solution.scattering.s11) * solution.diagnostics.incident_power_w;
-    solution.diagnostics.transmitted_power_w =
-        std::norm(solution.scattering.s21) * solution.diagnostics.incident_power_w;
-    solution.diagnostics.dissipated_power_w = std::max(
-        0.0,
-        solution.diagnostics.incident_power_w - solution.diagnostics.reflected_power_w -
-            solution.diagnostics.transmitted_power_w);
+        output_projection * std::exp(Complex(0.0, -beta * output_distance));
+
+    // The powers below are all derived from the two projected S-parameters, so
+    // their sum balances by construction and proves nothing. The single piece of
+    // independent information is the unitarity residual 1 - |S11|^2 - |S21|^2:
+    // the port projection never enforces it, so for a model without a physical
+    // power sink it measures the numerical error of the whole solve.
+    const double incident_power_w = request.settings.normalization_power_w;
+    const double reflected_fraction = std::norm(solution.scattering.s11);
+    const double transmitted_fraction = std::norm(solution.scattering.s21);
+    const double unitarity_residual = 1.0 - reflected_fraction - transmitted_fraction;
+    solution.diagnostics.incident_power_w = incident_power_w;
+    solution.diagnostics.reflected_power_w = reflected_fraction * incident_power_w;
+    solution.diagnostics.transmitted_power_w = transmitted_fraction * incident_power_w;
+    // Deliberately not clamped at zero: a negative remainder means the structure
+    // came out active, which is exactly the failure a clamp would hide.
+    solution.diagnostics.dissipated_power_w = unitarity_residual * incident_power_w;
+    solution.diagnostics.unitarity_defect = std::abs(unitarity_residual);
+    solution.diagnostics.power_balance_relative_error =
+        solution.diagnostics.unitarity_defect;
+
+    const bool has_lossy_material =
+        std::any_of(state->materials.begin(),
+                    state->materials.end(),
+                    [](const Material &material) {
+                        return material.conductivity_s_per_m > 0.0 ||
+                               std::imag(material.relative_permittivity) != 0.0 ||
+                               std::imag(material.relative_permeability) != 0.0;
+                    });
+    // Wall loss is not modelled here, so a PML that carries slot radiation out of
+    // the domain is the only other place the missing power can legitimately go.
+    const bool has_power_sink = has_lossy_material || pml.enabled;
+    // Below this the residual is dominated by the port projection and mesh
+    // discretisation error, which the S-parameters themselves already carry.
+    constexpr double unitarity_warning_threshold = 0.02;
+    // Floor for calling the residual negative. It has to sit at the accuracy the
+    // whole chain can reach, not at rounding: the port projection samples the
+    // mode on a 36 x 24 grid and the mesh carries its own error. Measured on the
+    // empty guide with second-order elements and the direct solver (linear
+    // residual 1e-13, so nothing else is in the way), the defect over
+    // h = 5.0 / 4.0 / 3.2 / 2.6 mm is 1.2e-04 / 6.2e-05 / 1.6e-07 / 6.8e-05: it
+    // stops falling with the mesh and its sign turns random, so the finest of
+    // the four came out at |S21| = 1.0000338 > 1 - and the old floor of 1e-9
+    // reported "passivity violated" on the most accurate mesh of the set. With
+    // first-order elements the same defect stays between 1.1e-02 and 2.9e-02,
+    // a hundred times above this floor, so a real violation still fires.
+    const double passivity_floor_w = 1.0e-4 * incident_power_w;
+    if (solution.diagnostics.dissipated_power_w < -passivity_floor_w) {
+        std::ostringstream passivity_warning;
+        passivity_warning << "Passivity violated numerically: |S11|^2 + |S21|^2 = "
+                          << reflected_fraction + transmitted_fraction
+                          << " exceeds 1 by " << -unitarity_residual
+                          << "; the reported dissipated power is negative.";
+        solution.diagnostics.warnings.push_back(passivity_warning.str());
+    }
+    if (has_power_sink) {
+        std::ostringstream sink_note;
+        sink_note << "Power balance residual " << unitarity_residual
+                  << " also absorbs physical loss ("
+                  << (has_lossy_material ? "lossy filling" : "PML radiation")
+                  << "), so it is not a pure numerical error measure.";
+        solution.diagnostics.warnings.push_back(sink_note.str());
+    } else if (solution.diagnostics.unitarity_defect > unitarity_warning_threshold) {
+        std::ostringstream defect_warning;
+        defect_warning << "Unitarity defect " << solution.diagnostics.unitarity_defect
+                       << " on a lossless model: the S-parameters carry at least that "
+                          "much numerical error; refine the mesh or tighten the "
+                          "solver tolerance.";
+        solution.diagnostics.warnings.push_back(defect_warning.str());
+    }
     solution.diagnostics.warnings.push_back(
         "S11 and S21 are projected for port-1 excitation; S12/S22 require a second solve.");
     solution.diagnostics.estimated_pml_reflection =

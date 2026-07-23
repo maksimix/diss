@@ -11,6 +11,7 @@
 #include <QtCore/QLocale>
 #include <QtCore/QSignalBlocker>
 #include <QtGui/QAction>
+#include <QtGui/QCloseEvent>
 #include <QtGui/QPainter>
 #include <QtWidgets/QAbstractItemView>
 #include <QtWidgets/QFileDialog>
@@ -27,10 +28,12 @@
 #include <QtWidgets/QHeaderView>
 #include <QtWidgets/QLabel>
 #include <QtWidgets/QLineEdit>
+#include <QtWidgets/QMenu>
 #include <QtWidgets/QMessageBox>
 #include <QtWidgets/QPlainTextEdit>
 #include <QtWidgets/QProgressBar>
 #include <QtWidgets/QPushButton>
+#include <QtWidgets/QStatusBar>
 #include <QtWidgets/QStyle>
 #include <QtWidgets/QSplitter>
 #include <QtWidgets/QTreeWidget>
@@ -65,6 +68,18 @@ QString slotSurfaceName(int surface)
     return QStringLiteral("top");
 }
 
+// Строка фильтра над деревом объектов прячет всё, что не совпало ни само, ни
+// через потомков — так ведёт себя <Filter> в Navigation Tree CST.
+bool applyTreeFilter(QTreeWidgetItem *item, const QString &needle)
+{
+    bool matched = needle.isEmpty() || item->text(0).contains(needle, Qt::CaseInsensitive);
+    for (int index = 0; index < item->childCount(); ++index) {
+        matched = applyTreeFilter(item->child(index), needle) || matched;
+    }
+    item->setHidden(!matched);
+    return matched;
+}
+
 QString formattedDuration(qint64 milliseconds)
 {
     const qint64 total_seconds = std::max<qint64>(0, milliseconds / 1000);
@@ -75,113 +90,74 @@ QString formattedDuration(qint64 milliseconds)
                : QStringLiteral("%1 с").arg(seconds);
 }
 
+// Палитра повторяет CST Studio Suite: синяя полоса вкладок ленты, белое поле
+// групп, серо-стальные рамки панелей. Цвета отрисовки значков и заголовков
+// панелей продублированы в cst_ribbon.cpp — их надо менять вместе.
 QString cstStyleSheet()
 {
     return QStringLiteral(R"(
 QMainWindow, QWidget {
-    background: #f4f4f4;
+    background: #f0f0f0;
     color: #1f1f1f;
     font-family: "Segoe UI";
     font-size: 9pt;
 }
-QTreeWidget {
-    background: #ffffff;
-    border: 1px solid #b9b9b9;
-    alternate-background-color: #f7f7f7;
-    outline: 0;
+QMainWindow::separator {
+    background: #d6d6d6;
+    width: 4px;
+    height: 4px;
 }
-QTreeWidget::item {
-    height: 20px;
-    padding: 1px 4px;
-}
-QTreeWidget::item:selected {
-    background: #c8c8c8;
-    color: #111111;
-}
-QTreeWidget::branch:closed:has-children {
-    image: none;
-}
-QTreeWidget::branch:open:has-children {
-    image: none;
-}
-QLineEdit, QDoubleSpinBox, QComboBox, QPlainTextEdit {
-    background: #ffffff;
-    border: 1px solid #b8b8b8;
-    border-radius: 1px;
-    padding: 2px 4px;
-}
-QLineEdit:focus, QDoubleSpinBox:focus, QComboBox:focus {
-    border: 1px solid #3aa6d8;
-}
-QCheckBox {
-    spacing: 6px;
-}
-QPushButton {
-    background: #ededed;
-    border: 1px solid #9c9c9c;
-    border-radius: 2px;
-    min-height: 21px;
-    padding: 2px 14px;
-}
-QPushButton:hover {
-    background: #f7f7f7;
-    border-color: #55a8d7;
-}
-QPushButton:default {
-    border: 1px solid #1590d0;
-    background: #eaf6fd;
-}
-QGroupBox {
-    border: 1px solid #c7c7c7;
-    margin-top: 8px;
-    padding-top: 10px;
-    font-weight: 600;
-}
-QGroupBox::title {
-    subcontrol-origin: margin;
-    left: 8px;
-    padding: 0 3px;
-}
-QDialog {
-    background: #ececec;
-}
-QDialog QLabel {
-    background: transparent;
-}
-QSplitter::handle {
-    background: #d0d0d0;
-}
-QProgressBar {
-    border: 1px solid #9aa5ac;
-    background: #dfe4e7;
-}
-QProgressBar::chunk {
-    background: #2aa7d6;
+
+/* ------------------------------------------------------ шапка ленты ---- */
+QWidget#cstRibbonHeader {
+    background: #1b5b96;
 }
 QTabBar#cstRibbonTabBar {
-    background: #f4f4f4;
+    background: transparent;
 }
 QTabBar#cstRibbonTabBar::tab {
     background: transparent;
-    border: 1px solid transparent;
-    border-bottom: none;
-    padding: 4px 14px;
-    margin-right: 1px;
-    color: #24384a;
+    border: none;
+    padding: 5px 13px;
+    color: #d8e7f4;
 }
 QTabBar#cstRibbonTabBar::tab:hover {
-    background: #e2eef7;
+    background: #2c72ad;
+    color: #ffffff;
 }
 QTabBar#cstRibbonTabBar::tab:selected {
-    background: #ffffff;
-    border: 1px solid #c4c4c4;
-    border-bottom: 1px solid #ffffff;
-    color: #10528a;
-    font-weight: 600;
+    background: #3d84bd;
+    color: #ffffff;
 }
+QLineEdit#cstRibbonSearch {
+    background: #ffffff;
+    border: 1px solid #7ba7cd;
+    border-radius: 2px;
+    padding: 1px 4px;
+    min-height: 17px;
+    color: #1f1f1f;
+}
+QToolButton#cstRibbonHeaderButton {
+    background: transparent;
+    border: none;
+    padding: 3px;
+}
+QToolButton#cstRibbonHeaderButton:hover {
+    background: #2c72ad;
+}
+
+/* ------------------------------------------------------- поле ленты ---- */
 QStackedWidget#cstRibbonPages {
     background: #ffffff;
     border: 1px solid #c4c4c4;
+    border-top: none;
+}
+QStackedWidget#cstRibbonPages QWidget {
+    background: #ffffff;
+}
+QLabel#cstRibbonGroupCaption {
+    color: #6f6f6f;
+    font-size: 8pt;
 }
 QStackedWidget#cstRibbonPages QToolButton {
     border: 1px solid transparent;
@@ -190,42 +166,165 @@ QStackedWidget#cstRibbonPages QToolButton {
     color: #1f1f1f;
 }
 QStackedWidget#cstRibbonPages QToolButton:hover {
-    background: #e2eef7;
-    border-color: #9dc7e4;
+    background: #dbeaf7;
+    border-color: #a3c8e8;
 }
-QStackedWidget#cstRibbonPages QToolButton:pressed {
-    background: #c9e2f3;
-    border-color: #5fa8d3;
+QStackedWidget#cstRibbonPages QToolButton:pressed,
+QStackedWidget#cstRibbonPages QToolButton:checked {
+    background: #c4dcf1;
+    border-color: #6ba3d6;
 }
 QStackedWidget#cstRibbonPages QToolButton:disabled {
     color: #a0a0a0;
-}
-QStackedWidget#cstRibbonPages QWidget {
-    background: #ffffff;
 }
 QStackedWidget#cstRibbonPages QComboBox,
 QStackedWidget#cstRibbonPages QDoubleSpinBox {
     background: #ffffff;
 }
+
+/* --------------------------------------------- вкладка открытой модели --- */
+QTabBar#cstDocumentTabBar {
+    background: #e4e4e4;
+}
+QTabBar#cstDocumentTabBar::tab {
+    background: #e4e4e4;
+    border: 1px solid #c4c4c4;
+    border-top: none;
+    padding: 3px 12px;
+    margin-right: 2px;
+    color: #303030;
+}
+QTabBar#cstDocumentTabBar::tab:selected {
+    background: #ffffff;
+    color: #10528a;
+}
+
+/* ------------------------------------------------ панели рабочей зоны --- */
+QWidget#cstPanel {
+    background: #ffffff;
+    border: 1px solid #c4c4c4;
+}
+QToolButton#cstPanelCloseButton {
+    background: transparent;
+    border: none;
+}
+QToolButton#cstPanelCloseButton:hover {
+    background: #d8d8d8;
+}
+QTreeWidget, QTreeView {
+    background: #ffffff;
+    border: none;
+    outline: 0;
+    show-decoration-selected: 1;
+}
+QTreeWidget::item {
+    height: 19px;
+    padding: 1px 3px;
+}
+QTreeWidget::item:selected {
+    background: #cce4f7;
+    color: #10528a;
+}
+QTreeWidget::item:hover {
+    background: #e8f2fb;
+}
+
+/* --------------------------------------------------------- элементы ---- */
+QLineEdit, QDoubleSpinBox, QComboBox, QPlainTextEdit {
+    background: #ffffff;
+    border: 1px solid #adadad;
+    border-radius: 1px;
+    padding: 2px 4px;
+}
+QLineEdit:focus, QDoubleSpinBox:focus, QComboBox:focus {
+    border: 1px solid #3c7fb1;
+}
+QCheckBox {
+    spacing: 6px;
+}
+QPushButton {
+    background: #f0f0f0;
+    border: 1px solid #adadad;
+    border-radius: 2px;
+    min-height: 21px;
+    padding: 2px 14px;
+}
+QPushButton:hover {
+    background: #dbeaf7;
+    border-color: #3c7fb1;
+}
+QPushButton:default {
+    border: 1px solid #3c7fb1;
+    background: #eaf3fb;
+}
+QGroupBox {
+    border: 1px solid #c4c4c4;
+    margin-top: 8px;
+    padding-top: 10px;
+}
+QGroupBox::title {
+    subcontrol-origin: margin;
+    left: 8px;
+    padding: 0 3px;
+    color: #10528a;
+}
+QDialog {
+    background: #f0f0f0;
+}
+QDialog QLabel {
+    background: transparent;
+}
+QSplitter::handle {
+    background: #f0f0f0;
+}
+QProgressBar {
+    border: 1px solid #a8b2b8;
+    background: #e4e4e4;
+    border-radius: 2px;
+}
+QProgressBar::chunk {
+    background: #2c8ac9;
+}
+QStatusBar {
+    background: #f0f0f0;
+    border-top: 1px solid #c4c4c4;
+}
+QStatusBar::item {
+    border: none;
+}
+QStatusBar QLabel {
+    padding: 0 6px;
+}
 QDockWidget {
     titlebar-close-icon: none;
-    font-weight: 600;
 }
 QDockWidget::title {
-    background: #e3e3e3;
+    background: #f0f0f0;
     border: 1px solid #c4c4c4;
+    border-bottom: none;
     padding: 3px 6px;
 }
 QTableWidget {
     background: #ffffff;
-    border: 1px solid #b9b9b9;
+    border: 1px solid #c4c4c4;
     gridline-color: #dcdcdc;
-    alternate-background-color: #f7f7f7;
+    alternate-background-color: #f7f9fb;
 }
 QHeaderView::section {
-    background: #ededed;
-    border: 1px solid #c9c9c9;
+    background: #f0f0f0;
+    border: 1px solid #c4c4c4;
     padding: 2px 6px;
+}
+QMenu {
+    background: #ffffff;
+    border: 1px solid #c4c4c4;
+}
+QMenu::item {
+    padding: 4px 22px 4px 22px;
+}
+QMenu::item:selected {
+    background: #cce4f7;
+    color: #10528a;
 }
 )");
 }
@@ -329,10 +428,16 @@ MainWindow::MainWindow(QWidget *parent)
     QWidget *result_panel = createResultPanel();
     createRibbon();
     createParameterDock();
+    createStatusBar();
+
+    // Главный вид — такое же окно с полосой заголовка, как остальные панели
+    // рабочей области CST.
+    CstPanel *view_panel = new CstPanel(QStringLiteral("3D View"), this);
+    view_panel->setContent(open_gl_widget_);
 
     QSplitter *main_splitter = new QSplitter(Qt::Horizontal, this);
     main_splitter->addWidget(parameter_panel);
-    main_splitter->addWidget(open_gl_widget_);
+    main_splitter->addWidget(view_panel);
     main_splitter->addWidget(projection_panel);
     main_splitter->setStretchFactor(0, 0);
     main_splitter->setStretchFactor(1, 1);
@@ -362,13 +467,16 @@ MainWindow::MainWindow(QWidget *parent)
     progress_timer_.setInterval(1000);
     connect(&progress_timer_, &QTimer::timeout, this, &MainWindow::updateCalculationProgress);
 
+    // Без родителя: иначе QObject уничтожил бы поток вместе с окном, а ~QThread
+    // на ещё работающем расчёте вызывает qFatal.
+    worker_thread_ = new QThread();
     worker_ = new CalculationWorker();
-    worker_->moveToThread(&worker_thread_);
-    connect(&worker_thread_, &QThread::finished, worker_, &QObject::deleteLater);
+    worker_->moveToThread(worker_thread_);
+    connect(worker_thread_, &QThread::finished, worker_, &QObject::deleteLater);
     connect(this, &MainWindow::requestCalculation, worker_, &CalculationWorker::calculate);
     connect(worker_, &CalculationWorker::calculated, this, &MainWindow::handleCalculationResult);
     connect(worker_, &CalculationWorker::progressed, this, &MainWindow::handleCalculationProgress);
-    worker_thread_.start();
+    worker_thread_->start();
 
     // Стартовое состояние: геометрия показана, решатель ждёт кнопки Start.
     updateModelPreview();
@@ -377,13 +485,40 @@ MainWindow::MainWindow(QWidget *parent)
               false);
 }
 
+void MainWindow::closeEvent(QCloseEvent *event)
+{
+    // Отмена просится здесь, а не в деструкторе: между закрытием окна и его
+    // разрушением решатель успевает дойти до очередной точки опроса, и ждать в
+    // деструкторе приходится заметно меньше.
+    latest_request_id_ = 0;
+    if (worker_ != nullptr) {
+        worker_->setLatestRequestId(0);
+    }
+    QMainWindow::closeEvent(event);
+}
+
 MainWindow::~MainWindow()
 {
     if (worker_ != nullptr) {
         worker_->setLatestRequestId(0);
     }
-    worker_thread_.quit();
-    worker_thread_.wait();
+    if (worker_thread_ == nullptr) {
+        return;
+    }
+    worker_thread_->quit();
+
+    // Один FEM-расчёт идёт до четверти часа и замечает отмену только в своей
+    // очередной точке опроса, поэтому безусловное wait() держало окно закрытым
+    // ровно столько же — интерфейс выглядел зависшим. Ждём короткую паузу; если
+    // поток не успел, объект QThread сознательно утекает: разрушить работающий
+    // поток нельзя (qFatal), а terminate() оборвал бы его посреди разложения
+    // матрицы, и обработчики выхода пошли бы по испорченной куче. Утечка живёт
+    // до конца процесса, который наступает сразу за этим.
+    constexpr int worker_shutdown_grace_ms = 3000;
+    if (worker_thread_->wait(worker_shutdown_grace_ms)) {
+        delete worker_thread_;
+    }
+    worker_thread_ = nullptr;
 }
 
 void MainWindow::markModelChanged()
@@ -517,7 +652,9 @@ void MainWindow::updateCalculationProgress()
                   "Прошло: %1   |   Завершение расчета, первоначальная оценка превышена   |   95%+")
                   .arg(formattedDuration(elapsed_ms));
     if (!calculation_stage_.isEmpty()) {
-        text += QStringLiteral("\nЭтап: %1").arg(calculation_stage_);
+        // В строке состояния место только на одну строку, поэтому этап идёт
+        // тем же разделителем, что и остальные поля.
+        text += QStringLiteral("   |   Этап: %1").arg(calculation_stage_);
     }
     calculation_time_label_->setText(text);
 }
@@ -556,32 +693,48 @@ QWidget *MainWindow::createParameterPanel()
 {
     QWidget *panel = new QWidget(this);
     panel->setObjectName(QStringLiteral("cstProjectPanel"));
-    panel->setMinimumWidth(260);
-    panel->setMaximumWidth(340);
+    panel->setMinimumWidth(250);
+    panel->setMaximumWidth(360);
 
     QVBoxLayout *panel_layout = new QVBoxLayout(panel);
-    panel_layout->setContentsMargins(7, 7, 7, 7);
-    panel_layout->setSpacing(7);
+    panel_layout->setContentsMargins(3, 3, 3, 3);
+    panel_layout->setSpacing(3);
 
-    QLineEdit *filter_line_edit = new QLineEdit(panel);
+    // «Navigation Tree» — та же левая панель, что в CST: строка фильтра над
+    // деревом объектов модели.
+    navigation_panel_ = new CstPanel(QStringLiteral("Navigation Tree"), panel);
+    navigation_panel_->setClosable(true);
+
+    QWidget *tree_content = new QWidget(navigation_panel_);
+    QVBoxLayout *tree_layout = new QVBoxLayout(tree_content);
+    tree_layout->setContentsMargins(4, 4, 4, 4);
+    tree_layout->setSpacing(4);
+
+    QLineEdit *filter_line_edit = new QLineEdit(tree_content);
     filter_line_edit->setPlaceholderText(QStringLiteral("<Filter>"));
-    panel_layout->addWidget(filter_line_edit);
+    filter_line_edit->setClearButtonEnabled(true);
+    tree_layout->addWidget(filter_line_edit);
 
-    object_tree_widget_ = new QTreeWidget(panel);
+    object_tree_widget_ = new QTreeWidget(tree_content);
     object_tree_widget_->setHeaderHidden(true);
     object_tree_widget_->setRootIsDecorated(true);
     object_tree_widget_->setSelectionMode(QAbstractItemView::SingleSelection);
     object_tree_widget_->header()->setStretchLastSection(true);
-    panel_layout->addWidget(object_tree_widget_, 1);
+    tree_layout->addWidget(object_tree_widget_, 1);
 
-    slot_enabled_check_box_ = new QCheckBox(QStringLiteral("Щель включена в модель"), panel);
+    slot_enabled_check_box_ = new QCheckBox(QStringLiteral("Щель включена в модель"), tree_content);
     slot_enabled_check_box_->setChecked(parameters_.slot_enabled);
-    panel_layout->addWidget(slot_enabled_check_box_);
+    tree_layout->addWidget(slot_enabled_check_box_);
 
-    // Кнопки построения и настройки расчёта переехали на ленту; на панели
-    // проекта остаётся дерево объектов и управление отображением.
-    QGroupBox *view_group = new QGroupBox(QStringLiteral("Отображение"), panel);
+    navigation_panel_->setContent(tree_content);
+    panel_layout->addWidget(navigation_panel_, 1);
+
+    // Кнопки построения и настройки расчёта переехали на ленту; под деревом
+    // остаётся управление отображением полей — отдельная панель CST.
+    CstPanel *display_panel = new CstPanel(QStringLiteral("Отображение полей"), panel);
+    QWidget *view_group = new QWidget(display_panel);
     QFormLayout *view_layout = new QFormLayout(view_group);
+    view_layout->setContentsMargins(6, 6, 6, 6);
     field_mode_combo_box_ = new QComboBox(view_group);
     field_mode_combo_box_->addItem(QStringLiteral("E + H"));
     field_mode_combo_box_->addItem(QStringLiteral("E + H + J"));
@@ -602,8 +755,10 @@ QWidget *MainWindow::createParameterPanel()
     view_layout->addRow(animation_check_box_);
     view_layout->addRow(color_bar_);
     view_layout->addRow(reset_view_button);
-    panel_layout->addWidget(view_group);
+    display_panel->setContent(view_group);
+    panel_layout->addWidget(display_panel);
 
+    connect(filter_line_edit, &QLineEdit::textChanged, this, &MainWindow::filterObjectTree);
     connect(slot_enabled_check_box_,
             &QCheckBox::toggled,
             this,
@@ -694,20 +849,17 @@ QWidget *MainWindow::createProjectionPanel()
     panel->setMaximumWidth(460);
 
     QVBoxLayout *layout = new QVBoxLayout(panel);
-    layout->setContentsMargins(5, 5, 5, 5);
-    layout->setSpacing(5);
+    layout->setContentsMargins(3, 3, 3, 3);
+    layout->setSpacing(3);
 
     QSplitter *projection_splitter = new QSplitter(Qt::Vertical, panel);
 
-    QGroupBox *top_group = new QGroupBox(QStringLiteral("Top view E/H"), panel);
-    QVBoxLayout *top_layout = new QVBoxLayout(top_group);
-    top_layout->setContentsMargins(5, 12, 5, 5);
-    top_layout->addWidget(top_projection_widget_);
+    // Проекции живут в таких же панелях с полосой заголовка, как виды CST.
+    CstPanel *top_group = new CstPanel(QStringLiteral("Top view (H-plane)"), panel);
+    top_group->setContent(top_projection_widget_);
 
-    QGroupBox *side_group = new QGroupBox(QStringLiteral("Side view E/H"), panel);
-    QVBoxLayout *side_layout = new QVBoxLayout(side_group);
-    side_layout->setContentsMargins(5, 12, 5, 5);
-    side_layout->addWidget(side_projection_widget_);
+    CstPanel *side_group = new CstPanel(QStringLiteral("Side view (E-plane)"), panel);
+    side_group->setContent(side_projection_widget_);
 
     projection_splitter->addWidget(top_group);
     projection_splitter->addWidget(side_group);
@@ -724,26 +876,34 @@ QWidget *MainWindow::createResultPanel()
 {
     QWidget *panel = new QWidget(this);
     QVBoxLayout *layout = new QVBoxLayout(panel);
-    layout->setContentsMargins(12, 8, 12, 12);
-    layout->setSpacing(6);
+    layout->setContentsMargins(3, 0, 3, 3);
+    layout->setSpacing(0);
 
-    status_label_ = new QLabel(QStringLiteral("Ожидание расчета..."), panel);
-    status_label_->setMinimumHeight(24);
-    calculation_time_label_ = new QLabel(panel);
-    calculation_time_label_->setStyleSheet(
-        QStringLiteral("color: #3d5968; font-weight: 600;"));
+    // Текстовый отчёт лежит в панели «Messages» — так CST показывает вывод
+    // решателя; ход расчёта ушёл в строку состояния внизу окна.
+    CstPanel *messages_panel = new CstPanel(QStringLiteral("Messages"), panel);
+    messages_panel->setContent(result_text_edit_);
+    layout->addWidget(messages_panel);
+    return panel;
+}
+
+// Строка состояния CST: слева сообщение решателя, справа — время и полоса
+// выполнения текущего расчёта.
+void MainWindow::createStatusBar()
+{
+    status_label_ = new QLabel(QStringLiteral("Ожидание расчета..."), this);
+    calculation_time_label_ = new QLabel(this);
     calculation_time_label_->setVisible(false);
-    calculation_progress_bar_ = new QProgressBar(panel);
+    calculation_progress_bar_ = new QProgressBar(this);
     calculation_progress_bar_->setRange(0, 100);
     calculation_progress_bar_->setTextVisible(false);
-    calculation_progress_bar_->setFixedHeight(8);
+    calculation_progress_bar_->setFixedSize(170, 10);
     calculation_progress_bar_->setVisible(false);
 
-    layout->addWidget(status_label_);
-    layout->addWidget(calculation_time_label_);
-    layout->addWidget(calculation_progress_bar_);
-    layout->addWidget(result_text_edit_);
-    return panel;
+    statusBar()->addWidget(status_label_, 1);
+    statusBar()->addPermanentWidget(calculation_time_label_);
+    statusBar()->addPermanentWidget(calculation_progress_bar_);
+    statusBar()->setSizeGripEnabled(true);
 }
 
 QDoubleSpinBox *MainWindow::createSpinBox(double minimum,
@@ -1673,6 +1833,53 @@ QString MainWindow::solverMethodName(int method) const
     return QString::fromUtf8(names[std::clamp(method, 0, 4)]);
 }
 
+QString MainWindow::linearSolverMethodName(int method) const
+{
+    static const char *const names[] = {
+        "Автоматически",
+        "Прямой (разложение)",
+        "Итерационный (GMRES)",
+    };
+    return QString::fromUtf8(names[std::clamp(method, 0, 2)]);
+}
+
+// Замеры сделаны штатным путём программы (без принудительного шага сетки) на
+// модели, с которой она запускается: волновод 22.86 x 10.16 x 50 мм со стенкой
+// 0.1 мм и пластиной 10 x 8 x 0.5 мм, TE10 на 10 ГГц, прямой решатель, сборка
+// Release, машина с 12 ядрами. Прежние числа в этой подсказке были получены при
+// шаге сетки 2.8 мм, которого программа никогда не задаёт, и занижали цену
+// вдвое-втрое. Показатель качества здесь — дефект унитарности |1 - |S11|^2 -
+// |S21|^2|: у конструкции без потерь он равен численной погрешности напрямую.
+QString MainWindow::accuracyLevelHint(int level) const
+{
+    static const char *const hints[] = {
+        "Порядок 1, одна ячейка на самую мелкую деталь.\n"
+        "Замер: 20 тыс. неизвестных, 0.5 ГБ, около 25 с. Дефект унитарности 4e-3.",
+        "Порядок 2 при вдвое более крупной сетке: та же цена, но баланс мощности\n"
+        "сходится в двести раз точнее.\n"
+        "Замер: 29 тыс. неизвестных, 1.5 ГБ, около 1.5 мин. Дефект унитарности 2e-5.",
+        "Порядок 2, две ячейки на деталь.\n"
+        "Замер: 63 тыс. неизвестных, 5.9 ГБ, около 7.5 мин. Дефект унитарности 2e-5.\n"
+        "Разница с обычным уровнем по |S11| — около 1 %: берите, когда нужна\n"
+        "уверенность в последнем проценте, и следите за свободной памятью.",
+    };
+    return QString::fromUtf8(hints[std::clamp(level, 0, 2)]);
+}
+
+QString MainWindow::linearSolverHint(int method) const
+{
+    static const char *const hints[] = {
+        "Прямой, пока разложение укладывается в память машины, иначе итерационный. "
+        "На всех трёх уровнях качества выбирается прямой.",
+        "Разложение матрицы: ответ получается всегда и с точностью до округления "
+        "(невязка порядка 1e-13), но память растёт быстрее размера задачи — "
+        "замеры 29 тыс. неизвестных / 1.5 ГБ, 63 тыс. / 5.9 ГБ, 110 тыс. / 11 ГБ.",
+        "GMRES: памяти нужно немного, но на измельчённой сетке он не сходится — "
+        "замер при контрасте ячеек 17:1 — 8000 итераций, невязка 1e-2, ответа нет.",
+    };
+    return QString::fromUtf8(hints[std::clamp(method, 0, 2)]);
+}
+
 void MainWindow::createRibbon()
 {
     ribbon_bar_ = new RibbonBar(this);
@@ -1686,42 +1893,27 @@ void MainWindow::createRibbon()
         return action;
     };
 
-    // ------------------------------------------------------------- File ----
-    RibbonTab *file_tab = ribbon_bar_->addRibbonTab(QStringLiteral("File"));
-    RibbonGroup *project_group = file_tab->addGroup(QStringLiteral("Проект"));
-
+    // Команды создаются одним списком: одна и та же кнопка попадает на
+    // несколько вкладок ленты, как «Start Simulation» в CST.
     QAction *open_action =
         make_action(QStringLiteral("Открыть"), QStringLiteral("Открыть модель волновода (.wgm)"));
     open_action->setShortcut(QKeySequence::Open);
     connect(open_action, &QAction::triggered, this, &MainWindow::openModelFile);
-    project_group->addLargeButton(open_action, RibbonIcon::Open);
 
     QAction *save_action =
         make_action(QStringLiteral("Сохранить"), QStringLiteral("Сохранить модель и расчёт"));
     save_action->setShortcut(QKeySequence::Save);
     connect(save_action, &QAction::triggered, this, [this]() { saveModelFile(); });
-    project_group->addLargeButton(save_action, RibbonIcon::Save);
 
     QAction *save_as_action = make_action(QStringLiteral("Сохранить\nкак"),
                                           QStringLiteral("Сохранить модель в другой файл"));
     save_as_action->setShortcut(QKeySequence::SaveAs);
     connect(save_as_action, &QAction::triggered, this, [this]() { saveModelFileAs(); });
-    project_group->addLargeButton(save_as_action, RibbonIcon::SaveAs);
 
-    RibbonGroup *exit_group = file_tab->addGroup(QStringLiteral("Выход"));
     QAction *quit_action =
         make_action(QStringLiteral("Закрыть"), QStringLiteral("Закрыть приложение"));
     quit_action->setShortcut(QKeySequence::Quit);
     connect(quit_action, &QAction::triggered, this, &QWidget::close);
-    exit_group->addLargeButton(quit_action, RibbonIcon::Quit);
-
-    // ------------------------------------------------------------- Home ----
-    RibbonTab *home_tab = ribbon_bar_->addRibbonTab(QStringLiteral("Home"));
-    RibbonGroup *home_file_group = home_tab->addGroup(QStringLiteral("Файл"));
-    home_file_group->addSmallButton(open_action, RibbonIcon::Open);
-    home_file_group->addSmallButton(save_action, RibbonIcon::Save);
-
-    RibbonGroup *home_simulation_group = home_tab->addGroup(QStringLiteral("Simulation"));
 
     start_simulation_action_ = make_action(
         QStringLiteral("Начать\nрасчёт"),
@@ -1729,15 +1921,20 @@ void MainWindow::createRibbon()
                        "изменения геометрии не пересчитываются."));
     start_simulation_action_->setShortcut(QKeySequence(Qt::Key_F5));
     connect(start_simulation_action_, &QAction::triggered, this, &MainWindow::runCalculation);
-    home_simulation_group->addLargeButton(start_simulation_action_, RibbonIcon::Start);
 
     QAction *setup_solver_action =
         make_action(QStringLiteral("Настройка\nрешателя"),
                     QStringLiteral("Выбрать метод расчёта и уровень качества сетки"));
     connect(setup_solver_action, &QAction::triggered, this, &MainWindow::showSolverSetupDialog);
-    home_simulation_group->addLargeButton(setup_solver_action, RibbonIcon::Setup);
 
-    RibbonGroup *home_edit_group = home_tab->addGroup(QStringLiteral("Правка"));
+    QAction *report_action = make_action(QStringLiteral("Итоги\nрасчёта"),
+                                         QStringLiteral("Перейти к текстовому отчёту внизу окна"));
+    connect(report_action, &QAction::triggered, this, [this]() {
+        if (result_text_edit_ != nullptr) {
+            result_text_edit_->setFocus();
+        }
+    });
+
     QAction *parameters_action =
         make_action(QStringLiteral("Параметры"),
                     QStringLiteral("Показать или скрыть список переменных модели"));
@@ -1748,37 +1945,46 @@ void MainWindow::createRibbon()
             parameter_dock_->setVisible(visible);
         }
     });
-    home_edit_group->addLargeButton(parameters_action, RibbonIcon::Parameters);
+
+    QAction *navigation_action =
+        make_action(QStringLiteral("Дерево\nобъектов"),
+                    QStringLiteral("Показать или скрыть панель Navigation Tree"));
+    navigation_action->setCheckable(true);
+    navigation_action->setChecked(true);
+    connect(navigation_action, &QAction::toggled, this, [this](bool visible) {
+        if (navigation_panel_ != nullptr) {
+            navigation_panel_->setVisible(visible);
+        }
+    });
+    if (navigation_panel_ != nullptr) {
+        // Крестик на заголовке панели снимает отметку с кнопки ленты, иначе
+        // повторное нажатие ничего бы не показало.
+        connect(navigation_panel_,
+                &CstPanel::closeRequested,
+                navigation_action,
+                [navigation_action]() { navigation_action->setChecked(false); });
+    }
 
     QAction *waveguide_action = make_action(QStringLiteral("Волновод"),
                                             QStringLiteral("Размеры и материал стенок волновода"));
     connect(waveguide_action, &QAction::triggered, this, &MainWindow::showWaveguideDialog);
-    home_edit_group->addSmallButton(waveguide_action, RibbonIcon::Waveguide);
 
     QAction *excitation_action =
         make_action(QStringLiteral("Возбуждение"), QStringLiteral("Частота и мода возбуждения"));
     connect(excitation_action, &QAction::triggered, this, &MainWindow::showExcitationDialog);
-    home_edit_group->addSmallButton(excitation_action, RibbonIcon::Excitation);
 
     QAction *slot_action =
         make_action(QStringLiteral("Щель"), QStringLiteral("Параметры щели в стенке волновода"));
     connect(slot_action, &QAction::triggered, this, &MainWindow::showSlotDialog);
-    home_edit_group->addSmallButton(slot_action, RibbonIcon::Slot);
-
-    // ---------------------------------------------------------- Modeling ---
-    RibbonTab *modeling_tab = ribbon_bar_->addRibbonTab(QStringLiteral("Modeling"));
-    RibbonGroup *shapes_group = modeling_tab->addGroup(QStringLiteral("Объекты"));
 
     QAction *add_plate_action =
         make_action(QStringLiteral("Пластина"), QStringLiteral("Добавить металлическую пластину"));
     connect(add_plate_action, &QAction::triggered, this, [this]() { showPlateDialog(-1); });
-    shapes_group->addLargeButton(add_plate_action, RibbonIcon::Plate);
 
     QAction *add_iris_action = make_action(
         QStringLiteral("Диафрагма"),
         QStringLiteral("Пластина во всё сечение волновода с прямоугольным окном внутри"));
     connect(add_iris_action, &QAction::triggered, this, [this]() { showPlateDialog(-1, true); });
-    shapes_group->addLargeButton(add_iris_action, RibbonIcon::Iris);
 
     QAction *add_round_iris_action = make_action(
         QStringLiteral("Круглая\nсо штырём"),
@@ -1786,16 +1992,13 @@ void MainWindow::createRibbon()
     connect(add_round_iris_action, &QAction::triggered, this, [this]() {
         showPlateDialog(-1, true, true);
     });
-    shapes_group->addLargeButton(add_round_iris_action, RibbonIcon::RoundIris);
 
-    RibbonGroup *profile_group = modeling_tab->addGroup(QStringLiteral("Профиль волновода"));
     QAction *symmetric_profile_action =
         make_action(QStringLiteral("Симметричное\nсужение"),
                     QStringLiteral("Волновод сужается с обеих боковых стенок на участке по длине"));
     connect(symmetric_profile_action, &QAction::triggered, this, [this]() {
         insertProfileTemplate(true);
     });
-    profile_group->addLargeButton(symmetric_profile_action, RibbonIcon::Profile);
 
     QAction *step_profile_action =
         make_action(QStringLiteral("Уступ\nна стенке"),
@@ -1803,17 +2006,95 @@ void MainWindow::createRibbon()
     connect(step_profile_action, &QAction::triggered, this, [this]() {
         insertProfileTemplate(false);
     });
-    profile_group->addLargeButton(step_profile_action, RibbonIcon::Profile);
+
+    QAction *fields_action =
+        make_action(QStringLiteral("Отображение\nполей"),
+                    QStringLiteral("Панель управления отображением полей слева"));
+    connect(fields_action, &QAction::triggered, this, [this]() {
+        if (field_mode_combo_box_ != nullptr) {
+            field_mode_combo_box_->setFocus();
+        }
+    });
+
+    QAction *reset_view_action = make_action(QStringLiteral("Сбросить\nвид"),
+                                             QStringLiteral("Вернуть камеру в исходное положение"));
+    connect(reset_view_action, &QAction::triggered, open_gl_widget_, &WaveguideOpenGLWidget::resetView);
+
+    // Стрелка под кнопкой запуска, как у split-кнопок CST: то же меню, что и
+    // «Настройка решателя», плюс переход к отчёту.
+    const auto make_start_menu = [=]() {
+        QMenu *menu = new QMenu(this);
+        menu->addAction(setup_solver_action);
+        menu->addAction(report_action);
+        return menu;
+    };
+
+    // ------------------------------------------------------------- File ----
+    RibbonTab *file_tab = ribbon_bar_->addRibbonTab(QStringLiteral("File"));
+    RibbonGroup *project_group = file_tab->addGroup(QStringLiteral("Проект"));
+    project_group->addLargeButton(open_action, RibbonIcon::Open);
+    project_group->addLargeButton(save_action, RibbonIcon::Save);
+    project_group->addLargeButton(save_as_action, RibbonIcon::SaveAs);
+
+    RibbonGroup *exit_group = file_tab->addGroup(QStringLiteral("Выход"));
+    exit_group->addLargeButton(quit_action, RibbonIcon::Quit);
+
+    // ------------------------------------------------------------- Home ----
+    RibbonTab *home_tab = ribbon_bar_->addRibbonTab(QStringLiteral("Home"));
+    RibbonGroup *home_file_group = home_tab->addGroup(QStringLiteral("Файл"));
+    home_file_group->addSmallButton(open_action, RibbonIcon::Open);
+    home_file_group->addSmallButton(save_action, RibbonIcon::Save);
+    home_file_group->addSmallButton(save_as_action, RibbonIcon::SaveAs);
+
+    RibbonGroup *home_simulation_group = home_tab->addGroup(QStringLiteral("Simulation"));
+    home_simulation_group->addLargeButton(start_simulation_action_,
+                                          RibbonIcon::Start,
+                                          make_start_menu());
+    home_simulation_group->addLargeButton(setup_solver_action, RibbonIcon::Setup);
+
+    RibbonGroup *home_shapes_group = home_tab->addGroup(QStringLiteral("Объекты"));
+    home_shapes_group->addIconButton(add_plate_action, RibbonIcon::Plate);
+    home_shapes_group->addIconButton(add_iris_action, RibbonIcon::Iris);
+    home_shapes_group->addIconButton(add_round_iris_action, RibbonIcon::RoundIris);
+    home_shapes_group->addIconButton(slot_action, RibbonIcon::Slot);
+
+    RibbonGroup *home_edit_group = home_tab->addGroup(QStringLiteral("Правка"));
+    home_edit_group->addLargeButton(parameters_action, RibbonIcon::Parameters);
+    home_edit_group->addSmallButton(waveguide_action, RibbonIcon::Waveguide);
+    home_edit_group->addSmallButton(excitation_action, RibbonIcon::Excitation);
+    home_edit_group->addSmallButton(slot_action, RibbonIcon::Slot);
+
+    // ---------------------------------------------------------- Modeling ---
+    RibbonTab *modeling_tab = ribbon_bar_->addRibbonTab(QStringLiteral("Modeling"));
+    // Плотная сетка пиктограмм — группа «Shapes» вкладки Modeling в CST.
+    RibbonGroup *shapes_group = modeling_tab->addGroup(QStringLiteral("Объекты"));
+    shapes_group->addIconButton(add_plate_action, RibbonIcon::Plate);
+    shapes_group->addIconButton(add_iris_action, RibbonIcon::Iris);
+    shapes_group->addIconButton(add_round_iris_action, RibbonIcon::RoundIris);
+    shapes_group->addIconButton(slot_action, RibbonIcon::Slot);
+    shapes_group->addIconButton(waveguide_action, RibbonIcon::Waveguide);
+    shapes_group->addIconButton(excitation_action, RibbonIcon::Excitation);
+
+    RibbonGroup *profile_group = modeling_tab->addGroup(QStringLiteral("Профиль волновода"));
+    profile_group->addLargeButton(symmetric_profile_action, RibbonIcon::Profile);
+    profile_group->addLargeButton(step_profile_action, RibbonIcon::ProfileStep);
 
     RibbonGroup *modeling_edit_group = modeling_tab->addGroup(QStringLiteral("Правка"));
     modeling_edit_group->addSmallButton(waveguide_action, RibbonIcon::Waveguide);
     modeling_edit_group->addSmallButton(slot_action, RibbonIcon::Slot);
     modeling_edit_group->addSmallButton(excitation_action, RibbonIcon::Excitation);
 
+    RibbonGroup *modeling_view_group = modeling_tab->addGroup(QStringLiteral("Вид"));
+    modeling_view_group->addSmallButton(reset_view_action, RibbonIcon::ResetView);
+    modeling_view_group->addSmallButton(navigation_action, RibbonIcon::Tree);
+    modeling_view_group->addSmallButton(parameters_action, RibbonIcon::Parameters);
+
     // -------------------------------------------------------- Simulation ---
     RibbonTab *simulation_tab = ribbon_bar_->addRibbonTab(QStringLiteral("Simulation"));
     RibbonGroup *solver_group = simulation_tab->addGroup(QStringLiteral("Решатель"));
-    solver_group->addLargeButton(start_simulation_action_, RibbonIcon::Start);
+    solver_group->addLargeButton(start_simulation_action_,
+                                 RibbonIcon::Start,
+                                 make_start_menu());
     solver_group->addLargeButton(setup_solver_action, RibbonIcon::Setup);
 
     RibbonGroup *settings_group = simulation_tab->addGroup(QStringLiteral("Настройки расчёта"));
@@ -1841,16 +2122,40 @@ void MainWindow::createRibbon()
     accuracy_combo_box_->addItem(QStringLiteral("Высокое (мелкая сетка)"));
     accuracy_combo_box_->setCurrentIndex(std::clamp(parameters_.accuracy_level, 0, 2));
     accuracy_combo_box_->setToolTip(
-        QStringLiteral("Влияет только на расчёт с пластинами, диафрагмой или щелью (FEM).\n"
-                       "Более высокое качество убирает «мозаику» поля ценой времени расчёта."));
+        QStringLiteral("Влияет только на расчёт с пластинами, диафрагмой или щелью (FEM).\n%1")
+            .arg(accuracyLevelHint(parameters_.accuracy_level)));
     connect(accuracy_combo_box_,
             qOverload<int>(&QComboBox::currentIndexChanged),
             this,
             [this](int index) {
                 parameters_.accuracy_level = index;
+                accuracy_combo_box_->setToolTip(
+                    QStringLiteral("Влияет только на расчёт с пластинами, диафрагмой или "
+                                   "щелью (FEM).\n%1")
+                        .arg(accuracyLevelHint(index)));
                 markModelChanged();
             });
     settings_group->addLabeledWidget(QStringLiteral("Качество"), accuracy_combo_box_);
+
+    linear_solver_combo_box_ = new QComboBox();
+    for (int method = 0; method <= 2; ++method) {
+        linear_solver_combo_box_->addItem(linearSolverMethodName(method));
+    }
+    linear_solver_combo_box_->setCurrentIndex(
+        std::clamp(parameters_.linear_solver_method, 0, 2));
+    linear_solver_combo_box_->setToolTip(
+        QStringLiteral("Чем решается система FEM.\n%1")
+            .arg(linearSolverHint(parameters_.linear_solver_method)));
+    connect(linear_solver_combo_box_,
+            qOverload<int>(&QComboBox::currentIndexChanged),
+            this,
+            [this](int index) {
+                parameters_.linear_solver_method = index;
+                linear_solver_combo_box_->setToolTip(
+                    QStringLiteral("Чем решается система FEM.\n%1").arg(linearSolverHint(index)));
+                markModelChanged();
+            });
+    settings_group->addLabeledWidget(QStringLiteral("Решатель"), linear_solver_combo_box_);
 
     RibbonGroup *simulation_edit_group = simulation_tab->addGroup(QStringLiteral("Возбуждение"));
     simulation_edit_group->addLargeButton(excitation_action, RibbonIcon::Excitation);
@@ -1858,38 +2163,23 @@ void MainWindow::createRibbon()
     // --------------------------------------------------- Post-Processing ---
     RibbonTab *post_tab = ribbon_bar_->addRibbonTab(QStringLiteral("Post-Processing"));
     RibbonGroup *field_group = post_tab->addGroup(QStringLiteral("Поля"));
-    QAction *fields_action =
-        make_action(QStringLiteral("Отображение\nполей"),
-                    QStringLiteral("Панель управления отображением полей слева"));
-    connect(fields_action, &QAction::triggered, this, [this]() {
-        if (field_mode_combo_box_ != nullptr) {
-            field_mode_combo_box_->setFocus();
-        }
-    });
     field_group->addLargeButton(fields_action, RibbonIcon::Fields);
 
     RibbonGroup *report_group = post_tab->addGroup(QStringLiteral("Отчёт"));
-    QAction *report_action = make_action(QStringLiteral("Итоги\nрасчёта"),
-                                         QStringLiteral("Перейти к текстовому отчёту внизу окна"));
-    connect(report_action, &QAction::triggered, this, [this]() {
-        if (result_text_edit_ != nullptr) {
-            result_text_edit_->setFocus();
-        }
-    });
     report_group->addLargeButton(report_action, RibbonIcon::Report);
 
     // ------------------------------------------------------------- View ----
     RibbonTab *view_tab = ribbon_bar_->addRibbonTab(QStringLiteral("View"));
     RibbonGroup *view_group = view_tab->addGroup(QStringLiteral("Вид"));
-    QAction *reset_view_action =
-        make_action(QStringLiteral("Сбросить\nвид"), QStringLiteral("Вернуть камеру в исходное положение"));
-    connect(reset_view_action, &QAction::triggered, open_gl_widget_, &WaveguideOpenGLWidget::resetView);
     view_group->addLargeButton(reset_view_action, RibbonIcon::ResetView);
+    view_group->addLargeButton(fields_action, RibbonIcon::Fields);
 
     RibbonGroup *panels_group = view_tab->addGroup(QStringLiteral("Панели"));
+    panels_group->addSmallButton(navigation_action, RibbonIcon::Tree);
     panels_group->addSmallButton(parameters_action, RibbonIcon::Parameters);
 
     ribbon_bar_->setCurrentTabIndex(1);
+    ribbon_bar_->setDocumentName(documentName());
 }
 
 void MainWindow::createParameterDock()
@@ -1953,7 +2243,8 @@ void MainWindow::showSolverSetupDialog()
     method_layout->addRow(method_hint);
     layout->addWidget(method_group);
 
-    QGroupBox *quality_group = new QGroupBox(QStringLiteral("Качество сетки (FEM)"), &dialog);
+    QGroupBox *quality_group =
+        new QGroupBox(QStringLiteral("Сетка и линейный решатель (FEM)"), &dialog);
     QFormLayout *quality_layout = new QFormLayout(quality_group);
     QComboBox *quality_combo_box = new QComboBox(quality_group);
     quality_combo_box->addItem(QStringLiteral("Быстро (грубая сетка)"));
@@ -1962,14 +2253,10 @@ void MainWindow::showSolverSetupDialog()
     quality_combo_box->setCurrentIndex(std::clamp(parameters_.accuracy_level, 0, 2));
     QLabel *quality_hint = new QLabel(quality_group);
     quality_hint->setWordWrap(true);
+    quality_hint->setMinimumWidth(380);
     quality_hint->setStyleSheet(QStringLiteral("color: #4a5a66;"));
-    const auto update_quality_hint = [quality_hint](int level) {
-        static const char *const hints[] = {
-            "Замер: ~13 с (7 тыс. неизвестных). Поле заметно «мозаичное».",
-            "Замер: ~1 мин (17 тыс.). Базовое качество.",
-            "Замер: ~5 мин (40 тыс.). Мозаика слабее; S-параметры заметно точнее.",
-        };
-        quality_hint->setText(QString::fromUtf8(hints[std::clamp(level, 0, 2)]));
+    const auto update_quality_hint = [this, quality_hint](int level) {
+        quality_hint->setText(accuracyLevelHint(level));
     };
     update_quality_hint(quality_combo_box->currentIndex());
     connect(quality_combo_box,
@@ -1978,6 +2265,26 @@ void MainWindow::showSolverSetupDialog()
             update_quality_hint);
     quality_layout->addRow(QStringLiteral("Качество"), quality_combo_box);
     quality_layout->addRow(quality_hint);
+
+    QComboBox *linear_solver_combo_box = new QComboBox(quality_group);
+    for (int method = 0; method <= 2; ++method) {
+        linear_solver_combo_box->addItem(linearSolverMethodName(method));
+    }
+    linear_solver_combo_box->setCurrentIndex(std::clamp(parameters_.linear_solver_method, 0, 2));
+    QLabel *linear_solver_hint = new QLabel(quality_group);
+    linear_solver_hint->setWordWrap(true);
+    linear_solver_hint->setMinimumWidth(380);
+    linear_solver_hint->setStyleSheet(QStringLiteral("color: #4a5a66;"));
+    const auto update_linear_solver_hint = [this, linear_solver_hint](int method) {
+        linear_solver_hint->setText(linearSolverHint(method));
+    };
+    update_linear_solver_hint(linear_solver_combo_box->currentIndex());
+    connect(linear_solver_combo_box,
+            qOverload<int>(&QComboBox::currentIndexChanged),
+            &dialog,
+            update_linear_solver_hint);
+    quality_layout->addRow(QStringLiteral("Линейный решатель"), linear_solver_combo_box);
+    quality_layout->addRow(linear_solver_hint);
     layout->addWidget(quality_group);
 
     QDialogButtonBox *buttons =
@@ -1992,12 +2299,15 @@ void MainWindow::showSolverSetupDialog()
 
     const int method = method_combo_box->currentIndex();
     const int quality = quality_combo_box->currentIndex();
-    if (method == parameters_.solver_method && quality == parameters_.accuracy_level) {
+    const int linear_solver = linear_solver_combo_box->currentIndex();
+    if (method == parameters_.solver_method && quality == parameters_.accuracy_level &&
+        linear_solver == parameters_.linear_solver_method) {
         return;
     }
 
     parameters_.solver_method = method;
     parameters_.accuracy_level = quality;
+    parameters_.linear_solver_method = linear_solver;
     if (solver_method_combo_box_ != nullptr) {
         const QSignalBlocker blocker(solver_method_combo_box_);
         solver_method_combo_box_->setCurrentIndex(method);
@@ -2005,6 +2315,15 @@ void MainWindow::showSolverSetupDialog()
     if (accuracy_combo_box_ != nullptr) {
         const QSignalBlocker blocker(accuracy_combo_box_);
         accuracy_combo_box_->setCurrentIndex(quality);
+        accuracy_combo_box_->setToolTip(
+            QStringLiteral("Влияет только на расчёт с пластинами, диафрагмой или щелью (FEM).\n%1")
+                .arg(accuracyLevelHint(quality)));
+    }
+    if (linear_solver_combo_box_ != nullptr) {
+        const QSignalBlocker blocker(linear_solver_combo_box_);
+        linear_solver_combo_box_->setCurrentIndex(linear_solver);
+        linear_solver_combo_box_->setToolTip(
+            QStringLiteral("Чем решается система FEM.\n%1").arg(linearSolverHint(linear_solver)));
     }
     markModelChanged();
 }
@@ -2025,15 +2344,25 @@ void MainWindow::updateSimulationActionState()
     }
 }
 
+// Имя на документной вкладке под лентой: в CST там стоит имя проекта без
+// расширения.
+QString MainWindow::documentName() const
+{
+    return current_model_path_.isEmpty()
+               ? QStringLiteral("krutiev_proj")
+               : QFileInfo(current_model_path_).completeBaseName();
+}
+
 void MainWindow::updateWindowTitle()
 {
     const QString base = QStringLiteral("Waveguide CST-like OpenGL");
-    if (current_model_path_.isEmpty()) {
-        setWindowTitle(base);
-        return;
+    setWindowTitle(current_model_path_.isEmpty()
+                       ? base
+                       : QStringLiteral("%1 — %2")
+                             .arg(QFileInfo(current_model_path_).fileName(), base));
+    if (ribbon_bar_ != nullptr) {
+        ribbon_bar_->setDocumentName(documentName());
     }
-    setWindowTitle(QStringLiteral("%1 — %2")
-                       .arg(QFileInfo(current_model_path_).fileName(), base));
 }
 
 void MainWindow::applyLoadedParameters(const WaveguideParameters &parameters)
@@ -2047,11 +2376,22 @@ void MainWindow::applyLoadedParameters(const WaveguideParameters &parameters)
     }
     if (accuracy_combo_box_ != nullptr) {
         const QSignalBlocker blocker(accuracy_combo_box_);
-        accuracy_combo_box_->setCurrentIndex(std::clamp(parameters_.accuracy_level, 0, 2));
+        const int level = std::clamp(parameters_.accuracy_level, 0, 2);
+        accuracy_combo_box_->setCurrentIndex(level);
+        accuracy_combo_box_->setToolTip(
+            QStringLiteral("Влияет только на расчёт с пластинами, диафрагмой или щелью (FEM).\n%1")
+                .arg(accuracyLevelHint(level)));
     }
     if (solver_method_combo_box_ != nullptr) {
         const QSignalBlocker blocker(solver_method_combo_box_);
         solver_method_combo_box_->setCurrentIndex(std::clamp(parameters_.solver_method, 0, 4));
+    }
+    if (linear_solver_combo_box_ != nullptr) {
+        const QSignalBlocker blocker(linear_solver_combo_box_);
+        const int linear_solver = std::clamp(parameters_.linear_solver_method, 0, 2);
+        linear_solver_combo_box_->setCurrentIndex(linear_solver);
+        linear_solver_combo_box_->setToolTip(
+            QStringLiteral("Чем решается система FEM.\n%1").arg(linearSolverHint(linear_solver)));
     }
     if (parameter_list_widget_ != nullptr) {
         parameter_list_widget_->reload();
@@ -2170,7 +2510,66 @@ bool MainWindow::saveModelFileAs()
 QString MainWindow::buildResultText(const WaveguideCalculationResult &result) const
 {
     if (!result.valid) {
-        return QStringLiteral("Расчет не выполнен:\n%1").arg(result.error_message);
+        QString text = QStringLiteral("Расчет не выполнен:\n%1\n").arg(result.error_message);
+        // Условия прогона: без них по одному сообщению об ошибке нельзя понять,
+        // на какой геометрии и сетке решатель не сошёлся.
+        text += QStringLiteral("\nУсловия расчёта\n");
+        if (!result.solver_backend.isEmpty()) {
+            text += QStringLiteral("  Решатель: %1\n").arg(result.solver_backend);
+        }
+        static const char *const accuracy_names[] = {
+            "быстро (грубая сетка)", "обычное", "высокое (мелкая сетка)"};
+        text += QStringLiteral("  Качество: %1\n")
+                    .arg(QString::fromUtf8(
+                        accuracy_names[std::clamp(result.parameters.accuracy_level, 0, 2)]));
+        text += QStringLiteral("  Частота: %1 ГГц\n")
+                    .arg(number(result.parameters.frequency_ghz, 4));
+        text += QStringLiteral("  Волновод: %1 x %2 x %3 мм, стенка %4 мм\n")
+                    .arg(number(result.parameters.width_mm))
+                    .arg(number(result.parameters.depth_mm))
+                    .arg(number(result.parameters.length_mm))
+                    .arg(number(result.parameters.wall_thickness_mm));
+        if (result.mesh_tetrahedron_count > 0) {
+            text += QStringLiteral("  Сетка: %1 тетраэдров, %2 неизвестных\n")
+                        .arg(result.mesh_tetrahedron_count)
+                        .arg(result.fem_unknown_count);
+        }
+        if (result.linear_iterations > 0) {
+            text += QStringLiteral("  Решатель СЛАУ: %1 итераций, невязка %2\n")
+                        .arg(result.linear_iterations)
+                        .arg(number(result.linear_relative_residual, 6));
+        }
+        for (const PecPlateParameters &plate : result.parameters.pec_plates) {
+            if (!plate.enabled) {
+                continue;
+            }
+            text += QStringLiteral("  %1: [%2..%3] x [%4..%5] x [%6..%7] мм")
+                        .arg(plate.name)
+                        .arg(number(plate.x_min_mm)).arg(number(plate.x_max_mm))
+                        .arg(number(plate.y_min_mm)).arg(number(plate.y_max_mm))
+                        .arg(number(plate.z_min_mm)).arg(number(plate.z_max_mm));
+            if (plate.aperture_enabled) {
+                text += plate.aperture_shape == 1
+                            ? QStringLiteral(", круглое окно r=%1 мм")
+                                  .arg(number(plate.aperture_radius_mm))
+                            : QStringLiteral(", окно %1 x %2 мм")
+                                  .arg(number(plate.aperture_width_mm))
+                                  .arg(number(plate.aperture_height_mm));
+            }
+            if (plate.post_enabled) {
+                text += QStringLiteral(", язычок %1 x %2 мм")
+                            .arg(number(plate.post_width_mm))
+                            .arg(number(plate.post_height_mm));
+            }
+            text += QLatin1Char('\n');
+        }
+        text += QStringLiteral(
+            "\nЕсли решатель не сошёлся: выберите качество «Быстро» — сошедшийся\n"
+            "результат на грубой сетке достовернее несошедшегося на мелкой.\n");
+        for (const QString &warning : result.solver_warnings) {
+            text += QStringLiteral("  Предупреждение: %1\n").arg(warning);
+        }
+        return text;
     }
 
     QString text;
@@ -2302,9 +2701,23 @@ QString MainWindow::formatModeTable(const WaveguideCalculationResult &result) co
 
 void MainWindow::setStatus(const QString &message, bool error)
 {
+    // Сообщение уходит в строку состояния окна: на светлом фоне CST ошибка
+    // выделяется красным, обычный ход расчёта — обычным текстом.
     status_label_->setText(message);
-    status_label_->setStyleSheet(error
-                                     ? QStringLiteral("color: #ff7b72; font-weight: 600;")
-                                     : QStringLiteral("color: #8fd694; font-weight: 600;"));
+    status_label_->setStyleSheet(error ? QStringLiteral("color: #b02020; font-weight: 600;")
+                                       : QStringLiteral("color: #1f1f1f;"));
+}
+
+// Показывает ветку дерева, если фильтру отвечает она сама или её потомок.
+void MainWindow::filterObjectTree(const QString &text)
+{
+    if (object_tree_widget_ == nullptr) {
+        return;
+    }
+
+    const QString needle = text.trimmed();
+    for (int index = 0; index < object_tree_widget_->topLevelItemCount(); ++index) {
+        applyTreeFilter(object_tree_widget_->topLevelItem(index), needle);
+    }
 }
 

@@ -59,9 +59,33 @@ struct SolverDiagnostics
     double input_power_w = 0.0;
     double output_power_w = 0.0;
     double power_balance_relative_error = 0.0;
+    // |1 - |S11|^2 - |S21|^2|. A separate quantity from the power balance above:
+    // the balance only says that the reported powers add up, while this says the
+    // scattering matrix itself is not unitary. With lossy filling or an
+    // absorbing PML the number is mostly physical absorption and says nothing
+    // about accuracy at all.
+    // On a lossless, non-radiating model it is an error measure only while the
+    // discretisation error dominates it, and that stops being true sooner than
+    // it looks. Measured on the empty 22.86 x 10.16 x 40 mm guide at 10 GHz with
+    // the direct solver, so the linear system is solved to 1e-13 and nothing
+    // else is in the way, over h = 5.0 / 4.0 / 3.2 / 2.6 mm:
+    //   first-order elements  2.9e-02 / 2.2e-02 / 1.1e-02 / 1.3e-02
+    //   second-order elements 1.2e-04 / 6.2e-05 / 1.6e-07 / 6.8e-05
+    // With second-order elements it no longer falls with the mesh and its sign
+    // is random (at h = 2.6 mm it came out as |S21| = 1.0000338 > 1), while the
+    // S21 phase error over the same four meshes still improves ten-fold, from
+    // 0.070 to 0.007 degrees. Below about 1e-4 the number is port projection
+    // noise, not an error estimate, and a smaller value is not a better answer.
+    double unitarity_defect = 0.0;
     int mesh_tetrahedron_count = 0;
     int fem_unknown_count = 0;
     int linear_iterations = 0;
+    // True relative residual ||A x - b|| / ||b|| of the assembled system,
+    // recomputed from the operator after the solve and never taken from what a
+    // solver reports. It is NOT the quantity the iterative solver stops on:
+    // GMRES is driven by the preconditioned residual, which is what
+    // FemSolverSettings::relative_tolerance sets and what the progress messages
+    // call "preconditioned relative residual".
     double linear_relative_residual = 0.0;
     double estimated_pml_reflection = 0.0;
     double maximum_pec_tangential_electric_v_per_m = 0.0;

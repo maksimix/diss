@@ -117,6 +117,7 @@ QJsonObject parametersToJson(const WaveguideParameters &parameters)
     root[QStringLiteral("plates")] = plates;
     root[QStringLiteral("accuracy_level")] = parameters.accuracy_level;
     root[QStringLiteral("solver_method")] = parameters.solver_method;
+    root[QStringLiteral("linear_solver_method")] = parameters.linear_solver_method;
     return root;
 }
 
@@ -160,6 +161,10 @@ WaveguideParameters parametersFromJson(const QJsonObject &root)
         root.value(QStringLiteral("accuracy_level")).toInt(parameters.accuracy_level);
     parameters.solver_method =
         root.value(QStringLiteral("solver_method")).toInt(parameters.solver_method);
+    // Files written before the linear solver became a model setting have no such
+    // key; toInt() then keeps the default (automatic) instead of zeroing it.
+    parameters.linear_solver_method =
+        root.value(QStringLiteral("linear_solver_method")).toInt(parameters.linear_solver_method);
 
     parameters.pec_plates.clear();
     const QJsonArray plates = root.value(QStringLiteral("plates")).toArray();

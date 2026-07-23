@@ -216,32 +216,89 @@ QString validateParameters(const WaveguideParameters &parameters)
     return {};
 }
 
-// Accuracy levels trade wall-clock time for discretisation error. The values
-// are the ones measured to actually converge with the current serial
-// GMRES/Gauss-Seidel solver on a plate scenario; finer settings than these
-// stall around 1e-4 and are reported as approximate.
+// Accuracy levels are measured points, not guesses. Reference model: guide
+// 22.66 x 9.96 x 50 mm, full-section plate 0.5 mm thick with a round window
+// r = 4.6 mm and a 0.49 x 4.98 mm stub, TE10 at 10 GHz, direct solver, Release.
+//
+// Two things decide the answer here, and the global element size is neither of
+// them: the element order and the local refinement (elements_across_smallest
+// _feature together with minimum_size_ratio). With the refinement switched off
+// the |S11| of that model swings between 0.0481 and 0.7492 over global steps of
+// 2.800 / 2.801 / 2.806 / 2.828 mm - a half-spread of 81.6 % of the mean - so no
+// level is allowed to switch it off, not even the fastest one. refinement_factor
+// therefore stays at 1 everywhere; moving it only shifts the global size that
+// the refinement then overrides near the details.
+//
+// Half-spread of |S11| over those same four global steps, unknown count, peak
+// process memory and wall time per run:
+//   fast    order 1, feature 1, ratio 8:  0.231 %,  17530,  0.6 GB,   12 s
+//   normal  order 2, feature 1, ratio 4:  0.100 %,  57049,  3.6 GB,  211 s
+//   high    order 2, feature 2, ratio 8:  0.039 %, 133542, 18.9 GB, 1602 s
+// Read those three lines as a comparison between levels only. They were taken
+// with the global element size pinned at 2.8 mm to isolate the mesh-drift
+// sensitivity, and the product never pins it: maximum_element_size_m stays 0, so
+// the automatic rule applies. Costs measured through the real path, on the model
+// the program starts with plus its default plate, are:
+//   fast    20366 unknowns, 0.51 GB,  24 s, unitarity defect 4.0e-3
+//   normal  28692 unknowns, 1.46 GB,  82 s, unitarity defect 1.7e-5
+//   high    62962 unknowns, 5.90 GB, 447 s, unitarity defect 2.3e-5
+// The two-hundredfold drop in the unitarity defect between fast and normal is
+// the second-order elements: at a proportionally coarser mesh they cost about
+// the same and conserve power far better.
+// The fast level keeps ratio 8 rather than the 4 of the normal one because at
+// ratio 4 the 0.7 mm floor swallows the 0.49 mm stub: same order, same feature
+// count, but the half-spread degrades from 0.231 % to 0.623 % for 11343
+// unknowns, so the cheaper mesh is not the more reproducible one.
+// Accuracy against the mode-matching answer for the same model with a
+// rectangular window (exact 0.7685722) improves in the same order: |S11| tends
+// to about 0.87 as the refinement grows, and order 2 at feature 1 (0.8681) is
+// already closer to that limit than order 1 at feature 3 (0.8572) while costing
+// less in every column - which is why "normal" runs second-order elements.
 void applyAccuracyLevel(em::FemSolverSettings &fem, int level)
 {
+    fem.mesh.refinement_factor = 1.0;
     switch (std::clamp(level, 0, 2)) {
     case 0:   // быстро
-        fem.mesh.refinement_factor = 1.4;
         fem.mesh.element_order = 1;
+        fem.mesh.elements_across_smallest_feature = 1.0;
+        fem.mesh.minimum_size_ratio = 8.0;
         fem.maximum_iterations = 1200;
         break;
     case 2:   // высокое
-        fem.mesh.refinement_factor = 0.7;
-        fem.mesh.element_order = 1;
+        fem.mesh.element_order = 2;
+        fem.mesh.elements_across_smallest_feature = 2.0;
+        fem.mesh.minimum_size_ratio = 8.0;
         fem.maximum_iterations = 3000;
         break;
-        // A fourth, finer level was tried and withdrawn: at refinement 0.5 the
-        // GMRES/Gauss-Seidel solver stalls around 1e-1, far from usable, and
-        // second-order elements did not finish a single run in 20 minutes.
-        // Both need an AMS preconditioner (parallel MFEM + hypre) to be viable.
+        // A finer level was measured and withdrawn: order 1 with feature 3 and
+        // ratio 20 costs 95941 unknowns and 277 s yet lands at |S11| = 0.8572,
+        // further from the limit than "normal" at 0.8681 for 57049 unknowns.
+        // Above that the iterative solver has no chance either - a 17:1 cell
+        // contrast leaves GMRES at a 1e-2 residual after 8000 iterations.
     default:  // обычное
-        fem.mesh.refinement_factor = 1.0;
-        fem.mesh.element_order = 1;
+        fem.mesh.element_order = 2;
+        fem.mesh.elements_across_smallest_feature = 1.0;
+        fem.mesh.minimum_size_ratio = 4.0;
         fem.maximum_iterations = 1200;
         break;
+    }
+    // The memory budget of the direct solver is deliberately left alone: it
+    // defaults to what the machine actually has free, and raising it from here
+    // would only trade a fallback to GMRES for swapping. Every number above was
+    // measured with the factorisation, so on a machine too small for the level
+    // the automatic choice moves to GMRES and the answer degrades - the linear
+    // solver box next to the quality box is there to force the factorisation.
+}
+
+em::LinearSolverMethod toEmLinearSolverMethod(int method)
+{
+    switch (method) {
+    case 1:
+        return em::LinearSolverMethod::Direct;
+    case 2:
+        return em::LinearSolverMethod::Iterative;
+    default:
+        return em::LinearSolverMethod::Automatic;
     }
 }
 
@@ -285,6 +342,10 @@ em::SimulationRequest buildRequest(const WaveguideParameters &parameters,
     request.settings.fem.maximum_iterations = 1200;
     applyAccuracyLevel(request.settings.fem, parameters.accuracy_level);
     request.settings.solver_method = toEmSolverMethod(parameters.solver_method);
+    // After the accuracy level, so that an explicit choice overrides the budget
+    // the level asked for.
+    request.settings.fem.linear_solver_method =
+        toEmLinearSolverMethod(parameters.linear_solver_method);
 
     if (parameters.slot_enabled) {
         em::SlotGeometry slot;
@@ -414,11 +475,28 @@ WaveguideCalculationResult WaveguideCalculator::calculate(
     }
     if (!field_solution->success) {
         result.error_message = QString::fromStdString(field_solution->error_message);
+        // Диагностику переносим и при неудаче: без неё по сообщению об ошибке
+        // невозможно понять, на какой сетке и с каким качеством шёл расчёт.
+        result.solver_backend = QString::fromStdString(field_solution->diagnostics.backend_name);
+        result.mesh_tetrahedron_count = field_solution->diagnostics.mesh_tetrahedron_count;
+        result.fem_unknown_count = field_solution->diagnostics.fem_unknown_count;
+        result.linear_iterations = field_solution->diagnostics.linear_iterations;
+        result.linear_relative_residual = field_solution->diagnostics.linear_relative_residual;
+        for (const std::string &warning : field_solution->diagnostics.warnings) {
+            result.solver_warnings.push_back(QString::fromStdString(warning));
+        }
         return result;
     }
 
     result.valid = true;
     result.solver_backend = QString::fromStdString(field_solution->diagnostics.backend_name);
+    // Те же четыре величины, что и в ветке неудачи выше. Без них успешный расчёт
+    // не сообщал ни размера сетки, ни числа неизвестных, ни достигнутой невязки —
+    // то есть именно того, по чему судят о доверии к полученным S-параметрам.
+    result.mesh_tetrahedron_count = field_solution->diagnostics.mesh_tetrahedron_count;
+    result.fem_unknown_count = field_solution->diagnostics.fem_unknown_count;
+    result.linear_iterations = field_solution->diagnostics.linear_iterations;
+    result.linear_relative_residual = field_solution->diagnostics.linear_relative_residual;
     result.incident_power_w = field_solution->diagnostics.incident_power_w;
     result.reflected_power_w = field_solution->diagnostics.reflected_power_w;
     result.transmitted_power_w = field_solution->diagnostics.transmitted_power_w;

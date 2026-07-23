@@ -59,6 +59,7 @@
   </ImportGroup>
   <PropertyGroup Label="UserMacros">
     <MfemRoot Condition="'$(MfemRoot)'=='' and Exists('C:\mfem-build\Release\mfem.lib')">C:\mfem-build</MfemRoot>
+    <EigenRoot Condition="'$(EigenRoot)'=='' and Exists('C:\eigen\Eigen\Dense')">C:\eigen</EigenRoot>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Debug|x64'">
   </PropertyGroup>
@@ -76,6 +77,8 @@
       <AdditionalIncludeDirectories>$(ProjectDir);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <AdditionalIncludeDirectories Condition="'$(MfemRoot)'!=''">$(MfemRoot);$(ProjectDir);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <PreprocessorDefinitions Condition="'$(MfemRoot)'!=''">KRUTIEV_WITH_MFEM=1;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories Condition="'$(EigenRoot)'!=''">$(EigenRoot);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions Condition="'$(EigenRoot)'!=''">KRUTIEV_WITH_EIGEN=1;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -97,6 +100,8 @@
       <AdditionalIncludeDirectories>$(ProjectDir);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <AdditionalIncludeDirectories Condition="'$(MfemRoot)'!=''">$(MfemRoot);$(ProjectDir);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <PreprocessorDefinitions Condition="'$(MfemRoot)'!=''">KRUTIEV_WITH_MFEM=1;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories Condition="'$(EigenRoot)'!=''">$(EigenRoot);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions Condition="'$(EigenRoot)'!=''">KRUTIEV_WITH_EIGEN=1;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
