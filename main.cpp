@@ -10,6 +10,11 @@ int main(int argc, char *argv[])
 
     qRegisterMetaType<WaveguideParameters>("WaveguideParameters");
     qRegisterMetaType<WaveguideCalculationResult>("WaveguideCalculationResult");
+    qRegisterMetaType<QVector<FieldGlyph>>("QVector<FieldGlyph>");
+    qRegisterMetaType<FieldSlice>("FieldSlice");
+    qRegisterMetaType<QVector<FieldSlice>>("QVector<FieldSlice>");
+    qRegisterMetaType<std::shared_ptr<const em::FieldSolution>>(
+        "std::shared_ptr<const em::FieldSolution>");
 
     QSurfaceFormat surface_format;
     surface_format.setRenderableType(QSurfaceFormat::OpenGL);

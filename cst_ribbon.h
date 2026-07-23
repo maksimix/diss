@@ -43,7 +43,12 @@ enum class RibbonIcon
     Search,
     Help,
     Collapse,
-    Expand
+    Expand,
+    // Значки дерева модели: свои рисунки вместо системных папок «Проводника».
+    ComponentGroup,   // раздел Components — сборка из кубиков
+    Component,        // одна деталь — кубик
+    SignalGroup,      // раздел Excitation Signals — оси с синусоидой
+    Signal            // одиночный сигнал возбуждения
 };
 
 // Рисунок задан в сетке 32x32 и масштабируется под запрошенный размер, поэтому

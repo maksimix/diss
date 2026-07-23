@@ -33,6 +33,7 @@
 #include <QtWidgets/QPlainTextEdit>
 #include <QtWidgets/QProgressBar>
 #include <QtWidgets/QPushButton>
+#include <QtWidgets/QSlider>
 #include <QtWidgets/QStatusBar>
 #include <QtWidgets/QStyle>
 #include <QtWidgets/QSplitter>
@@ -467,6 +468,19 @@ MainWindow::MainWindow(QWidget *parent)
     progress_timer_.setInterval(1000);
     connect(&progress_timer_, &QTimer::timeout, this, &MainWindow::updateCalculationProgress);
 
+    arrow_density_timer_.setInterval(350);
+    arrow_density_timer_.setSingleShot(true);
+    connect(&arrow_density_timer_, &QTimer::timeout, this, &MainWindow::regenerateFieldGlyphs);
+
+    slice_position_timer_.setInterval(300);
+    slice_position_timer_.setSingleShot(true);
+    connect(&slice_position_timer_, &QTimer::timeout, this, [this]() {
+        // Ползунок положения активен только в режиме одиночного среза.
+        if (field_fill_combo_box_ != nullptr && field_fill_combo_box_->currentIndex() == 1) {
+            requestActiveSliceRebuild();
+        }
+    });
+
     // Без родителя: иначе QObject уничтожил бы поток вместе с окном, а ~QThread
     // на ещё работающем расчёте вызывает qFatal.
     worker_thread_ = new QThread();
@@ -476,6 +490,21 @@ MainWindow::MainWindow(QWidget *parent)
     connect(this, &MainWindow::requestCalculation, worker_, &CalculationWorker::calculate);
     connect(worker_, &CalculationWorker::calculated, this, &MainWindow::handleCalculationResult);
     connect(worker_, &CalculationWorker::progressed, this, &MainWindow::handleCalculationProgress);
+    connect(this,
+            &MainWindow::requestGlyphRegeneration,
+            worker_,
+            &CalculationWorker::regenerateGlyphs);
+    connect(worker_,
+            &CalculationWorker::glyphsRegenerated,
+            this,
+            &MainWindow::handleGlyphsRegenerated);
+    connect(this, &MainWindow::requestSliceRebuild, worker_, &CalculationWorker::rebuildSlice);
+    connect(worker_, &CalculationWorker::sliceRebuilt, this, &MainWindow::handleSliceRebuilt);
+    connect(this, &MainWindow::requestVolumeFill, worker_, &CalculationWorker::buildVolumeFill);
+    connect(worker_,
+            &CalculationWorker::volumeFillBuilt,
+            this,
+            &MainWindow::handleVolumeFillBuilt);
     worker_thread_->start();
 
     // Стартовое состояние: геометрия показана, решатель ждёт кнопки Start.
@@ -491,8 +520,12 @@ void MainWindow::closeEvent(QCloseEvent *event)
     // разрушением решатель успевает дойти до очередной точки опроса, и ждать в
     // деструкторе приходится заметно меньше.
     latest_request_id_ = 0;
+    latest_glyph_request_id_ = 0;
+    latest_fill_request_id_ = 0;
     if (worker_ != nullptr) {
         worker_->setLatestRequestId(0);
+        worker_->setLatestGlyphRequestId(0);
+        worker_->setLatestFillRequestId(0);
     }
     QMainWindow::closeEvent(event);
 }
@@ -501,6 +534,8 @@ MainWindow::~MainWindow()
 {
     if (worker_ != nullptr) {
         worker_->setLatestRequestId(0);
+        worker_->setLatestGlyphRequestId(0);
+        worker_->setLatestFillRequestId(0);
     }
     if (worker_thread_ == nullptr) {
         return;
@@ -575,7 +610,7 @@ void MainWindow::runCalculation()
                   ? QStringLiteral("FEM-расчет выполняется: пока показано предыдущее поле, оно еще не учитывает новую геометрию.")
                   : QStringLiteral("Расчет поля выполняется в отдельном потоке..."),
               false);
-    emit requestCalculation(request_id, readParameters());
+    emit requestCalculation(request_id, readParameters(), arrowDensity());
 }
 
 void MainWindow::handleCalculationResult(int request_id, const WaveguideCalculationResult &result)
@@ -607,6 +642,19 @@ void MainWindow::handleCalculationResult(int request_id, const WaveguideCalculat
 void MainWindow::showResult(const WaveguideCalculationResult &result)
 {
     last_result_ = result;
+    // Показан новый результат: не завершённые перестройки стрелок и заливки
+    // относятся к прежнему полю и не должны перезаписать свежие данные.
+    latest_glyph_request_id_ = 0;
+    latest_fill_request_id_ = 0;
+    if (worker_ != nullptr) {
+        worker_->setLatestGlyphRequestId(0);
+        worker_->setLatestFillRequestId(0);
+    }
+    // Срезы нового расчёта построены по центру, стопка объёма не построена.
+    applied_slice_offset_fraction_[0] = 0.0;
+    applied_slice_offset_fraction_[1] = 0.0;
+    volume_cache_plane_ = -1;
+    volume_cache_.clear();
     result_text_edit_->setPlainText(buildResultText(result));
 
     if (!result.valid) {
@@ -627,6 +675,9 @@ void MainWindow::showResult(const WaveguideCalculationResult &result)
     } else {
         setStatus(QStringLiteral("Расчет готов: на заданной частоте распространяющейся моды нет."), true);
     }
+    // Настройки заливки переживают пересчёт: сдвинутый срез и стопка объёма
+    // достраиваются по свежему решению сами.
+    applyFieldFillMode();
 }
 
 void MainWindow::updateCalculationProgress()
@@ -689,6 +740,241 @@ void MainWindow::changeFieldDisplayMode(int index)
     side_projection_widget_->setFieldDisplayMode(display_mode);
 }
 
+double MainWindow::arrowDensity() const
+{
+    return arrow_density_slider_ != nullptr ? arrow_density_slider_->value() / 100.0
+                                            : 1.0;
+}
+
+FieldSlicePlane MainWindow::activeSlicePlane() const
+{
+    return slice_plane_combo_box_ != nullptr && slice_plane_combo_box_->currentIndex() == 1
+               ? FieldSlicePlane::VerticalYZ
+               : FieldSlicePlane::HorizontalXZ;
+}
+
+double MainWindow::sliceOffsetFraction(FieldSlicePlane plane) const
+{
+    return slice_offset_fraction_[plane == FieldSlicePlane::VerticalYZ ? 1 : 0];
+}
+
+void MainWindow::applyFieldFillMode()
+{
+    if (field_fill_combo_box_ == nullptr) {
+        return;
+    }
+    const int index = field_fill_combo_box_->currentIndex();
+    const FieldFillMode mode = index == 1   ? FieldFillMode::Slice
+                               : index == 2 ? FieldFillMode::Volume
+                                            : FieldFillMode::None;
+    slice_plane_combo_box_->setEnabled(mode != FieldFillMode::None);
+    slice_position_slider_->setEnabled(mode == FieldFillMode::Slice);
+
+    open_gl_widget_->setFieldFillMode(mode);
+    top_projection_widget_->setFieldFillMode(mode);
+    side_projection_widget_->setFieldFillMode(mode);
+    if (!last_result_.valid || !last_result_.has_propagating_mode) {
+        return;
+    }
+
+    const FieldSlicePlane plane = activeSlicePlane();
+    if (mode != FieldFillMode::Volume && color_bar_ != nullptr) {
+        // Обратно из объёма: шкала снова по максимумам одиночных срезов.
+        color_bar_->setMaximum(std::max(last_result_.horizontal_slice.maximum_value,
+                                        last_result_.vertical_slice.maximum_value));
+    }
+    if (mode == FieldFillMode::Slice) {
+        // Показанный срез мог остаться от другого положения ползунка.
+        const int plane_index = plane == FieldSlicePlane::VerticalYZ ? 1 : 0;
+        if (std::abs(slice_offset_fraction_[plane_index] -
+                     applied_slice_offset_fraction_[plane_index]) > 1.0e-6) {
+            requestActiveSliceRebuild();
+        }
+    } else if (mode == FieldFillMode::Volume) {
+        const int plane_index = plane == FieldSlicePlane::VerticalYZ ? 1 : 0;
+        if (volume_cache_plane_ == plane_index && !volume_cache_.isEmpty()) {
+            open_gl_widget_->setVolumeSlices(volume_cache_);
+            top_projection_widget_->setVolumeSlices(volume_cache_);
+            side_projection_widget_->setVolumeSlices(volume_cache_);
+            double maximum_value = 0.0;
+            for (const FieldSlice &slice : volume_cache_) {
+                maximum_value = std::max(maximum_value, slice.maximum_value);
+            }
+            if (color_bar_ != nullptr && maximum_value > 0.0) {
+                color_bar_->setMaximum(maximum_value);
+            }
+        } else {
+            requestVolumeFillRebuild();
+        }
+    }
+}
+
+void MainWindow::requestActiveSliceRebuild()
+{
+    if (!last_result_.valid || !last_result_.has_propagating_mode) {
+        return;
+    }
+    if (!last_result_.field_solution) {
+        setStatus(QStringLiteral(
+                      "Срез можно перенести только после пересчёта поля: "
+                      "у загруженного расчёта нет решения для перестройки."),
+                  false);
+        return;
+    }
+
+    const FieldSlicePlane plane = activeSlicePlane();
+    const int fill_request_id = next_fill_request_id_++;
+    latest_fill_request_id_ = fill_request_id;
+    worker_->setLatestFillRequestId(fill_request_id);
+    emit requestSliceRebuild(fill_request_id,
+                             last_result_.field_solution,
+                             static_cast<int>(plane),
+                             sliceOffsetFraction(plane));
+    if (!calculation_running_) {
+        setStatus(QStringLiteral("Перенос плоскости среза..."), false);
+    }
+}
+
+void MainWindow::requestVolumeFillRebuild()
+{
+    if (!last_result_.valid || !last_result_.has_propagating_mode) {
+        return;
+    }
+    if (!last_result_.field_solution) {
+        setStatus(QStringLiteral(
+                      "Объёмная заливка доступна только после пересчёта поля: "
+                      "у загруженного расчёта нет решения для перестройки."),
+                  false);
+        return;
+    }
+
+    // Стопки в девять плоскостей хватает, чтобы поле читалось объёмно, а
+    // выборка поля и память не разрастались.
+    constexpr int volume_slice_count = 9;
+    const int fill_request_id = next_fill_request_id_++;
+    latest_fill_request_id_ = fill_request_id;
+    worker_->setLatestFillRequestId(fill_request_id);
+    emit requestVolumeFill(fill_request_id,
+                           last_result_.field_solution,
+                           static_cast<int>(activeSlicePlane()),
+                           volume_slice_count);
+    if (!calculation_running_) {
+        setStatus(QStringLiteral("Построение объёмной заливки |E|..."), false);
+    }
+}
+
+void MainWindow::handleSliceRebuilt(int fill_request_id,
+                                    int slice_plane,
+                                    const FieldSlice &slice)
+{
+    if (fill_request_id != latest_fill_request_id_ || !last_result_.valid ||
+        !last_result_.field_solution) {
+        return;
+    }
+
+    const FieldSlicePlane plane = static_cast<FieldSlicePlane>(slice_plane);
+    const int plane_index = plane == FieldSlicePlane::VerticalYZ ? 1 : 0;
+    applied_slice_offset_fraction_[plane_index] = sliceOffsetFraction(plane);
+    if (plane == FieldSlicePlane::HorizontalXZ) {
+        last_result_.horizontal_slice = slice;
+    } else {
+        last_result_.vertical_slice = slice;
+    }
+    open_gl_widget_->setSlice(plane, slice);
+    top_projection_widget_->setSlice(plane, slice);
+    side_projection_widget_->setSlice(plane, slice);
+    if (color_bar_ != nullptr) {
+        color_bar_->setMaximum(std::max(last_result_.horizontal_slice.maximum_value,
+                                        last_result_.vertical_slice.maximum_value));
+    }
+    if (!calculation_running_) {
+        setStatus(QStringLiteral("Срез |E| перестроен: положение %1% поперечника.")
+                      .arg(std::lround(100.0 * applied_slice_offset_fraction_[plane_index])),
+                  false);
+    }
+}
+
+void MainWindow::handleVolumeFillBuilt(int fill_request_id,
+                                       int slice_plane,
+                                       const QVector<FieldSlice> &slices)
+{
+    if (fill_request_id != latest_fill_request_id_ || !last_result_.valid ||
+        !last_result_.field_solution) {
+        return;
+    }
+
+    volume_cache_plane_ = static_cast<FieldSlicePlane>(slice_plane) ==
+                                  FieldSlicePlane::VerticalYZ
+                              ? 1
+                              : 0;
+    volume_cache_ = slices;
+    open_gl_widget_->setVolumeSlices(slices);
+    top_projection_widget_->setVolumeSlices(slices);
+    side_projection_widget_->setVolumeSlices(slices);
+
+    double maximum_value = 0.0;
+    for (const FieldSlice &slice : slices) {
+        maximum_value = std::max(maximum_value, slice.maximum_value);
+    }
+    if (color_bar_ != nullptr && maximum_value > 0.0) {
+        color_bar_->setMaximum(maximum_value);
+    }
+    if (!calculation_running_) {
+        setStatus(QStringLiteral("Объёмная заливка |E| построена: %1 срезов.")
+                      .arg(slices.size()),
+                  false);
+    }
+}
+
+void MainWindow::regenerateFieldGlyphs()
+{
+    if (!last_result_.valid || !last_result_.has_propagating_mode) {
+        return;   // стрелок нет — нечего перестраивать
+    }
+    if (!last_result_.field_solution) {
+        // Расчёт загружен из файла результатов: решение поля не сохраняется,
+        // поэтому новая концентрация применится при следующем пересчёте.
+        setStatus(QStringLiteral(
+                      "Концентрация стрелок применится после пересчёта поля: "
+                      "у загруженного расчёта нет решения для перестройки."),
+                  false);
+        return;
+    }
+
+    const int glyph_request_id = next_glyph_request_id_++;
+    latest_glyph_request_id_ = glyph_request_id;
+    worker_->setLatestGlyphRequestId(glyph_request_id);
+    emit requestGlyphRegeneration(glyph_request_id,
+                                  last_result_.field_solution,
+                                  arrowDensity());
+    if (!calculation_running_) {
+        setStatus(QStringLiteral("Перестроение стрелок поля..."), false);
+    }
+}
+
+void MainWindow::handleGlyphsRegenerated(int glyph_request_id,
+                                         const QVector<FieldGlyph> &glyphs)
+{
+    // Пока стрелки строились, ползунок сдвинули ещё раз или пришёл новый
+    // расчёт — этот ответ устарел.
+    if (glyph_request_id != latest_glyph_request_id_ || !last_result_.valid ||
+        !last_result_.field_solution) {
+        return;
+    }
+
+    last_result_.field_glyphs = glyphs;
+    open_gl_widget_->setFieldGlyphs(glyphs);
+    top_projection_widget_->setFieldGlyphs(glyphs);
+    side_projection_widget_->setFieldGlyphs(glyphs);
+    if (!calculation_running_) {
+        setStatus(QStringLiteral("Стрелки поля перестроены: концентрация %1%.")
+                      .arg(arrow_density_slider_ != nullptr
+                               ? arrow_density_slider_->value()
+                               : 100),
+                  false);
+    }
+}
+
 QWidget *MainWindow::createParameterPanel()
 {
     QWidget *panel = new QWidget(this);
@@ -742,19 +1028,77 @@ QWidget *MainWindow::createParameterPanel()
     field_mode_combo_box_->addItem(QStringLiteral("Только H"));
     field_mode_combo_box_->addItem(QStringLiteral("Только J"));
     field_mode_combo_box_->addItem(QStringLiteral("Поток мощности S"));
-    slice_check_box_ = new QCheckBox(QStringLiteral("Заливка |E| на срезе"), view_group);
+    // Заливка |E|: одна плоскость среза или стопка полупрозрачных срезов через
+    // всю полость — грубый объёмный показ поля целиком.
+    field_fill_combo_box_ = new QComboBox(view_group);
+    field_fill_combo_box_->addItem(QStringLiteral("Выключена"));
+    field_fill_combo_box_->addItem(QStringLiteral("Срез |E|"));
+    field_fill_combo_box_->addItem(QStringLiteral("Весь объём |E|"));
     animation_check_box_ = new QCheckBox(QStringLiteral("Анимация бегущей волны"), view_group);
     slice_plane_combo_box_ = new QComboBox(view_group);
-    slice_plane_combo_box_->addItem(QStringLiteral("Срез: горизонтальный (y = 0)"));
-    slice_plane_combo_box_->addItem(QStringLiteral("Срез: вертикальный (x = 0)"));
+    slice_plane_combo_box_->addItem(QStringLiteral("Срез: горизонтальный (⊥ y)"));
+    slice_plane_combo_box_->addItem(QStringLiteral("Срез: вертикальный (⊥ x)"));
+
+    // Положение плоскости среза поперёк волновода, в процентах от поперечного
+    // размера: 0% — середина, ±48% — почти у стенки. У каждой ориентации своё
+    // запомненное положение; в режиме объёма ползунок не участвует.
+    QWidget *slice_position_row = new QWidget(view_group);
+    QHBoxLayout *slice_position_layout = new QHBoxLayout(slice_position_row);
+    slice_position_layout->setContentsMargins(0, 0, 0, 0);
+    slice_position_layout->setSpacing(6);
+    slice_position_slider_ = new QSlider(Qt::Horizontal, slice_position_row);
+    slice_position_slider_->setRange(-48, 48);
+    slice_position_slider_->setValue(0);
+    slice_position_slider_->setSingleStep(2);
+    slice_position_slider_->setPageStep(12);
+    slice_position_slider_->setToolTip(
+        QStringLiteral("Положение плоскости среза поперёк волновода:\n"
+                       "0% — середина, ±48% — почти у стенки.\n"
+                       "Срез пересобирается по готовому решению без пересчёта."));
+    slice_position_value_label_ = new QLabel(QStringLiteral("0%"), slice_position_row);
+    slice_position_value_label_->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    slice_position_value_label_->setMinimumWidth(
+        slice_position_value_label_->fontMetrics().horizontalAdvance(
+            QStringLiteral("−48%")) + 4);
+    slice_position_layout->addWidget(slice_position_slider_, 1);
+    slice_position_layout->addWidget(slice_position_value_label_);
+
+    // Концентрация стрелок E/H/J — в процентах от обычного числа стрелок.
+    // Линии поля и стрелки потока S ползунок не трогает.
+    QWidget *arrow_density_row = new QWidget(view_group);
+    QHBoxLayout *arrow_density_layout = new QHBoxLayout(arrow_density_row);
+    arrow_density_layout->setContentsMargins(0, 0, 0, 0);
+    arrow_density_layout->setSpacing(6);
+    arrow_density_slider_ = new QSlider(Qt::Horizontal, arrow_density_row);
+    arrow_density_slider_->setRange(25, 400);
+    arrow_density_slider_->setValue(100);
+    arrow_density_slider_->setSingleStep(5);
+    arrow_density_slider_->setPageStep(25);
+    arrow_density_slider_->setToolTip(
+        QStringLiteral("Концентрация стрелок полей E, H и токов J:\n"
+                       "процент от обычного числа стрелок (25–400%).\n"
+                       "Применяется к показанному полю без пересчёта задачи."));
+    arrow_density_value_label_ = new QLabel(QStringLiteral("100%"), arrow_density_row);
+    arrow_density_value_label_->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    // Ширина по самой длинной подписи «400%», чтобы строка не дёргалась.
+    arrow_density_value_label_->setMinimumWidth(
+        arrow_density_value_label_->fontMetrics().horizontalAdvance(QStringLiteral("400%")) + 4);
+    arrow_density_layout->addWidget(arrow_density_slider_, 1);
+    arrow_density_layout->addWidget(arrow_density_value_label_);
+
     color_bar_ = new FieldColorBar(view_group);
     QPushButton *reset_view_button = new QPushButton(QStringLiteral("Сбросить вид"), view_group);
     view_layout->addRow(QStringLiteral("Поля"), field_mode_combo_box_);
-    view_layout->addRow(slice_check_box_);
+    view_layout->addRow(QStringLiteral("Заливка"), field_fill_combo_box_);
     view_layout->addRow(slice_plane_combo_box_);
+    view_layout->addRow(QStringLiteral("Положение"), slice_position_row);
     view_layout->addRow(animation_check_box_);
+    view_layout->addRow(QStringLiteral("Стрелки"), arrow_density_row);
     view_layout->addRow(color_bar_);
     view_layout->addRow(reset_view_button);
+    // Пока заливка выключена, выбор плоскости и положения ни на что не влияет.
+    slice_plane_combo_box_->setEnabled(false);
+    slice_position_slider_->setEnabled(false);
     display_panel->setContent(view_group);
     panel_layout->addWidget(display_panel);
 
@@ -779,24 +1123,49 @@ QWidget *MainWindow::createParameterPanel()
             qOverload<int>(&QComboBox::currentIndexChanged),
             this,
             &MainWindow::changeFieldDisplayMode);
-    connect(slice_check_box_, &QCheckBox::toggled, this, [this](bool checked) {
-        open_gl_widget_->setSliceVisible(checked);
-        top_projection_widget_->setSliceVisible(checked);
-        side_projection_widget_->setSliceVisible(checked);
-    });
+    connect(field_fill_combo_box_,
+            qOverload<int>(&QComboBox::currentIndexChanged),
+            this,
+            [this](int) {
+                applyFieldFillMode();
+            });
     connect(animation_check_box_, &QCheckBox::toggled, this, [this](bool checked) {
         open_gl_widget_->setAnimationEnabled(checked);
         top_projection_widget_->setAnimationEnabled(checked);
         side_projection_widget_->setAnimationEnabled(checked);
     });
+    connect(arrow_density_slider_, &QSlider::valueChanged, this, [this](int percent) {
+        arrow_density_value_label_->setText(QStringLiteral("%1%").arg(percent));
+        // Перестройка стартует после паузы: пока ползунок тащат, запросы не
+        // сыплются на каждый шаг.
+        arrow_density_timer_.start();
+    });
     connect(slice_plane_combo_box_,
             qOverload<int>(&QComboBox::currentIndexChanged),
             this,
             [this](int index) {
-                open_gl_widget_->setSlicePlane(index == 1
-                                                   ? FieldSlicePlane::VerticalYZ
-                                                   : FieldSlicePlane::HorizontalXZ);
+                const FieldSlicePlane plane = index == 1
+                                                  ? FieldSlicePlane::VerticalYZ
+                                                  : FieldSlicePlane::HorizontalXZ;
+                open_gl_widget_->setSlicePlane(plane);
+                top_projection_widget_->setSlicePlane(plane);
+                side_projection_widget_->setSlicePlane(plane);
+                // У каждой ориентации своё запомненное положение плоскости.
+                const QSignalBlocker block_position(slice_position_slider_);
+                const int percent = static_cast<int>(
+                    std::lround(100.0 * sliceOffsetFraction(plane)));
+                slice_position_slider_->setValue(percent);
+                slice_position_value_label_->setText(QStringLiteral("%1%").arg(percent));
+                // Смена плоскости меняет и данные: срезу может понадобиться
+                // другое смещение, объёму — другая стопка.
+                applyFieldFillMode();
             });
+    connect(slice_position_slider_, &QSlider::valueChanged, this, [this](int percent) {
+        slice_position_value_label_->setText(QStringLiteral("%1%").arg(percent));
+        slice_offset_fraction_[activeSlicePlane() == FieldSlicePlane::VerticalYZ ? 1 : 0] =
+            percent / 100.0;
+        slice_position_timer_.start();
+    });
     connect(reset_view_button, &QPushButton::clicked, open_gl_widget_, &WaveguideOpenGLWidget::resetView);
 
     rebuildObjectTree();
@@ -951,13 +1320,15 @@ void MainWindow::rebuildObjectTree()
     const QSignalBlocker block_tree(object_tree_widget_);
     object_tree_widget_->clear();
 
+    // Значки нарисованы кодом в стиле ленты: системные папки «Проводника»
+    // выбивались из оформления CST.
     QTreeWidgetItem *components_item = new QTreeWidgetItem(object_tree_widget_);
     components_item->setText(0, QStringLiteral("Components"));
-    components_item->setIcon(0, style()->standardIcon(QStyle::SP_DirIcon));
+    components_item->setIcon(0, ribbonIcon(RibbonIcon::ComponentGroup));
 
     QTreeWidgetItem *component_item = new QTreeWidgetItem(components_item);
     component_item->setText(0, QStringLiteral("component1"));
-    component_item->setIcon(0, style()->standardIcon(QStyle::SP_DirOpenIcon));
+    component_item->setIcon(0, ribbonIcon(RibbonIcon::Component));
 
     if (parameters_.slot_enabled) {
         QTreeWidgetItem *slot_item = new QTreeWidgetItem(component_item);
@@ -989,11 +1360,11 @@ void MainWindow::rebuildObjectTree()
 
     QTreeWidgetItem *excitation_root_item = new QTreeWidgetItem(object_tree_widget_);
     excitation_root_item->setText(0, QStringLiteral("Excitation Signals"));
-    excitation_root_item->setIcon(0, style()->standardIcon(QStyle::SP_DirIcon));
+    excitation_root_item->setIcon(0, ribbonIcon(RibbonIcon::SignalGroup));
 
     QTreeWidgetItem *excitation_item = new QTreeWidgetItem(excitation_root_item);
     excitation_item->setText(0, excitation_name_);
-    excitation_item->setIcon(0, style()->standardIcon(QStyle::SP_MediaPlay));
+    excitation_item->setIcon(0, ribbonIcon(RibbonIcon::Signal));
     excitation_item->setData(0, object_type_role, QStringLiteral("excitation"));
 
     object_tree_widget_->expandAll();

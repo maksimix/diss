@@ -99,6 +99,14 @@ struct FieldGlyph
     QVector3D phasor_imag;        // Im(F), field units
     double reference_magnitude = 0.0;  // max |F| used for normalization
     double animation_length_mm = 0.0;  // full arrow length at |instantaneous| == reference
+
+    // Animation payload of a field line: one entry per point of points. The
+    // instantaneous field along the line at point i is
+    // vertex_amplitude[i] * cos(vertex_phase_rad[i] + phase), which brightens
+    // the line where the field peaks and reverses the arrow heads where it
+    // changes sign. Empty for glyphs that are not animated lines.
+    QVector<float> vertex_phase_rad;
+    QVector<float> vertex_amplitude;   // 0..1 relative to this line's own peak
 };
 
 enum class FieldSlicePlane
@@ -228,3 +236,9 @@ struct WaveguideCalculationResult
 
 Q_DECLARE_METATYPE(WaveguideParameters)
 Q_DECLARE_METATYPE(WaveguideCalculationResult)
+// Перестройка стрелок и заливки |E| идёт через очередь сигналов в рабочий
+// поток и обратно: решение поля, глифы и срезы должны быть известны
+// метасистеме Qt.
+Q_DECLARE_METATYPE(FieldGlyph)
+Q_DECLARE_METATYPE(FieldSlice)
+Q_DECLARE_METATYPE(std::shared_ptr<const em::FieldSolution>)

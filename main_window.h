@@ -8,6 +8,8 @@
 #include <QtCore/QTimer>
 #include <QtWidgets/QMainWindow>
 
+#include <memory>
+
 class CalculationWorker;
 class CstPanel;
 class FieldColorBar;
@@ -24,6 +26,7 @@ class QDoubleSpinBox;
 class QPlainTextEdit;
 class QPushButton;
 class QProgressBar;
+class QSlider;
 class QTreeWidget;
 class QTreeWidgetItem;
 class WaveguideOpenGLWidget;
@@ -37,7 +40,24 @@ public:
     ~MainWindow() override;
 
 signals:
-    void requestCalculation(int request_id, const WaveguideParameters &parameters);
+    void requestCalculation(int request_id,
+                            const WaveguideParameters &parameters,
+                            double arrow_density);
+    // Перестройка стрелок по готовому решению в рабочем потоке: решатель не
+    // запускается, поэтому запрос дешёвый и идёт при каждом сдвиге ползунка.
+    void requestGlyphRegeneration(int glyph_request_id,
+                                  std::shared_ptr<const em::FieldSolution> field_solution,
+                                  double arrow_density);
+    // Срез |E| на смещённой плоскости и стопка срезов объёмной заливки — тоже
+    // по готовому решению, без пересчёта задачи.
+    void requestSliceRebuild(int fill_request_id,
+                             std::shared_ptr<const em::FieldSolution> field_solution,
+                             int slice_plane,
+                             double offset_fraction);
+    void requestVolumeFill(int fill_request_id,
+                           std::shared_ptr<const em::FieldSolution> field_solution,
+                           int slice_plane,
+                           int slice_count);
 
 protected:
     void closeEvent(QCloseEvent *event) override;
@@ -54,6 +74,16 @@ private slots:
     void handleCalculationProgress(int request_id, const QString &stage);
     void changeFieldDisplayMode(int index);
     void updateCalculationProgress();
+    // Запускает перестройку стрелок с текущей концентрацией (после паузы
+    // ползунка) и принимает её результат из рабочего потока.
+    void regenerateFieldGlyphs();
+    void handleGlyphsRegenerated(int glyph_request_id, const QVector<FieldGlyph> &glyphs);
+    // Заливка |E|: перенос плоскости среза и стопка объёма строятся в рабочем
+    // потоке по сохранённому решению, эти слоты принимают результат.
+    void handleSliceRebuilt(int fill_request_id, int slice_plane, const FieldSlice &slice);
+    void handleVolumeFillBuilt(int fill_request_id,
+                               int slice_plane,
+                               const QVector<FieldSlice> &slices);
 
 private:
     QWidget *createParameterPanel();
@@ -94,6 +124,19 @@ private:
     void updateSimulationActionState();
     QString solverMethodName(int method) const;
     QString linearSolverMethodName(int method) const;
+    // Концентрация стрелок E/H/J по положению ползунка (1.0 — обычная).
+    double arrowDensity() const;
+    // Текущая плоскость среза по комбобоксу и её желаемое смещение по
+    // ползунку (доля поперечного размера, [-0.48, 0.48]).
+    FieldSlicePlane activeSlicePlane() const;
+    double sliceOffsetFraction(FieldSlicePlane plane) const;
+    // Применяет выбор «выключена/срез/объём» к виджетам и дозаказывает
+    // недостающие данные (смещённый срез или стопку объёма).
+    void applyFieldFillMode();
+    // Просит рабочий поток пересобрать срез на текущем смещении.
+    void requestActiveSliceRebuild();
+    // Просит стопку срезов объёмной заливки для текущей плоскости.
+    void requestVolumeFillRebuild();
     // Ожидаемая цена уровня качества: одна и та же строка идёт в подсказку ленты
     // и в диалог настройки решателя, чтобы числа не разъезжались.
     QString accuracyLevelHint(int level) const;
@@ -109,8 +152,12 @@ private:
     QCheckBox *slot_enabled_check_box_ = nullptr;
     QTreeWidget *object_tree_widget_ = nullptr;
     QComboBox *field_mode_combo_box_ = nullptr;
-    QCheckBox *slice_check_box_ = nullptr;
+    QComboBox *field_fill_combo_box_ = nullptr;
     QCheckBox *animation_check_box_ = nullptr;
+    QSlider *arrow_density_slider_ = nullptr;
+    QLabel *arrow_density_value_label_ = nullptr;
+    QSlider *slice_position_slider_ = nullptr;
+    QLabel *slice_position_value_label_ = nullptr;
     QComboBox *slice_plane_combo_box_ = nullptr;
     QComboBox *accuracy_combo_box_ = nullptr;
     QComboBox *solver_method_combo_box_ = nullptr;
@@ -139,6 +186,11 @@ private:
     QThread *worker_thread_ = nullptr;
     CalculationWorker *worker_ = nullptr;
     QTimer progress_timer_;
+    // Пауза после сдвига ползунка концентрации: стрелки перестраиваются один
+    // раз по конечному положению, а не на каждый шаг ползунка.
+    QTimer arrow_density_timer_;
+    // Такая же пауза для ползунка положения среза.
+    QTimer slice_position_timer_;
     QElapsedTimer calculation_elapsed_timer_;
     QString calculation_stage_;
     qint64 estimated_duration_ms_ = 120000;
@@ -150,5 +202,21 @@ private:
     bool active_calculation_is_fem_ = false;
     int next_request_id_ = 1;
     int latest_request_id_ = 0;
+    // Счётчики запросов перестройки стрелок — отдельные от счётчиков расчёта,
+    // чтобы сдвиг ползунка не отменял идущий расчёт поля.
+    int next_glyph_request_id_ = 1;
+    int latest_glyph_request_id_ = 0;
+    // Счётчики заливки |E| (перенос среза и стопка объёма делят одно
+    // пространство номеров: новый запрос отменяет предыдущий).
+    int next_fill_request_id_ = 1;
+    int latest_fill_request_id_ = 0;
+    // Желаемое смещение плоскости среза на каждую ориентацию (доля
+    // поперечника) и фактически применённое к показанным срезам: после нового
+    // расчёта срезы снова центральные, и несовпадение запускает перестройку.
+    double slice_offset_fraction_[2] = {0.0, 0.0};
+    double applied_slice_offset_fraction_[2] = {0.0, 0.0};
+    // Стопка объёмной заливки: для какой плоскости построен кэш (-1 — пусто).
+    int volume_cache_plane_ = -1;
+    QVector<FieldSlice> volume_cache_;
     int selected_plate_index_ = -1;
 };

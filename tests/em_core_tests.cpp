@@ -589,6 +589,106 @@ void testTe10ElectricFluxDensity()
     }
 }
 
+// Концентрация стрелок — пользовательская настройка: больше плотность — больше
+// стрелок E, H и J. Линии поля и стрелки Пойнтинга настройка не трогает.
+void testArrowDensitySetting()
+{
+    const em::SimulationRequest request = createRequest(10.0e9);
+    const em::FieldSolution solution = em::AnalyticWaveguideSolver().solve(request);
+    expectTrue(solution.success && solution.has_selected_mode,
+               "arrow-density test has a field solution");
+
+    const auto census = [](const std::vector<postprocessing::VisualizationPrimitive> &primitives,
+                           postprocessing::FieldQuantity quantity,
+                           postprocessing::PrimitiveKind kind) {
+        int count = 0;
+        for (const postprocessing::VisualizationPrimitive &primitive : primitives) {
+            if (primitive.quantity == quantity && primitive.kind == kind) {
+                ++count;
+            }
+        }
+        return count;
+    };
+
+    const postprocessing::FieldVisualizationGenerator generator;
+    postprocessing::FieldVisualizationSettings sparse;
+    sparse.arrow_density = 0.25;
+    postprocessing::FieldVisualizationSettings dense;
+    dense.arrow_density = 4.0;
+    const std::vector<postprocessing::VisualizationPrimitive> sparse_primitives =
+        generator.generate(solution, sparse);
+    const std::vector<postprocessing::VisualizationPrimitive> normal_primitives =
+        generator.generate(solution);
+    const std::vector<postprocessing::VisualizationPrimitive> dense_primitives =
+        generator.generate(solution, dense);
+
+    using postprocessing::FieldQuantity;
+    using postprocessing::PrimitiveKind;
+    const FieldQuantity arrow_quantities[] = {FieldQuantity::Electric,
+                                              FieldQuantity::Magnetic,
+                                              FieldQuantity::SurfaceCurrent};
+    for (const FieldQuantity quantity : arrow_quantities) {
+        const int sparse_count = census(sparse_primitives, quantity, PrimitiveKind::Arrow);
+        const int normal_count = census(normal_primitives, quantity, PrimitiveKind::Arrow);
+        const int dense_count = census(dense_primitives, quantity, PrimitiveKind::Arrow);
+        expectTrue(sparse_count > 0, "quarter density keeps some arrows");
+        expectTrue(sparse_count < normal_count, "quarter density thins the arrows");
+        expectTrue(normal_count < dense_count, "quadruple density adds arrows");
+    }
+
+    expectTrue(census(sparse_primitives, FieldQuantity::Poynting, PrimitiveKind::Arrow) ==
+                   census(dense_primitives, FieldQuantity::Poynting, PrimitiveKind::Arrow),
+               "Poynting arrows ignore the arrow-density setting");
+    expectTrue(census(sparse_primitives, FieldQuantity::Magnetic, PrimitiveKind::Polyline) ==
+                   census(dense_primitives, FieldQuantity::Magnetic, PrimitiveKind::Polyline),
+               "field lines ignore the arrow-density setting");
+}
+
+// Срез |E| умеет вставать на смещённую плоскость (перенос среза в интерфейсе),
+// а огрубление сетки для стопки объёмной заливки действительно уменьшает
+// число клеток.
+void testSliceOffsetAndResolution()
+{
+    const em::SimulationRequest request = createRequest(10.0e9);
+    const em::FieldSolution solution = em::AnalyticWaveguideSolver().solve(request);
+    const postprocessing::FieldVisualizationGenerator generator;
+
+    const postprocessing::FieldSliceData centered =
+        generator.generateSlice(solution, postprocessing::SlicePlaneKind::VerticalYZ);
+    const double offset_fraction = 0.30;
+    const postprocessing::FieldSliceData shifted =
+        generator.generateSlice(solution,
+                                postprocessing::SlicePlaneKind::VerticalYZ,
+                                offset_fraction);
+    expectTrue(centered.valid && shifted.valid, "offset-slice test slices are valid");
+
+    const double expected_x_m = offset_fraction * request.model.waveguide.inner_width_m;
+    bool on_shifted_plane = !shifted.cells.empty();
+    for (const postprocessing::SliceSampleCell &cell : shifted.cells) {
+        on_shifted_plane =
+            on_shifted_plane && std::abs(cell.center_m.x - expected_x_m) < 1.0e-9;
+    }
+    expectTrue(on_shifted_plane, "shifted vertical slice lies on the x = offset plane");
+
+    // TE10: |E| спадает от середины как sin(pi x'/a); на x = 0.3a от центра
+    // остаётся sin(0.8 pi) = 0.59 от максимума.
+    expectTrue(shifted.maximum_value < 0.75 * centered.maximum_value,
+               "TE10 |E| maximum drops away from the guide centre");
+    expectTrue(shifted.maximum_value > 0.25 * centered.maximum_value,
+               "shifted slice still sees a finite field");
+
+    const postprocessing::FieldSliceData coarse =
+        generator.generateSlice(solution,
+                                postprocessing::SlicePlaneKind::HorizontalXZ,
+                                0.0,
+                                0.55);
+    const postprocessing::FieldSliceData fine =
+        generator.generateSlice(solution, postprocessing::SlicePlaneKind::HorizontalXZ);
+    expectTrue(coarse.valid && fine.valid &&
+                   coarse.cells.size() < fine.cells.size() / 2,
+               "volume-stack resolution scale really coarsens the slice grid");
+}
+
 void testSlotCurrentMaskAndExcitationEstimate()
 {
     em::SimulationRequest centered_request = createRequest(10.0e9);
@@ -2501,6 +2601,8 @@ int main()
     testConductorLossAndQ();
     testVisualizationPrimitives();
     testTe10ElectricFluxDensity();
+    testArrowDensitySetting();
+    testSliceOffsetAndResolution();
     testSlotCurrentMaskAndExcitationEstimate();
     testCooperativeCancellation();
     testSolverDispatchPolicy();

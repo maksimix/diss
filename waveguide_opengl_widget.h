@@ -27,17 +27,35 @@ enum class WaveguideViewPreset
     Side
 };
 
+// Заливка |E|: выключена, одна плоскость среза или стопка полупрозрачных
+// срезов через всю полость (грубое объёмное представление поля).
+enum class FieldFillMode
+{
+    None,
+    Slice,
+    Volume
+};
+
 class WaveguideOpenGLWidget : public QOpenGLWidget, protected QOpenGLFunctions
 {
 public:
     explicit WaveguideOpenGLWidget(QWidget *parent = nullptr);
 
     void setCalculationResult(const WaveguideCalculationResult &result);
+    // Заменяет только линии и стрелки поля, не трогая остальной результат:
+    // так ползунок концентрации стрелок обходится без повторного расчёта.
+    void setFieldGlyphs(const QVector<FieldGlyph> &glyphs);
+    // Заменяет один срез |E| (например, после переноса плоскости), не трогая
+    // остальной результат.
+    void setSlice(FieldSlicePlane plane, const FieldSlice &slice);
+    // Стопка срезов для объёмной заливки; строится по требованию и живёт
+    // отдельно от результата расчёта.
+    void setVolumeSlices(const QVector<FieldSlice> &slices);
     void setModelPreview(const WaveguideParameters &parameters);
     void setSelectedPlateIndex(int plate_index);
     void setFieldDisplayMode(FieldDisplayMode mode);
     void setViewPreset(WaveguideViewPreset preset);
-    void setSliceVisible(bool visible);
+    void setFieldFillMode(FieldFillMode mode);
     void setSlicePlane(FieldSlicePlane plane);
     void setAnimationEnabled(bool enabled);
     void setSlotEditedCallback(std::function<void(const WaveguideParameters &)> callback);
@@ -107,6 +125,12 @@ private:
                        double body_alpha,
                        const QColor &edge_color) const;
     void drawFieldSlice() const;
+    // Клетки одного среза; maximum_value — общий масштаб цвета (у стопки он
+    // один на все плоскости, чтобы цвета срезов были сравнимы между собой).
+    void drawSliceCells(const FieldSlice &slice,
+                        double maximum_value,
+                        double alpha) const;
+    void drawVolumeSlices() const;
     void drawArrow(const FieldGlyph &glyph) const;
     void drawArrowHead(const QVector3D &position,
                        const QVector3D &direction,
@@ -114,10 +138,11 @@ private:
                        const QColor &color,
                        double size,
                        double alpha = 0.96) const;
-    void drawPolylineWithArrow(const QVector<QVector3D> &points,
-                               const QColor &color,
+    // Arrow heads are placed at a fixed spacing along the line rather than a
+    // fixed count, so a long loop carries more of them than a short one.
+    void drawPolylineWithArrow(const FieldGlyph &glyph,
                                double arrow_size,
-                               int arrow_count,
+                               double arrow_spacing_mm,
                                float line_width) const;
     void drawAxes() const;
     void drawPropagationArrow() const;
@@ -144,11 +169,12 @@ private:
     void setColor(const QColor &color, double alpha = 1.0) const;
 
     WaveguideCalculationResult result_;
+    QVector<FieldSlice> volume_slices_;
     std::function<void(const WaveguideParameters &)> slot_edited_callback_;
     FieldDisplayMode field_display_mode_ = FieldDisplayMode::Fields;
     WaveguideViewPreset view_preset_ = WaveguideViewPreset::Free3D;
     FieldSlicePlane slice_plane_ = FieldSlicePlane::HorizontalXZ;
-    bool show_slice_ = false;
+    FieldFillMode fill_mode_ = FieldFillMode::None;
     bool animation_enabled_ = false;
     QTimer animation_timer_;
     QPoint last_mouse_position_;

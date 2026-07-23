@@ -91,10 +91,11 @@ QVector3D arrowSideHint(const QVector3D &start, const QVector3D &end)
 
 QVector<FieldGlyph> QtFieldGlyphAdapter::build(
     const em::FieldSolution &solution,
+    const postprocessing::FieldVisualizationSettings &settings,
     const postprocessing::GenerationControl &control) const
 {
     const std::vector<postprocessing::VisualizationPrimitive> primitives =
-        postprocessing::FieldVisualizationGenerator().generate(solution, {}, control);
+        postprocessing::FieldVisualizationGenerator().generate(solution, settings, control);
     QVector<FieldGlyph> glyphs;
     glyphs.reserve(static_cast<qsizetype>(primitives.size()));
 
@@ -121,6 +122,23 @@ QVector<FieldGlyph> QtFieldGlyphAdapter::build(
             glyph.reference_magnitude = primitive.reference_magnitude;
             glyph.animation_length_mm = primitive.arrow_length_m * meters_to_millimeters;
         }
+        // An animated line carries a phase per vertex instead of a single
+        // phasor, so it has no reference magnitude to qualify it above.
+        if (primitive.animated &&
+            primitive.vertex_phase_rad.size() == primitive.points_m.size() &&
+            primitive.vertex_amplitude.size() == primitive.points_m.size()) {
+            glyph.animated = true;
+            glyph.vertex_phase_rad.reserve(
+                static_cast<qsizetype>(primitive.vertex_phase_rad.size()));
+            glyph.vertex_amplitude.reserve(
+                static_cast<qsizetype>(primitive.vertex_amplitude.size()));
+            for (std::size_t index = 0; index < primitive.vertex_phase_rad.size(); ++index) {
+                glyph.vertex_phase_rad.push_back(
+                    static_cast<float>(primitive.vertex_phase_rad[index]));
+                glyph.vertex_amplitude.push_back(
+                    static_cast<float>(primitive.vertex_amplitude[index]));
+            }
+        }
 
         if (primitive.kind == postprocessing::PrimitiveKind::Arrow && glyph.points.size() >= 2) {
             const QVector3D start = glyph.points[0];
@@ -138,14 +156,20 @@ QVector<FieldGlyph> QtFieldGlyphAdapter::build(
 FieldSlice QtFieldGlyphAdapter::buildSlice(
     const em::FieldSolution &solution,
     FieldSlicePlane plane,
-    const postprocessing::GenerationControl &control) const
+    double offset_fraction,
+    const postprocessing::GenerationControl &control,
+    double resolution_scale) const
 {
     const postprocessing::SlicePlaneKind kind =
         plane == FieldSlicePlane::HorizontalXZ
             ? postprocessing::SlicePlaneKind::HorizontalXZ
             : postprocessing::SlicePlaneKind::VerticalYZ;
     const postprocessing::FieldSliceData data =
-        postprocessing::FieldVisualizationGenerator().generateSlice(solution, kind, control);
+        postprocessing::FieldVisualizationGenerator().generateSlice(solution,
+                                                                    kind,
+                                                                    offset_fraction,
+                                                                    resolution_scale,
+                                                                    control);
 
     FieldSlice slice;
     slice.plane = plane;
@@ -166,4 +190,40 @@ FieldSlice QtFieldGlyphAdapter::buildSlice(
         slice.cells.push_back(converted);
     }
     return slice;
+}
+
+QVector<FieldSlice> QtFieldGlyphAdapter::buildVolumeSlices(
+    const em::FieldSolution &solution,
+    FieldSlicePlane plane,
+    int slice_count,
+    const postprocessing::GenerationControl &control) const
+{
+    // Стопка полупрозрачных срезов вместо честного объёмного рендера: каждая
+    // плоскость грубее одиночного среза, иначе десяток плоскостей стоил бы
+    // десятикратной выборки поля и десятикратной памяти.
+    constexpr double volume_resolution_scale = 0.55;
+    const int bounded_count = std::clamp(slice_count, 3, 25);
+    QVector<FieldSlice> slices;
+    slices.reserve(bounded_count);
+    for (int index = 0; index < bounded_count; ++index) {
+        if (control.isCancellationRequested()) {
+            return {};
+        }
+        // Равномерно по поперечнику, крайние плоскости — на полшага от стенок.
+        const double offset_fraction =
+            -0.5 + (index + 0.5) / static_cast<double>(bounded_count);
+        FieldSlice slice = buildSlice(solution,
+                                      plane,
+                                      offset_fraction,
+                                      control,
+                                      volume_resolution_scale);
+        if (!slice.valid) {
+            continue;
+        }
+        slices.push_back(std::move(slice));
+    }
+    if (control.isCancellationRequested()) {
+        return {};
+    }
+    return slices;
 }

@@ -307,9 +307,31 @@ bool isDominantTe10(const em::FieldSolution &solution)
            mode.m == 1 && mode.n == 0;
 }
 
+constexpr double minimum_arrow_density = 0.25;
+constexpr double maximum_arrow_density = 4.0;
+
+// Множитель шага сетки посева вдоль одной оси при заданной концентрации
+// стрелок. Показатель 1/2 (грани) или 1/3 (объём) делит множитель между осями
+// так, что полное число стрелок растёт примерно пропорционально самой
+// концентрации, а не её квадрату или кубу.
+double arrowAxisFactor(double arrow_density, double axis_exponent)
+{
+    const double density =
+        std::clamp(arrow_density, minimum_arrow_density, maximum_arrow_density);
+    return std::pow(density, axis_exponent);
+}
+
+// Число узлов сетки посева вдоль одной оси. Не меньше двух: шаг сетки везде
+// делится на (count - 1).
+int scaledSeedCount(int base_count, double axis_factor)
+{
+    return std::max(2, static_cast<int>(std::lround(base_count * axis_factor)));
+}
+
 void appendTe10ElectricFluxArrows(std::vector<VisualizationPrimitive> &primitives,
                                   const em::FieldSolution &solution,
                                   double phase_rad,
+                                  double arrow_density,
                                   const GenerationControl &control)
 {
     const em::WaveguideGeometry &geometry = solution.request.model.waveguide;
@@ -332,8 +354,11 @@ void appendTe10ElectricFluxArrows(std::vector<VisualizationPrimitive> &primitive
         return;
     }
 
-    constexpr int maximum_arrows_per_slice = 13;
-    constexpr int z_count = 11;
+    // Сетка посева двумерная (x поперёк, z вдоль), поэтому концентрация делится
+    // между осями как корень.
+    const double axis_factor = arrowAxisFactor(arrow_density, 0.5);
+    const int maximum_arrows_per_slice = scaledSeedCount(13, axis_factor);
+    const int z_count = scaledSeedCount(11, axis_factor);
     const double maximum_arrow_length_m = 0.94 * geometry.inner_height_m;
     const em::Complex phase = std::polar(1.0, phase_rad);
 
@@ -385,6 +410,62 @@ void appendTe10ElectricFluxArrows(std::vector<VisualizationPrimitive> &primitive
             primitives.push_back(std::move(primitive));
         }
     }
+}
+
+em::ComplexVec3 quantityPhasor(const em::FieldPhasor &field, FieldQuantity quantity);
+
+// Records how the field oscillates along a line that has already been traced.
+// Retracing every frame is out of the question - one trace costs thousands of
+// field evaluations - but the shape of a line does not have to change for the
+// picture to live: the line follows the field, so the complex component along
+// its tangent tells when each piece of it peaks and when it reverses.
+// Amplitudes are scaled to this line's own peak, so every line breathes
+// visibly; how strong the line is compared with its neighbours is already
+// carried by normalized_magnitude.
+void fillLineAnimation(const em::FieldSolution &solution,
+                       FieldQuantity quantity,
+                       VisualizationPrimitive &primitive,
+                       const GenerationControl &control)
+{
+    const std::size_t count = primitive.points_m.size();
+    if (count < 2 || !solution.field) {
+        return;
+    }
+    std::vector<double> phase_rad(count, 0.0);
+    std::vector<double> amplitude(count, 0.0);
+    double peak = 0.0;
+    for (std::size_t index = 0; index < count; ++index) {
+        if (control.isCancellationRequested()) {
+            return;
+        }
+        const em::Vec3 &point_m = primitive.points_m[index];
+        if (!solution.field->contains(point_m)) {
+            continue;
+        }
+        const em::Vec3 step = primitive.points_m[index + 1 < count ? index + 1 : index] -
+                              primitive.points_m[index > 0 ? index - 1 : index];
+        const double step_length = em::magnitude(step);
+        if (step_length < vector_tolerance) {
+            continue;
+        }
+        const em::Vec3 tangent = step / step_length;
+        const em::ComplexVec3 phasor =
+            quantityPhasor(solution.field->evaluate(point_m), quantity);
+        const em::Complex along = phasor.x * tangent.x + phasor.y * tangent.y +
+                                  phasor.z * tangent.z;
+        phase_rad[index] = std::arg(along);
+        amplitude[index] = std::abs(along);
+        peak = std::max(peak, amplitude[index]);
+    }
+    if (peak <= vector_tolerance) {
+        return;
+    }
+    for (double &value : amplitude) {
+        value /= peak;
+    }
+    primitive.vertex_phase_rad = std::move(phase_rad);
+    primitive.vertex_amplitude = std::move(amplitude);
+    primitive.animated = true;
 }
 
 void appendVolumeLines(std::vector<VisualizationPrimitive> &primitives,
@@ -455,6 +536,12 @@ void appendVolumeLines(std::vector<VisualizationPrimitive> &primitives,
                 primitive.kind = PrimitiveKind::Polyline;
                 primitive.points_m = std::move(points_m);
                 primitive.normalized_magnitude = std::min(1.0, normalized_magnitude);
+                // Poynting flux is a time average, so there is nothing for it to
+                // oscillate against; E and H lines get the running phase.
+                if (quantity == FieldQuantity::Electric ||
+                    quantity == FieldQuantity::Magnetic) {
+                    fillLineAnimation(solution, quantity, primitive, control);
+                }
                 primitives.push_back(std::move(primitive));
             }
         }
@@ -1034,6 +1121,7 @@ void appendWallElectricArrows(std::vector<VisualizationPrimitive> &primitives,
                               const em::FieldSolution &solution,
                               double phase_rad,
                               double maximum_electric,
+                              double arrow_density,
                               const GenerationControl &control)
 {
     if (maximum_electric <= vector_tolerance) {
@@ -1050,21 +1138,26 @@ void appendWallElectricArrows(std::vector<VisualizationPrimitive> &primitives,
         {em::WallSurface::Left, {1.0, 0.0, 0.0}, 0.5 * geometry.inner_height_m},
     }};
     const double half_length_m = 0.5 * geometry.length_m;
+    // При уплотнении сетки посева стрелка укорачивается тем же множителем, что
+    // и шаг сетки, — иначе соседние стрелки наезжают друг на друга.
+    const double axis_factor = arrowAxisFactor(arrow_density, 0.5);
     const double base_length_m = std::min(geometry.inner_width_m,
                                           geometry.inner_height_m) *
-                                 0.13;
+                                 0.13 / axis_factor;
     const double sample_offset_m = base_length_m * 0.12;
+    const int z_count = scaledSeedCount(9, axis_factor);
+    const int u_count = scaledSeedCount(6, axis_factor);
 
     for (const WallDefinition &wall : walls) {
         if (control.isCancellationRequested()) {
             return;
         }
-        for (int z_index = 0; z_index < 9; ++z_index) {
+        for (int z_index = 0; z_index < z_count; ++z_index) {
             const double z_m = -0.90 * half_length_m +
-                               z_index * 1.80 * half_length_m / 8.0;
-            for (int u_index = 0; u_index < 6; ++u_index) {
+                               z_index * 1.80 * half_length_m / (z_count - 1);
+            for (int u_index = 0; u_index < u_count; ++u_index) {
                 const double u_m = -0.86 * wall.half_u_m +
-                                   u_index * 1.72 * wall.half_u_m / 5.0;
+                                   u_index * 1.72 * wall.half_u_m / (u_count - 1);
                 if (isInsideSlot(solution, wall.wall, u_m, z_m)) {
                     continue;
                 }
@@ -1246,6 +1339,7 @@ void appendVolumeVectorArrows(std::vector<VisualizationPrimitive> &primitives,
                               const em::FieldSolution &solution,
                               FieldQuantity quantity,
                               double phase_rad,
+                              double arrow_density,
                               const GenerationControl &control)
 {
     const em::WaveguideGeometry &geometry = solution.request.model.waveguide;
@@ -1253,13 +1347,24 @@ void appendVolumeVectorArrows(std::vector<VisualizationPrimitive> &primitives,
     if (maximum_envelope <= vector_tolerance) {
         return;
     }
+    // An arrow must be shorter than the gap to its neighbour, otherwise the
+    // heads overrun the next seed and the field reads as a tangle rather than a
+    // direction map. On a 22.86 x 10.16 x 50 mm guide the seeds below sit about
+    // 1.6 mm apart across the width, so 0.13 of the smallest guide dimension
+    // (1.3 mm at full strength) keeps every arrow inside its own cell. The old
+    // 0.40 gave 4.1 mm arrows on a 2.4 mm pitch - longer than the spacing.
+    //
+    // Density is a count multiplier over a three dimensional grid, so each axis
+    // takes its cube root; the arrow shrinks by the same factor so a denser
+    // field stays as readable as a sparse one.
+    const double axis_scale = arrowAxisFactor(arrow_density, 1.0 / 3.0);
     const double base_length_m = std::min({geometry.inner_width_m,
                                           geometry.inner_height_m,
                                           geometry.length_m}) *
-                                 0.40;
-    constexpr int x_count = 9;
-    constexpr int y_count = 3;
-    constexpr int z_count = 13;
+                                 0.13 / axis_scale;
+    const int x_count = scaledSeedCount(15, axis_scale);
+    const int y_count = scaledSeedCount(5, axis_scale);
+    const int z_count = scaledSeedCount(25, axis_scale);
     for (int z_index = 0; z_index < z_count; ++z_index) {
         if (control.isCancellationRequested()) {
             return;
@@ -1347,6 +1452,7 @@ em::Vec3 rotateVector(const em::Vec3 &rotation_rad, const em::Vec3 &vector)
 void appendWallCurrentArrows(std::vector<VisualizationPrimitive> &primitives,
                              const em::FieldSolution &solution,
                              double phase_rad,
+                             double arrow_density,
                              const GenerationControl &control)
 {
     const em::WaveguideGeometry &geometry = solution.request.model.waveguide;
@@ -1363,10 +1469,14 @@ void appendWallCurrentArrows(std::vector<VisualizationPrimitive> &primitives,
     const double inside_offset_m =
         std::max(1.0e-9,
                  std::min(geometry.inner_width_m, geometry.inner_height_m) * 1.0e-6);
+    // Сетка посева на стенке двумерная, поэтому концентрация делится между
+    // осями как корень; длина стрелки сжимается тем же множителем, чтобы при
+    // уплотнении соседние стрелки не сливались.
+    const double axis_factor = arrowAxisFactor(arrow_density, 0.5);
     const double arrow_base_m =
-        std::min(geometry.inner_width_m, geometry.inner_height_m) * 0.34;
-    constexpr int u_count = 5;
-    constexpr int z_count = 9;
+        std::min(geometry.inner_width_m, geometry.inner_height_m) * 0.34 / axis_factor;
+    const int u_count = scaledSeedCount(5, axis_factor);
+    const int z_count = scaledSeedCount(9, axis_factor);
 
     for (const WallDefinition &wall : walls) {
         if (control.isCancellationRequested()) {
@@ -1453,17 +1563,21 @@ void appendWallCurrentArrows(std::vector<VisualizationPrimitive> &primitives,
 void appendPlateCurrentArrows(std::vector<VisualizationPrimitive> &primitives,
                               const em::FieldSolution &solution,
                               double phase_rad,
+                              double arrow_density,
                               const GenerationControl &control)
 {
     const em::WaveguideGeometry &geometry = solution.request.model.waveguide;
     const double offset_m =
         std::max(1.0e-9,
                  std::min(geometry.inner_width_m, geometry.inner_height_m) * 1.0e-6);
+    // Грань пластины — та же двумерная сетка, что и стенка: корень из
+    // концентрации на каждую ось и укороченная в то же число раз стрелка.
+    const double axis_factor = arrowAxisFactor(arrow_density, 0.5);
     const double arrow_base_m =
-        std::min(geometry.inner_width_m, geometry.inner_height_m) * 0.10;
+        std::min(geometry.inner_width_m, geometry.inner_height_m) * 0.10 / axis_factor;
     const em::Vec3 unit_axis[3] = {{1.0, 0.0, 0.0}, {0.0, 1.0, 0.0}, {0.0, 0.0, 1.0}};
-    constexpr int samples_u = 5;
-    constexpr int samples_v = 5;
+    const int samples_u = scaledSeedCount(5, axis_factor);
+    const int samples_v = scaledSeedCount(5, axis_factor);
 
     struct FaceHit
     {
@@ -1583,6 +1697,7 @@ std::vector<VisualizationPrimitive> FieldVisualizationGenerator::generate(
             appendTe10ElectricFluxArrows(primitives,
                                          solution,
                                          settings.phase_rad,
+                                         settings.arrow_density,
                                          control);
         } else {
             appendVolumeLines(primitives,
@@ -1602,6 +1717,7 @@ std::vector<VisualizationPrimitive> FieldVisualizationGenerator::generate(
                                                             FieldQuantity::Electric,
                                                             settings.phase_rad,
                                                             control),
+                                     settings.arrow_density,
                                      control);
         }
         if (control.isCancellationRequested()) {
@@ -1614,6 +1730,7 @@ std::vector<VisualizationPrimitive> FieldVisualizationGenerator::generate(
                                      solution,
                                      FieldQuantity::Electric,
                                      settings.phase_rad,
+                                     settings.arrow_density,
                                      control);
             if (control.isCancellationRequested()) {
                 return {};
@@ -1636,6 +1753,7 @@ std::vector<VisualizationPrimitive> FieldVisualizationGenerator::generate(
                                  solution,
                                  FieldQuantity::Magnetic,
                                  settings.phase_rad,
+                                 settings.arrow_density,
                                  control);
         if (control.isCancellationRequested()) {
             return {};
@@ -1646,11 +1764,19 @@ std::vector<VisualizationPrimitive> FieldVisualizationGenerator::generate(
         if (control.isCancellationRequested()) {
             return {};
         }
-        appendPlateCurrentArrows(primitives, solution, settings.phase_rad, control);
+        appendPlateCurrentArrows(primitives,
+                                 solution,
+                                 settings.phase_rad,
+                                 settings.arrow_density,
+                                 control);
         if (control.isCancellationRequested()) {
             return {};
         }
-        appendWallCurrentArrows(primitives, solution, settings.phase_rad, control);
+        appendWallCurrentArrows(primitives,
+                                solution,
+                                settings.phase_rad,
+                                settings.arrow_density,
+                                control);
         if (control.isCancellationRequested()) {
             return {};
         }
@@ -1667,6 +1793,8 @@ std::vector<VisualizationPrimitive> FieldVisualizationGenerator::generate(
 FieldSliceData FieldVisualizationGenerator::generateSlice(
     const em::FieldSolution &solution,
     SlicePlaneKind plane,
+    double offset_fraction,
+    double resolution_scale,
     const GenerationControl &control) const
 {
     FieldSliceData slice;
@@ -1681,16 +1809,29 @@ FieldSliceData FieldVisualizationGenerator::generateSlice(
     const em::Vec3 v_axis{0.0, 0.0, 1.0};       // the slice always spans z
     const double v_span_m = geometry.length_m;
     em::Vec3 u_axis;
+    em::Vec3 normal_axis;
     double u_span_m = 0.0;
+    double normal_span_m = 0.0;
     if (plane == SlicePlaneKind::HorizontalXZ) {
         u_axis = {1.0, 0.0, 0.0};
+        normal_axis = {0.0, 1.0, 0.0};
         u_span_m = geometry.inner_width_m;
+        normal_span_m = geometry.inner_height_m;
     } else {
         u_axis = {0.0, 1.0, 0.0};
+        normal_axis = {1.0, 0.0, 0.0};
         u_span_m = geometry.inner_height_m;
+        normal_span_m = geometry.inner_width_m;
     }
+    // На самой стенке тангенциальное E нулевое, и срез вырождается в чёрный
+    // прямоугольник; поэтому крайнее положение остаётся чуть внутри полости.
+    const double clamped_offset_fraction = std::clamp(offset_fraction, -0.49, 0.49);
+    const em::Vec3 offset_vector_m =
+        normal_axis * (clamped_offset_fraction * normal_span_m);
 
-    const int v_count = 220;
+    const int v_count = std::max(
+        24,
+        static_cast<int>(std::lround(220 * std::clamp(resolution_scale, 0.2, 1.0))));
     const int u_count = std::clamp(
         static_cast<int>(std::round(v_count * u_span_m / std::max(1.0e-9, v_span_m))),
         24,
@@ -1721,7 +1862,7 @@ FieldSliceData FieldVisualizationGenerator::generateSlice(
         const int u_index = index % u_count;
         const double v_m = -0.5 * v_span_m + (v_index + 0.5) * dv_m;
         const double u_m = -0.5 * u_span_m + (u_index + 0.5) * du_m;
-        const em::Vec3 point_m = u_axis * u_m + v_axis * v_m;
+        const em::Vec3 point_m = u_axis * u_m + v_axis * v_m + offset_vector_m;
 
         SliceSampleCell cell;
         cell.center_m = point_m;

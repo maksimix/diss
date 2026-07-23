@@ -402,7 +402,8 @@ em::SimulationRequest buildRequest(const WaveguideParameters &parameters,
 WaveguideCalculationResult WaveguideCalculator::calculate(
     const WaveguideParameters &parameters,
     const std::function<bool()> &cancellation_requested,
-    const std::function<void(const QString &)> &progress_reporter) const
+    const std::function<void(const QString &)> &progress_reporter,
+    double arrow_density) const
 {
     WaveguideCalculationResult result;
     result.parameters = parameters;
@@ -550,8 +551,10 @@ WaveguideCalculationResult WaveguideCalculator::calculate(
     report(QStringLiteral("Построение линий и стрелок поля..."));
     postprocessing::GenerationControl generation_control;
     generation_control.cancellation_requested = cancellation_requested;
+    postprocessing::FieldVisualizationSettings glyph_settings;
+    glyph_settings.arrow_density = arrow_density;
     const QtFieldGlyphAdapter adapter;
-    result.field_glyphs = adapter.build(*field_solution, generation_control);
+    result.field_glyphs = adapter.build(*field_solution, glyph_settings, generation_control);
     if (cancelled()) {
         result.cancelled = true;
         result.valid = false;
@@ -561,10 +564,14 @@ WaveguideCalculationResult WaveguideCalculator::calculate(
     }
 
     report(QStringLiteral("Построение заливки |E| на срезах..."));
-    result.horizontal_slice =
-        adapter.buildSlice(*field_solution, FieldSlicePlane::HorizontalXZ, generation_control);
-    result.vertical_slice =
-        adapter.buildSlice(*field_solution, FieldSlicePlane::VerticalYZ, generation_control);
+    result.horizontal_slice = adapter.buildSlice(*field_solution,
+                                                 FieldSlicePlane::HorizontalXZ,
+                                                 0.0,
+                                                 generation_control);
+    result.vertical_slice = adapter.buildSlice(*field_solution,
+                                               FieldSlicePlane::VerticalYZ,
+                                               0.0,
+                                               generation_control);
     if (cancelled()) {
         result.cancelled = true;
         result.valid = false;

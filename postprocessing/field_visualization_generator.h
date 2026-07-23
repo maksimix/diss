@@ -36,6 +36,16 @@ struct VisualizationPrimitive
     em::ComplexVec3 phasor;          // complex field vector at the anchor
     double reference_magnitude = 0.0;  // global max |F| for this quantity
     double arrow_length_m = 0.0;       // full arrow length at |instantaneous| == reference
+
+    // Optional payload for an animated field line, one entry per point of
+    // points_m. A traced line cannot be retraced every frame, but the field
+    // along it still oscillates: the line is tangent to the field by
+    // construction, so the complex component along the tangent carries the
+    // whole story. Its phase says when that piece of the line peaks and its
+    // magnitude how strongly, so a bright band travels along the line instead
+    // of the picture standing still.
+    std::vector<double> vertex_phase_rad;
+    std::vector<double> vertex_amplitude;   // |component| / max along this line
 };
 
 enum class SlicePlaneKind
@@ -69,6 +79,13 @@ struct FieldVisualizationSettings
     bool generate_magnetic = true;
     bool generate_surface_current = true;
     bool generate_poynting = true;
+    // Концентрация стрелок E, H и J (потока TE10, пристеночных, объёмных и
+    // токов на стенках и пластинах): во сколько раз больше или меньше стрелок
+    // строится по сравнению с обычной плотностью. Значение зажимается в
+    // [0.25, 4.0]; длина стрелки уменьшается во столько же раз, во сколько
+    // сгущается её сетка посева, иначе соседние стрелки налезают друг на
+    // друга. Линии поля и стрелки Пойнтинга не масштабируются.
+    double arrow_density = 1.0;
 };
 
 struct GenerationControl
@@ -91,9 +108,17 @@ public:
 
     // Samples |E| on a cut plane through the guide and returns a filled grid of
     // cells with the complex field retained for phase animation.
+    //
+    // offset_fraction сдвигает плоскость вдоль её нормали: доля поперечного
+    // размера (высоты для горизонтального среза, ширины для вертикального) в
+    // пределах [-0.5, 0.5]; края зажимаются чуть внутрь, чтобы срез не лёг на
+    // стенку. resolution_scale < 1 даёт более грубую сетку — так стопка срезов
+    // объёмной заливки не раздувает память и время выборки.
     FieldSliceData generateSlice(
         const em::FieldSolution &solution,
         SlicePlaneKind plane = SlicePlaneKind::HorizontalXZ,
+        double offset_fraction = 0.0,
+        double resolution_scale = 1.0,
         const GenerationControl &control = {}) const;
 };
 }

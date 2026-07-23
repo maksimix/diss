@@ -79,6 +79,51 @@ void drawChevron(QPainter &painter, bool up)
     painter.drawPolyline(QPolygonF({QPointF(8, bottom), QPointF(16, top), QPointF(24, bottom)}));
 }
 
+// Изометрический кубик для значков дерева модели: origin — левый верхний угол
+// передней грани, size — её сторона.
+void drawModelCube(QPainter &painter, const QPointF &origin, double size, const QColor &face)
+{
+    const double shift_x = 0.55 * size;
+    const double shift_y = 0.32 * size;
+    const QRectF front(origin.x(), origin.y(), size, size);
+    const QPolygonF top({front.topLeft(),
+                         front.topLeft() + QPointF(shift_x, -shift_y),
+                         front.topRight() + QPointF(shift_x, -shift_y),
+                         front.topRight()});
+    const QPolygonF side({front.topRight(),
+                          front.topRight() + QPointF(shift_x, -shift_y),
+                          front.bottomRight() + QPointF(shift_x, -shift_y),
+                          front.bottomRight()});
+    painter.setPen(QPen(QColor(70, 90, 110), 1.2));
+    painter.setBrush(face.lighter(118));
+    painter.drawPolygon(top);
+    painter.setBrush(face.darker(112));
+    painter.drawPolygon(side);
+    painter.setBrush(face);
+    painter.drawRect(front);
+}
+
+// Период синусоиды слева направо; средняя линия mid_y, размах amplitude.
+void drawSineWave(QPainter &painter,
+                  double x0,
+                  double x1,
+                  double mid_y,
+                  double amplitude,
+                  const QColor &color,
+                  double width)
+{
+    painter.setPen(QPen(color, width, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+    painter.setBrush(Qt::NoBrush);
+    QPolygonF wave;
+    constexpr int segment_count = 24;
+    for (int index = 0; index <= segment_count; ++index) {
+        const double t = static_cast<double>(index) / segment_count;
+        wave << QPointF(x0 + (x1 - x0) * t,
+                        mid_y - amplitude * std::sin(2.0 * pi * t));
+    }
+    painter.drawPolyline(wave);
+}
+
 void paintRibbonIcon(QPainter &painter, RibbonIcon icon)
 {
     switch (icon) {
@@ -266,6 +311,32 @@ void paintRibbonIcon(QPainter &painter, RibbonIcon icon)
         break;
     case RibbonIcon::Expand:
         drawChevron(painter, false);
+        break;
+    case RibbonIcon::ComponentGroup:
+        // Сборка: задний кубик светлее и меньше, передний — основной.
+        drawModelCube(painter, QPointF(13, 11), 10, QColor(196, 214, 230));
+        drawModelCube(painter, QPointF(4, 16), 11, QColor(150, 185, 215));
+        break;
+    case RibbonIcon::Component:
+        drawModelCube(painter, QPointF(6, 12), 14, QColor(150, 185, 215));
+        break;
+    case RibbonIcon::SignalGroup:
+        // Оси и две синусоиды: раздел сигналов возбуждения.
+        painter.setPen(QPen(QColor(120, 130, 140), 1.4));
+        painter.drawLine(QPointF(4, 27), QPointF(29, 27));
+        painter.drawLine(QPointF(4, 27), QPointF(4, 4));
+        drawSineWave(painter, 6.0, 29.0, 15.0, 9.0, QColor(200, 120, 40), 2.0);
+        drawSineWave(painter, 6.0, 29.0, 15.0, 4.5, QColor(90, 150, 210), 1.6);
+        break;
+    case RibbonIcon::Signal:
+        // Одиночный сигнал: нулевая линия, период синусоиды и метка запуска.
+        painter.setPen(QPen(QColor(160, 168, 176), 1.0));
+        painter.drawLine(QPointF(3, 14), QPointF(29, 14));
+        drawSineWave(painter, 3.0, 26.0, 14.0, 8.5, QColor(200, 120, 40), 2.2);
+        painter.setPen(QPen(QColor(40, 110, 50), 1.0));
+        painter.setBrush(QColor(90, 190, 100));
+        painter.drawPolygon(
+            QPolygonF({QPointF(22, 21), QPointF(29, 25), QPointF(22, 29)}));
         break;
     }
 }

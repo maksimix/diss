@@ -57,6 +57,33 @@ WaveguideOpenGLWidget::WaveguideOpenGLWidget(QWidget *parent)
 void WaveguideOpenGLWidget::setCalculationResult(const WaveguideCalculationResult &result)
 {
     result_ = result;
+    // Стопка объёмной заливки построена по прежнему решению; до перестройки
+    // показывать её поверх нового поля нельзя.
+    volume_slices_.clear();
+    update();
+}
+
+void WaveguideOpenGLWidget::setFieldGlyphs(const QVector<FieldGlyph> &glyphs)
+{
+    // Смена концентрации стрелок перестраивает только глифы: срезы, геометрия
+    // и числа результата остаются от того же расчёта.
+    result_.field_glyphs = glyphs;
+    update();
+}
+
+void WaveguideOpenGLWidget::setSlice(FieldSlicePlane plane, const FieldSlice &slice)
+{
+    if (plane == FieldSlicePlane::HorizontalXZ) {
+        result_.horizontal_slice = slice;
+    } else {
+        result_.vertical_slice = slice;
+    }
+    update();
+}
+
+void WaveguideOpenGLWidget::setVolumeSlices(const QVector<FieldSlice> &slices)
+{
+    volume_slices_ = slices;
     update();
 }
 
@@ -95,9 +122,9 @@ void WaveguideOpenGLWidget::setFieldDisplayMode(FieldDisplayMode mode)
     update();
 }
 
-void WaveguideOpenGLWidget::setSliceVisible(bool visible)
+void WaveguideOpenGLWidget::setFieldFillMode(FieldFillMode mode)
 {
-    show_slice_ = visible;
+    fill_mode_ = mode;
     update();
 }
 
@@ -174,8 +201,10 @@ void WaveguideOpenGLWidget::paintGL()
     drawAxes();
     if (result_.valid) {
         drawWaveguide();
-        if (show_slice_) {
+        if (fill_mode_ == FieldFillMode::Slice) {
             drawFieldSlice();
+        } else if (fill_mode_ == FieldFillMode::Volume) {
+            drawVolumeSlices();
         }
         drawPecPlates();
         drawFields();
@@ -1039,8 +1068,12 @@ void WaveguideOpenGLWidget::drawFields() const
             continue;
         }
 
+        // Heads every few millimetres of arc length: small enough not to bury
+        // the line they sit on, frequent enough to read the direction anywhere
+        // along a long loop rather than only at its two thirds.
+        const double arrow_spacing_mm = std::max(1.8, modelRadiusMm() * 0.055);
         if (glyph.type == FieldGlyphType::ElectricLine && glyph.points.size() > 3) {
-            drawPolylineWithArrow(glyph.points, glyph.color, 0.42, 1, 1.05f);
+            drawPolylineWithArrow(glyph, 0.30, arrow_spacing_mm, 1.05f);
         } else if ((glyph.type == FieldGlyphType::ElectricArrow ||
                     glyph.type == FieldGlyphType::MagneticArrow ||
                     glyph.type == FieldGlyphType::SurfaceCurrentArrow ||
@@ -1048,9 +1081,9 @@ void WaveguideOpenGLWidget::drawFields() const
             glyph.points.size() >= 2) {
             drawArrow(glyph);
         } else if (glyph.type == FieldGlyphType::MagneticLine) {
-            drawPolylineWithArrow(glyph.points, glyph.color, 0.64, 2, 1.45f);
+            drawPolylineWithArrow(glyph, 0.34, arrow_spacing_mm, 1.25f);
         } else if (glyph.type == FieldGlyphType::SurfaceCurrentLine) {
-            drawPolylineWithArrow(glyph.points, glyph.color, 0.42, 2, 1.1f);
+            drawPolylineWithArrow(glyph, 0.30, arrow_spacing_mm, 1.1f);
         }
     }
 
@@ -1134,17 +1167,13 @@ void WaveguideOpenGLWidget::drawPlateStub(const PecPlateParameters &plate,
     drawBoxEdges(x0, x1, y0, y1, -half_z, half_z, edge_color);
 }
 
-void WaveguideOpenGLWidget::drawFieldSlice() const
+void WaveguideOpenGLWidget::drawSliceCells(const FieldSlice &slice,
+                                           double maximum_value,
+                                           double alpha) const
 {
-    const FieldSlice &slice = slice_plane_ == FieldSlicePlane::HorizontalXZ
-                                  ? result_.horizontal_slice
-                                  : result_.vertical_slice;
-    if (!slice.valid || slice.cells.isEmpty() || slice.maximum_value <= 0.0) {
+    if (!slice.valid || slice.cells.isEmpty() || maximum_value <= 0.0) {
         return;
     }
-
-    const GLboolean depth_was_enabled = ::glIsEnabled(GL_DEPTH_TEST);
-    ::glDisable(GL_DEPTH_TEST);
 
     const float cos_phase = static_cast<float>(std::cos(animation_phase_));
     const float sin_phase = static_cast<float>(std::sin(animation_phase_));
@@ -1160,9 +1189,9 @@ void WaveguideOpenGLWidget::drawFieldSlice() const
         if (value <= 0.0) {
             continue;   // metal or unsampled cell -> leave a clean gap
         }
-        const double t = fieldHeatNormalize(value, slice.maximum_value);
+        const double t = fieldHeatNormalize(value, maximum_value);
         const QColor color = fieldHeatColor(t);
-        glColor4d(color.redF(), color.greenF(), color.blueF(), 0.82);
+        glColor4d(color.redF(), color.greenF(), color.blueF(), alpha);
         const QVector3D &c = cell.center;
         const QVector3D &u = cell.u_half;
         const QVector3D &v = cell.v_half;
@@ -1176,7 +1205,68 @@ void WaveguideOpenGLWidget::drawFieldSlice() const
         glVertex3f(p3.x(), p3.y(), p3.z());
     }
     glEnd();
+}
 
+void WaveguideOpenGLWidget::drawFieldSlice() const
+{
+    const FieldSlice &slice = slice_plane_ == FieldSlicePlane::HorizontalXZ
+                                  ? result_.horizontal_slice
+                                  : result_.vertical_slice;
+    const GLboolean depth_was_enabled = ::glIsEnabled(GL_DEPTH_TEST);
+    ::glDisable(GL_DEPTH_TEST);
+    drawSliceCells(slice, slice.maximum_value, 0.82);
+    if (depth_was_enabled) {
+        ::glEnable(GL_DEPTH_TEST);
+    }
+}
+
+void WaveguideOpenGLWidget::drawVolumeSlices() const
+{
+    if (volume_slices_.isEmpty()) {
+        return;
+    }
+
+    // Общий масштаб цвета на всю стопку: одна и та же напряжённость должна
+    // давать один и тот же цвет на любой глубине.
+    double maximum_value = 0.0;
+    for (const FieldSlice &slice : volume_slices_) {
+        maximum_value = std::max(maximum_value, slice.maximum_value);
+    }
+    if (maximum_value <= 0.0) {
+        return;
+    }
+
+    // Полупрозрачные плоскости смешиваются правильно только от дальней к
+    // ближней, поэтому стопка сортируется по глубине точки-представителя
+    // каждого среза в координатах камеры.
+    const QMatrix4x4 model_view = modelViewMatrix();
+    QVector<int> order;
+    QVector<double> eye_depth;
+    order.reserve(volume_slices_.size());
+    eye_depth.reserve(volume_slices_.size());
+    for (int index = 0; index < volume_slices_.size(); ++index) {
+        const FieldSlice &slice = volume_slices_[index];
+        const QVector3D representative =
+            slice.cells.isEmpty()
+                ? QVector3D()
+                : slice.cells[slice.cells.size() / 2].center;
+        order.push_back(index);
+        eye_depth.push_back(
+            static_cast<double>(model_view.map(representative).z()));
+    }
+    std::sort(order.begin(), order.end(), [&eye_depth](int left, int right) {
+        return eye_depth[left] < eye_depth[right];   // дальние (z меньше) первыми
+    });
+
+    const GLboolean depth_was_enabled = ::glIsEnabled(GL_DEPTH_TEST);
+    ::glDisable(GL_DEPTH_TEST);
+    // Прозрачность подобрана так, чтобы сквозь стопку читались и дальние
+    // плоскости, и стрелки поля поверх неё.
+    const double alpha =
+        std::clamp(2.6 / std::max(1, static_cast<int>(volume_slices_.size())), 0.10, 0.45);
+    for (const int index : order) {
+        drawSliceCells(volume_slices_[index], maximum_value, alpha);
+    }
     if (depth_was_enabled) {
         ::glEnable(GL_DEPTH_TEST);
     }
@@ -1207,40 +1297,83 @@ void WaveguideOpenGLWidget::drawArrowHead(const QVector3D &position,
     glEnd();
 }
 
-void WaveguideOpenGLWidget::drawPolylineWithArrow(const QVector<QVector3D> &points,
-                                                  const QColor &color,
+void WaveguideOpenGLWidget::drawPolylineWithArrow(const FieldGlyph &glyph,
                                                   double arrow_size,
-                                                  int arrow_count,
+                                                  double arrow_spacing_mm,
                                                   float line_width) const
 {
-    if (points.size() < 2) {
+    const QVector<QVector3D> &points = glyph.points;
+    const int point_count = static_cast<int>(points.size());
+    if (point_count < 2) {
         return;
     }
 
-    setColor(color, 0.88);
+    const bool animated = animation_enabled_ && glyph.animated &&
+                          glyph.vertex_phase_rad.size() == points.size() &&
+                          glyph.vertex_amplitude.size() == points.size();
+    // Instantaneous field along the line, signed: positive where it points the
+    // way the line was traced, negative half a period later.
+    const auto valueAt = [this, &glyph](int index) {
+        return static_cast<double>(glyph.vertex_amplitude[index]) *
+               std::cos(static_cast<double>(glyph.vertex_phase_rad[index]) +
+                        animation_phase_);
+    };
+
     ::glLineWidth(line_width);
     glBegin(GL_LINE_STRIP);
-    for (const QVector3D &point : points) {
-        glVertex3f(point.x(), point.y(), point.z());
+    for (int index = 0; index < point_count; ++index) {
+        // Brightness follows the field, so the crest travels along the line and
+        // the picture stops looking like a frozen drawing.
+        setColor(glyph.color,
+                 animated ? 0.10 + 0.82 * std::abs(valueAt(index)) : 0.88);
+        glVertex3f(points[index].x(), points[index].y(), points[index].z());
     }
     glEnd();
 
-    const int point_count = static_cast<int>(points.size());
-    const int bounded_arrow_count = std::clamp(arrow_count, 1, 3);
-    for (int arrow_number = 0; arrow_number < bounded_arrow_count; ++arrow_number) {
-        const double ratio = static_cast<double>(arrow_number + 1) /
-                             static_cast<double>(bounded_arrow_count + 1);
-        const int arrow_index = std::clamp(static_cast<int>(std::round(ratio * (point_count - 1))),
-                                           1,
-                                           point_count - 1);
-        const QVector3D direction = points[arrow_index] - points[arrow_index - 1];
-        QVector3D plane_normal = QVector3D::crossProduct(points[1] - points[0],
-                                                         points[std::min(point_count - 1, 3)] - points[0]);
-        if (plane_normal.lengthSquared() < 1.0e-8f) {
-            plane_normal = QVector3D(0.0f, 1.0f, 0.0f);
+    const double spacing_mm = std::max(0.35, arrow_spacing_mm);
+    double distance_to_next_mm = 0.5 * spacing_mm;
+    for (int index = 1; index < point_count; ++index) {
+        const QVector3D segment = points[index] - points[index - 1];
+        distance_to_next_mm -= static_cast<double>(segment.length());
+        if (distance_to_next_mm > 0.0) {
+            continue;
         }
-        const QVector3D side_hint = QVector3D::crossProduct(plane_normal, direction);
-        drawArrowHead(points[arrow_index], direction, side_hint, color, arrow_size);
+        distance_to_next_mm += spacing_mm;
+        if (segment.lengthSquared() < 1.0e-12f) {
+            continue;
+        }
+
+        double intensity = 1.0;
+        QVector3D direction = segment;
+        if (animated) {
+            const double value = valueAt(index);
+            intensity = std::abs(value);
+            if (intensity < 0.06) {
+                continue;   // this stretch is at a temporal zero right now
+            }
+            if (value < 0.0) {
+                direction = -direction;   // the field has reversed, so does the head
+            }
+        }
+
+        // The plane of the head comes from the local bend of the line. Taking it
+        // once from the first points, as this used to, left every head on a
+        // curved loop tilted out of the curve it belongs to.
+        const QVector3D previous_segment = points[index - 1] -
+                                           points[std::max(0, index - 2)];
+        QVector3D plane_normal = QVector3D::crossProduct(previous_segment, segment);
+        if (plane_normal.lengthSquared() < 1.0e-12f) {
+            plane_normal = std::abs(QVector3D::dotProduct(direction.normalized(),
+                                                          QVector3D(0.0f, 1.0f, 0.0f))) < 0.86f
+                               ? QVector3D(0.0f, 1.0f, 0.0f)
+                               : QVector3D(1.0f, 0.0f, 0.0f);
+        }
+        QVector3D side_hint = QVector3D::crossProduct(plane_normal, direction);
+        if (side_hint.lengthSquared() < 1.0e-12f) {
+            side_hint = QVector3D(0.0f, 0.0f, 1.0f);
+        }
+        drawArrowHead(points[index], direction, side_hint, glyph.color, arrow_size,
+                      animated ? 0.30 + 0.66 * intensity : 0.96);
     }
 }
 
