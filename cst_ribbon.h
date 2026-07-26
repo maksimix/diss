@@ -48,7 +48,12 @@ enum class RibbonIcon
     ComponentGroup,   // раздел Components — сборка из кубиков
     Component,        // одна деталь — кубик
     SignalGroup,      // раздел Excitation Signals — оси с синусоидой
-    Signal            // одиночный сигнал возбуждения
+    Signal,           // одиночный сигнал возбуждения
+    // Управление проектами: домашняя страница и файловые команды.
+    Home,             // вкладка «Старт» — домик
+    NewProject,       // новый проект — лист с плюсом
+    OpenProject,      // открыть проект — папка со стрелкой
+    CloseProject      // закрыть проект — лист с крестиком
 };
 
 // Рисунок задан в сетке 32x32 и масштабируется под запрошенный размер, поэтому
@@ -115,19 +120,45 @@ public:
 
     RibbonTab *addRibbonTab(const QString &title);
     void setCurrentTabIndex(int index);
-    // Имя открытой модели на документной вкладке под лентой.
     void setDocumentName(const QString &name);
     // Команда попадает в строку поиска (Alt+Q); группы ленты вызывают это сами
     // для каждой добавленной кнопки.
     void registerSearchAction(QAction *action);
 
+    // Документная строка под лентой: вкладка «Старт» (индекс 0), затем по одной
+    // вкладке на открытый проект и кнопка «+» для нового. Индекс проекта —
+    // 0-based, соответствует вкладке (индекс проекта + 1).
+    int addProjectTab(const QString &name);
+    void removeProjectTab(int project_index);
+    void setProjectTabName(int project_index, const QString &name);
+    // Полный путь в подсказке: два проекта могут называться одинаково, если
+    // открыты из разных папок.
+    void setProjectTabToolTip(int project_index, const QString &text);
+    // Выбор вкладки без сигналов: -1 — «Старт», иначе индекс проекта.
+    void setActiveProjectTab(int project_index);
+    int projectTabCount() const;
+
+signals:
+    // Пользователь выбрал вкладку «Старт».
+    void startPageRequested();
+    // Пользователь выбрал вкладку проекта.
+    void projectActivated(int project_index);
+    // Пользователь нажал крестик на вкладке проекта.
+    void projectCloseRequested(int project_index);
+    // Нажата кнопка «+».
+    void newProjectRequested();
+    // Нажата кнопка «?» в шапке ленты.
+    void helpRequested();
+
 private:
     void setRibbonCollapsed(bool collapsed);
     void activateSearchResult(const QString &text);
+    void handleDocumentTabChanged(int index);
 
     QTabBar *tab_bar_ = nullptr;
     QStackedWidget *pages_ = nullptr;
     QTabBar *document_tab_bar_ = nullptr;
+    QToolButton *new_project_button_ = nullptr;
     QLineEdit *search_edit_ = nullptr;
     QStringListModel *search_model_ = nullptr;
     QToolButton *collapse_button_ = nullptr;

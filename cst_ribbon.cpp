@@ -19,6 +19,7 @@
 #include <QtWidgets/QToolButton>
 #include <QtWidgets/QVBoxLayout>
 
+#include <algorithm>
 #include <cmath>
 #include <utility>
 
@@ -298,9 +299,14 @@ void paintRibbonIcon(QPainter &painter, RibbonIcon icon)
         painter.drawLine(QPointF(20, 20), QPointF(27, 27));
         break;
     case RibbonIcon::Help: {
+        // Синий круг с белым знаком: значок один и тот же на синей шапке ленты и
+        // на белом поле кнопок, поэтому одноцветный «?» не годится.
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(QColor(0x1b, 0x5b, 0x96));
+        painter.drawEllipse(QRectF(2, 2, 28, 28));
         painter.setPen(header_text);
         QFont font = painter.font();
-        font.setPointSizeF(20.0);
+        font.setPointSizeF(17.0);
         font.setBold(true);
         painter.setFont(font);
         painter.drawText(QRectF(0, 0, 32, 32), Qt::AlignCenter, QStringLiteral("?"));
@@ -338,21 +344,102 @@ void paintRibbonIcon(QPainter &painter, RibbonIcon icon)
         painter.drawPolygon(
             QPolygonF({QPointF(22, 21), QPointF(29, 25), QPointF(22, 29)}));
         break;
+    case RibbonIcon::Home:
+        // Домик вкладки «Старт».
+        painter.setPen(QPen(QColor(70, 90, 110), 1.4));
+        painter.setBrush(QColor(150, 185, 215));
+        painter.drawPolygon(QPolygonF({QPointF(16, 5),
+                                       QPointF(27, 15),
+                                       QPointF(23, 15),
+                                       QPointF(23, 27),
+                                       QPointF(9, 27),
+                                       QPointF(9, 15),
+                                       QPointF(5, 15)}));
+        painter.setBrush(QColor(250, 250, 252));
+        painter.drawRect(QRectF(13.5, 18, 5, 9));
+        break;
+    case RibbonIcon::NewProject:
+        // Лист документа с зелёным плюсом.
+        painter.setPen(QPen(QColor(120, 130, 140), 1.3));
+        painter.setBrush(QColor(252, 252, 252));
+        painter.drawPolygon(QPolygonF({QPointF(7, 4),
+                                       QPointF(19, 4),
+                                       QPointF(25, 10),
+                                       QPointF(25, 28),
+                                       QPointF(7, 28)}));
+        painter.setPen(QPen(QColor(40, 150, 80), 2.4, Qt::SolidLine, Qt::RoundCap));
+        painter.drawLine(QPointF(16, 15), QPointF(16, 24));
+        painter.drawLine(QPointF(11, 19.5), QPointF(21, 19.5));
+        break;
+    case RibbonIcon::OpenProject:
+        // Открытая папка со стрелкой вверх (загрузка проекта).
+        drawFolder(painter);
+        painter.setPen(QPen(QColor(40, 110, 160), 2.2, Qt::SolidLine, Qt::RoundCap));
+        painter.drawLine(QPointF(16, 26), QPointF(16, 15));
+        painter.drawPolyline(
+            QPolygonF({QPointF(11, 20), QPointF(16, 15), QPointF(21, 20)}));
+        break;
+    case RibbonIcon::CloseProject:
+        // Лист документа с красным крестиком.
+        painter.setPen(QPen(QColor(120, 130, 140), 1.3));
+        painter.setBrush(QColor(252, 252, 252));
+        painter.drawPolygon(QPolygonF({QPointF(7, 4),
+                                       QPointF(19, 4),
+                                       QPointF(25, 10),
+                                       QPointF(25, 28),
+                                       QPointF(7, 28)}));
+        painter.setPen(QPen(QColor(190, 60, 60), 2.4, Qt::SolidLine, Qt::RoundCap));
+        painter.drawLine(QPointF(12, 15), QPointF(20, 24));
+        painter.drawLine(QPointF(20, 15), QPointF(12, 24));
+        break;
     }
 }
 
-QIcon closeCrossIcon()
+QIcon closeCrossIcon(int size = 12, const QColor &color = QColor(0x40, 0x40, 0x40))
 {
-    QPixmap pixmap(12, 12);
+    QPixmap pixmap(size, size);
     pixmap.fill(Qt::transparent);
     QPainter painter(&pixmap);
     painter.setRenderHint(QPainter::Antialiasing, true);
-    painter.setPen(QPen(QColor(0x40, 0x40, 0x40), 1.4));
-    painter.drawLine(QPointF(3, 3), QPointF(9, 9));
-    painter.drawLine(QPointF(9, 3), QPointF(3, 9));
+    painter.setPen(QPen(color, size / 8.0 + 0.6));
+    const double inset = size * 0.25;
+    painter.drawLine(QPointF(inset, inset), QPointF(size - inset, size - inset));
+    painter.drawLine(QPointF(size - inset, inset), QPointF(inset, size - inset));
     painter.end();
     return QIcon(pixmap);
 }
+
+// Крестик на вкладке проекта: серый, под курсором — красный, как в браузерах и
+// в CST. Стандартный close-button у QTabBar пришлось бы задавать картинкой из
+// ресурсов, которых у проекта нет.
+class TabCloseButton : public QToolButton
+{
+public:
+    explicit TabCloseButton(QWidget *parent = nullptr)
+        : QToolButton(parent)
+    {
+        setObjectName(QStringLiteral("cstTabCloseButton"));
+        setIcon(closeCrossIcon(11));
+        setIconSize(QSize(11, 11));
+        setFixedSize(16, 16);
+        setAutoRaise(true);
+        setCursor(Qt::ArrowCursor);
+        setToolTip(QStringLiteral("Закрыть проект"));
+    }
+
+protected:
+    void enterEvent(QEnterEvent *event) override
+    {
+        setIcon(closeCrossIcon(11, QColor(0xff, 0xff, 0xff)));
+        QToolButton::enterEvent(event);
+    }
+
+    void leaveEvent(QEvent *event) override
+    {
+        setIcon(closeCrossIcon(11));
+        QToolButton::leaveEvent(event);
+    }
+};
 
 // Перенос строки нужен только крупным кнопкам: в мелкой кнопке и в подсказке
 // подпись идёт одной строкой.
@@ -623,34 +710,44 @@ RibbonBar::RibbonBar(QWidget *parent)
     help_button->setIcon(ribbonIcon(RibbonIcon::Help, 12));
     help_button->setIconSize(QSize(12, 12));
     help_button->setAutoRaise(true);
-    help_button->setToolTip(QStringLiteral("Горячие клавиши и подсказки"));
+    help_button->setToolTip(QStringLiteral("О программе и горячие клавиши"));
     header_layout->addWidget(help_button, 0, Qt::AlignVCenter);
-    connect(help_button, &QToolButton::clicked, this, [this]() {
-        QMessageBox::information(
-            this,
-            QStringLiteral("Подсказка"),
-            QStringLiteral("F5 — запустить расчёт\n"
-                           "Ctrl+O / Ctrl+S — открыть и сохранить модель\n"
-                           "Alt+Q — строка поиска команд ленты\n\n"
-                           "Двойной щелчок по объекту в Navigation Tree открывает его "
-                           "свойства, стрелка справа от кнопки ленты — дополнительные "
-                           "команды."));
-    });
+    connect(help_button, &QToolButton::clicked, this, &RibbonBar::helpRequested);
 
     pages_ = new QStackedWidget(this);
     pages_->setObjectName(QStringLiteral("cstRibbonPages"));
 
-    // Вкладка открытой модели под лентой: в CST она показывает имя проекта.
-    document_tab_bar_ = new QTabBar(this);
+    // Документная строка под лентой: вкладка «Старт», вкладки открытых проектов
+    // и кнопка «+». В CST здесь показано имя одного проекта — тут это
+    // полноценные вкладки, между которыми можно переключаться.
+    QWidget *document_row = new QWidget(this);
+    document_row->setObjectName(QStringLiteral("cstDocumentRow"));
+    QHBoxLayout *document_layout = new QHBoxLayout(document_row);
+    document_layout->setContentsMargins(0, 0, 0, 0);
+    document_layout->setSpacing(0);
+
+    document_tab_bar_ = new QTabBar(document_row);
     document_tab_bar_->setObjectName(QStringLiteral("cstDocumentTabBar"));
     document_tab_bar_->setExpanding(false);
     document_tab_bar_->setDrawBase(false);
-    document_tab_bar_->setUsesScrollButtons(false);
-    document_tab_bar_->addTab(ribbonIcon(RibbonIcon::Project, 14), QString());
+    document_tab_bar_->setUsesScrollButtons(true);
+    document_tab_bar_->setElideMode(Qt::ElideRight);
+    // Крестики ставятся вручную (см. addProjectTab): у вкладки «Старт» его нет,
+    // а нарисованный кодом значок не требует файла ресурсов.
+    document_tab_bar_->addTab(ribbonIcon(RibbonIcon::Home, 14), QStringLiteral("Старт"));
+    document_layout->addWidget(document_tab_bar_, 0);
+
+    new_project_button_ = new QToolButton(document_row);
+    new_project_button_->setObjectName(QStringLiteral("cstNewProjectButton"));
+    new_project_button_->setText(QStringLiteral("+"));
+    new_project_button_->setToolTip(QStringLiteral("Новый проект (Ctrl+N)"));
+    new_project_button_->setAutoRaise(true);
+    document_layout->addWidget(new_project_button_, 0, Qt::AlignVCenter);
+    document_layout->addStretch(1);
 
     layout->addWidget(header);
     layout->addWidget(pages_);
-    layout->addWidget(document_tab_bar_);
+    layout->addWidget(document_row);
 
     connect(tab_bar_, &QTabBar::currentChanged, pages_, &QStackedWidget::setCurrentIndex);
     connect(collapse_button_, &QToolButton::clicked, this, [this]() {
@@ -662,7 +759,69 @@ RibbonBar::RibbonBar(QWidget *parent)
             setRibbonCollapsed(false);
         }
     });
+    connect(document_tab_bar_,
+            &QTabBar::currentChanged,
+            this,
+            &RibbonBar::handleDocumentTabChanged);
+    connect(new_project_button_, &QToolButton::clicked, this, &RibbonBar::newProjectRequested);
     setRibbonCollapsed(false);
+}
+
+void RibbonBar::handleDocumentTabChanged(int index)
+{
+    if (index <= 0) {
+        emit startPageRequested();
+    } else {
+        emit projectActivated(index - 1);
+    }
+}
+
+int RibbonBar::projectTabCount() const
+{
+    // Все вкладки, кроме постоянной «Старт».
+    return std::max(0, document_tab_bar_->count() - 1);
+}
+
+int RibbonBar::addProjectTab(const QString &name)
+{
+    const QSignalBlocker blocker(document_tab_bar_);
+    const int tab_index = document_tab_bar_->addTab(ribbonIcon(RibbonIcon::Project, 14), name);
+
+    // Индекс вкладки сдвигается при закрытии соседних, поэтому кнопка ищет свою
+    // вкладку по себе самой, а не помнит номер.
+    TabCloseButton *close_button = new TabCloseButton(document_tab_bar_);
+    document_tab_bar_->setTabButton(tab_index, QTabBar::RightSide, close_button);
+    connect(close_button, &QToolButton::clicked, this, [this, close_button]() {
+        for (int index = 1; index < document_tab_bar_->count(); ++index) {
+            if (document_tab_bar_->tabButton(index, QTabBar::RightSide) == close_button) {
+                emit projectCloseRequested(index - 1);
+                return;
+            }
+        }
+    });
+    return tab_index - 1;
+}
+
+void RibbonBar::removeProjectTab(int project_index)
+{
+    const QSignalBlocker blocker(document_tab_bar_);
+    document_tab_bar_->removeTab(project_index + 1);
+}
+
+void RibbonBar::setProjectTabName(int project_index, const QString &name)
+{
+    document_tab_bar_->setTabText(project_index + 1, name);
+}
+
+void RibbonBar::setProjectTabToolTip(int project_index, const QString &text)
+{
+    document_tab_bar_->setTabToolTip(project_index + 1, text);
+}
+
+void RibbonBar::setActiveProjectTab(int project_index)
+{
+    const QSignalBlocker blocker(document_tab_bar_);
+    document_tab_bar_->setCurrentIndex(project_index < 0 ? 0 : project_index + 1);
 }
 
 void RibbonBar::setRibbonCollapsed(bool collapsed)
