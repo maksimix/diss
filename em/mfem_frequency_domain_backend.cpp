@@ -651,6 +651,12 @@ Complex projectPortElectric(const IFieldEvaluator &field,
         for (int y_index = 0; y_index < y_samples; ++y_index) {
             const double y_m = -0.5 * geometry.inner_height_m +
                                (y_index + 0.5) * geometry.inner_height_m / y_samples;
+            // У круглого тракта сетка выборки строится по описанному квадрату,
+            // поэтому углы лежат вне полости: там поля нет, и в проекцию моды
+            // они внесли бы только шум.
+            if (!insideCrossSection(geometry, x_m, y_m)) {
+                continue;
+            }
             const ComplexVec3 value = field.evaluate({x_m, y_m, z_m}).electric_v_per_m;
             const ComplexVec3 reference =
                 mode.evaluate({x_m, y_m, -0.5 * geometry.length_m}).electric_v_per_m;
@@ -845,10 +851,26 @@ FieldSolution MfemFrequencyDomainBackend::solve(const SimulationRequest &request
                                      request.model.filling_material.relative_permeability;
     const double bulk_wavenumber = state->omega / speed_of_light_m_per_s *
                                    std::sqrt(std::max(0.0, std::real(material_product)));
-    const int m = request.excitation.automatic ? 1 : request.excitation.m;
-    const int n = request.excitation.automatic ? 0 : request.excitation.n;
-    const double cutoff_wavenumber = std::hypot(m * pi / waveguide.inner_width_m,
-                                                n * pi / waveguide.inner_height_m);
+    // Опорная мода порта: тот же пустой тракт, решённый замкнутыми формулами.
+    // Отсечка берётся из неё, а не считается здесь по прямоугольной формуле:
+    // формула m*pi/a, n*pi/b неверна для круглого сечения (там нули функций
+    // Бесселя) и не знает, какую именно моду выбрал пользователь.
+    SimulationRequest incident_request = request;
+    incident_request.model.slot_geometries.clear();
+    incident_request.model.pec_plates.clear();
+    incident_request.model.dielectric_blocks.clear();
+    incident_request.model.shapes.clear();
+    const FieldSolution incident = AnalyticWaveguideSolver().solve(incident_request);
+    if (!incident.success || !incident.field || !incident.has_selected_mode) {
+        solution.error_message = "Cannot construct the normalized incident port mode: " +
+                                 incident.error_message;
+        return solution;
+    }
+    solution.available_modes = incident.available_modes;
+    solution.has_selected_mode = incident.has_selected_mode;
+    solution.selected_mode = incident.selected_mode;
+
+    const double cutoff_wavenumber = incident.selected_mode.cutoff_wavenumber_per_m;
     if (!(bulk_wavenumber > cutoff_wavenumber)) {
         solution.error_message = "Selected port mode is below cutoff at the FEM frequency.";
         return solution;
@@ -904,20 +926,6 @@ FieldSolution MfemFrequencyDomainBackend::solve(const SimulationRequest &request
     form.AddBoundaryIntegrator(new mfem::VectorFEMassIntegrator(port_real),
                                new mfem::VectorFEMassIntegrator(port_imaginary),
                                port_marker);
-
-    SimulationRequest incident_request = request;
-    incident_request.model.slot_geometries.clear();
-    incident_request.model.pec_plates.clear();
-    incident_request.model.dielectric_blocks.clear();
-    const FieldSolution incident = AnalyticWaveguideSolver().solve(incident_request);
-    if (!incident.success || !incident.field) {
-        solution.error_message = "Cannot construct the normalized incident port mode: " +
-                                 incident.error_message;
-        return solution;
-    }
-    solution.available_modes = incident.available_modes;
-    solution.has_selected_mode = incident.has_selected_mode;
-    solution.selected_mode = incident.selected_mode;
 
     const double input_port_z = -0.5 * waveguide.length_m;
     auto source_value = [field = incident.field, port_coefficient, input_port_z](

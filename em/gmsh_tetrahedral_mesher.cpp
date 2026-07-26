@@ -5,6 +5,7 @@
 #include <fstream>
 #include <iomanip>
 #include <sstream>
+#include <string>
 #include <vector>
 
 #ifdef _WIN32
@@ -135,6 +136,115 @@ void appendRotatedCylinder(std::ostringstream &script,
         script << "Rotate {{0,0,1},{" << rotation_origin.x << "," << rotation_origin.y << ","
                << rotation_origin.z << "}," << rotation.z << "} { Volume{" << tag << "}; }\n";
     }
+}
+
+// Единичный вектор оси тела и точка профиля призмы в мировых осях. Профиль
+// живёт в плоскости, перпендикулярной оси, и его две координаты подставляются в
+// мировые так, чтобы тройка (профиль_x, профиль_y, ось) оставалась правой.
+Vec3 shapeAxisDirection(ShapeAxis axis)
+{
+    switch (axis) {
+    case ShapeAxis::X:
+        return {1.0, 0.0, 0.0};
+    case ShapeAxis::Y:
+        return {0.0, 1.0, 0.0};
+    case ShapeAxis::Z:
+    default:
+        return {0.0, 0.0, 1.0};
+    }
+}
+
+Vec3 shapeProfilePoint(ShapeAxis axis, const Vec2 &point)
+{
+    switch (axis) {
+    case ShapeAxis::X:
+        return {0.0, point.x, point.y};
+    case ShapeAxis::Y:
+        return {point.y, 0.0, point.x};
+    case ShapeAxis::Z:
+    default:
+        return {point.x, point.y, 0.0};
+    }
+}
+
+void appendRotations(std::ostringstream &script,
+                     const std::string &volume_selector,
+                     const Vec3 &rotation,
+                     const Vec3 &origin)
+{
+    const auto rotate = [&](double axis_x, double axis_y, double axis_z, double angle) {
+        if (angle == 0.0) {
+            return;
+        }
+        script << "Rotate {{" << axis_x << "," << axis_y << "," << axis_z << "},{" << origin.x
+               << "," << origin.y << "," << origin.z << "}," << angle << "} { Volume{"
+               << volume_selector << "}; }\n";
+    };
+    rotate(1.0, 0.0, 0.0, rotation.x);
+    rotate(0.0, 1.0, 0.0, rotation.y);
+    rotate(0.0, 0.0, 1.0, rotation.z);
+}
+
+// Строит одно тело пользователя и возвращает выражение gmsh, которым его
+// объёмы выбираются дальше. Призма собирается из профиля: точки — отрезки —
+// контур — плоская грань — вытягивание вдоль оси. Extrude возвращает список, в
+// котором объём стоит вторым, поэтому он выбирается по индексу, а не по тегу:
+// у OCC-фабрики теги вытянутых сущностей заранее не известны.
+std::string appendUserShape(std::ostringstream &script, int &next_tag, const ShapeGeometry &shape)
+{
+    const Vec3 axis = shapeAxisDirection(shape.axis);
+    switch (shape.kind) {
+    case ShapeKind::Brick: {
+        const int tag = next_tag++;
+        appendRotatedBox(script, tag, shape.center_m, shape.size_m, shape.rotation_rad);
+        return std::to_string(tag);
+    }
+    case ShapeKind::Cylinder: {
+        const int tag = next_tag++;
+        const Vec3 base{shape.center_m.x - 0.5 * shape.length_m * axis.x,
+                        shape.center_m.y - 0.5 * shape.length_m * axis.y,
+                        shape.center_m.z - 0.5 * shape.length_m * axis.z};
+        script << "Cylinder(" << tag << ") = {" << base.x << "," << base.y << "," << base.z
+               << "," << shape.length_m * axis.x << "," << shape.length_m * axis.y << ","
+               << shape.length_m * axis.z << "," << shape.radius_m << "};\n";
+        appendRotations(script, std::to_string(tag), shape.rotation_rad, shape.center_m);
+        return std::to_string(tag);
+    }
+    case ShapeKind::Prism: {
+        const std::size_t count = shape.profile_m.size();
+        const int first_point_tag = next_tag;
+        for (const Vec2 &profile_point : shape.profile_m) {
+            const Vec3 offset = shapeProfilePoint(shape.axis, profile_point);
+            // Грань лежит на «дне» тела, вытягивание идёт вдоль оси на всю длину.
+            script << "Point(" << next_tag++ << ") = {"
+                   << shape.center_m.x + offset.x - 0.5 * shape.length_m * axis.x << ","
+                   << shape.center_m.y + offset.y - 0.5 * shape.length_m * axis.y << ","
+                   << shape.center_m.z + offset.z - 0.5 * shape.length_m * axis.z << "};\n";
+        }
+        const int first_line_tag = next_tag;
+        for (std::size_t index = 0; index < count; ++index) {
+            const int from = first_point_tag + static_cast<int>(index);
+            const int to = first_point_tag + static_cast<int>((index + 1) % count);
+            script << "Line(" << next_tag++ << ") = {" << from << "," << to << "};\n";
+        }
+        const int loop_tag = next_tag++;
+        script << "Curve Loop(" << loop_tag << ") = {";
+        for (std::size_t index = 0; index < count; ++index) {
+            script << (index == 0 ? "" : ",") << first_line_tag + static_cast<int>(index);
+        }
+        script << "};\n";
+        const int surface_tag = next_tag++;
+        script << "Plane Surface(" << surface_tag << ") = {" << loop_tag << "};\n";
+        const std::string extrusion = "prism" + std::to_string(surface_tag);
+        script << extrusion << "[] = Extrude {" << shape.length_m * axis.x << ","
+               << shape.length_m * axis.y << "," << shape.length_m * axis.z << "} { Surface{"
+               << surface_tag << "}; };\n"
+               << extrusion << "Volume[] = {" << extrusion << "[1]};\n";
+        appendRotations(script, extrusion + "Volume[]", shape.rotation_rad, shape.center_m);
+        return extrusion + "Volume[]";
+    }
+    }
+    return {};
 }
 
 // A perfect conductor much thinner than the wavelength carries no useful
@@ -867,6 +977,13 @@ std::string GmshTetrahedralMesher::buildGeometryScript(const SimulationRequest &
         }
         script << "}; Delete; };\n"
                << "fluid[] = BooleanDifference{ Volume{1}; Delete; }{ Volume{perforatedMetal[]}; Delete; };\n";
+    } else if (isCircular(waveguide)) {
+        // Круглый тракт: полость — цилиндр по оси z. Раньше этот файл строил
+        // прямоугольную трубу при любом сечении, поэтому круглый волновод с
+        // вставками вообще не отдавался в FEM.
+        script << "Cylinder(1) = {0,0," << -0.5 * waveguide.length_m << ",0,0,"
+               << waveguide.length_m << "," << waveguide.inner_radius_m << "};\n"
+               << "fluid[] = {1};\n";
     } else {
         script << "Box(1) = {" << -0.5 * waveguide.inner_width_m << ","
                << -0.5 * waveguide.inner_height_m << ","
@@ -981,6 +1098,46 @@ std::string GmshTetrahedralMesher::buildGeometryScript(const SimulationRequest &
         } else {
             script << "pecBodies[] += {" << plate_tag << "};\n";
         }
+        has_pec_bodies = true;
+    }
+
+    // Тела пользователя: список — это история построения, операции применяются
+    // одна за другой к накопленному металлу. Ведущее «вычесть» или «пересечь»
+    // отбрасывается: вычитать ещё не из чего, а пересечение с пустотой дало бы
+    // пустое тело, на котором обрывается весь скрипт.
+    bool shape_metal_started = false;
+    for (const ShapeGeometry &shape : request.model.shapes) {
+        if (!shape.enabled || !shapeIsSolid(shape)) {
+            continue;
+        }
+        if (!shape_metal_started && shape.operation != ShapeBoolean::Add) {
+            script << "// Тело \"" << shape.name
+                   << "\" пропущено: до него нечего вычитать или пересекать.\n";
+            continue;
+        }
+        Vec3 shape_minimum_m;
+        Vec3 shape_maximum_m;
+        shapeBoundingBox(shape, &shape_minimum_m, &shape_maximum_m);
+        appendRefinementBox(refinement_regions, shape_minimum_m, shape_maximum_m,
+                            shapeSmallestFeature(shape), refinement_limits);
+        const std::string body = appendUserShape(script, next_tag, shape);
+        if (body.empty()) {
+            continue;
+        }
+        if (!shape_metal_started) {
+            script << "shapeMetal[] = {" << body << "};\n";
+            shape_metal_started = true;
+            continue;
+        }
+        const char *operation = shape.operation == ShapeBoolean::Subtract
+                                    ? "Difference"
+                                    : (shape.operation == ShapeBoolean::Intersect ? "Intersection"
+                                                                                  : "Union");
+        script << "shapeMetal[] = Boolean" << operation
+               << "{ Volume{shapeMetal[]}; Delete; }{ Volume{" << body << "}; Delete; };\n";
+    }
+    if (shape_metal_started) {
+        script << "pecBodies[] += shapeMetal[];\n";
         has_pec_bodies = true;
     }
 

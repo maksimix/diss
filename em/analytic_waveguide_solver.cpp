@@ -227,9 +227,8 @@ GuideEnergetics integrateEnergetics(const IFieldEvaluator &field,
 }
 }
 
-std::vector<ModeDescriptor> AnalyticWaveguideSolver::enumerateModes(
-    const SimulationRequest &request,
-    const SolveControl &control) const
+std::vector<ModeDescriptor> enumerateWaveguideModes(const SimulationRequest &request,
+                                                    const SolveControl &control)
 {
     std::vector<ModeDescriptor> modes;
     const WaveguideGeometry &geometry = request.model.waveguide;
@@ -403,7 +402,7 @@ FieldSolution AnalyticWaveguideSolver::solve(const SimulationRequest &request,
         return solution;
     }
 
-    solution.available_modes = enumerateModes(request, control);
+    solution.available_modes = enumerateWaveguideModes(request, control);
     if (control.isCancellationRequested()) {
         return cancel();
     }

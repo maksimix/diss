@@ -60,17 +60,34 @@ FieldSolution EmSolverDispatcher::solve(const SimulationRequest &request,
     // частичных областей и метод поперечных сечений выведены для прямоугольных
     // мод. Молчаливый переход на FEM дал бы неверную геометрию, поэтому
     // несовместимые случаи отклоняются с объяснением.
+    // Свободные тела пользователя описывает только сеточный решатель: замкнутые
+    // формулы и методы частичных областей выведены для пластин известного вида.
+    const bool enabled_shapes = hasEnabledShapes(request.model.shapes);
+
     if (isCircular(request.model.waveguide)) {
         if (enabled_plates || enabled_dielectrics || enabled_slots) {
             return rejected(request,
-                            "Для круглого волновода пока поддержан только пустой тракт: "
-                            "пластины, диафрагмы, щели и диэлектрики доступны только в "
-                            "прямоугольном сечении.");
+                            "Для круглого волновода поддержаны пустой тракт и свободные "
+                            "тела: пластины-диафрагмы, щели и диэлектрики пока доступны "
+                            "только в прямоугольном сечении.");
+        }
+        // Тела в круглом тракте считает FEM: сеточный генератор строит для него
+        // цилиндрическую полость, а моды на портах берутся из решения через
+        // функции Бесселя.
+        if (enabled_shapes) {
+            if (request.settings.solver_method != SolverMethod::Automatic &&
+                request.settings.solver_method != SolverMethod::FiniteElement) {
+                return rejected(request,
+                                "Круглый волновод с телами считается только методом "
+                                "конечных элементов: выберите «Автоматически» или «Метод "
+                                "конечных элементов».");
+            }
+            return FemFrequencyDomainSolver(fem_backend_).solve(request, control);
         }
         if (request.settings.solver_method != SolverMethod::Automatic &&
             request.settings.solver_method != SolverMethod::AnalyticRectangular) {
             return rejected(request,
-                            "Круглый волновод считается аналитически; выберите метод "
+                            "Пустой круглый волновод считается аналитически; выберите метод "
                             "«Автоматически» или «Аналитический».");
         }
         return AnalyticWaveguideSolver().solve(request, control);
@@ -81,14 +98,19 @@ FieldSolution EmSolverDispatcher::solve(const SimulationRequest &request,
     // the printed result always matches the method named in the setup dialog.
     switch (request.settings.solver_method) {
     case SolverMethod::AnalyticRectangular:
-        if (enabled_plates || enabled_dielectrics) {
+        if (enabled_plates || enabled_dielectrics || enabled_shapes) {
             return rejected(request,
-                            "Аналитический метод пустого волновода не учитывает пластины и "
-                            "диэлектрики: отключите их или выберите другой метод.");
+                            "Аналитический метод пустого волновода не учитывает пластины, "
+                            "тела и диэлектрики: отключите их или выберите другой метод.");
         }
         return AnalyticWaveguideSolver().solve(request, control);
     case SolverMethod::TransversePartition: {
         std::string reason;
+        if (enabled_shapes) {
+            return rejected(request,
+                            "Метод поперечных сечений не описывает свободные тела: они "
+                            "считаются методом конечных элементов.");
+        }
         if (!TransversePecPartitionSolver::canSolve(request, nullptr, &reason)) {
             return rejected(request,
                             "Метод поперечных сечений неприменим к этой геометрии: " + reason);
@@ -97,6 +119,11 @@ FieldSolution EmSolverDispatcher::solve(const SimulationRequest &request,
     }
     case SolverMethod::ModeMatching: {
         std::string reason;
+        if (enabled_shapes) {
+            return rejected(request,
+                            "Метод частичных областей не описывает свободные тела: они "
+                            "считаются методом конечных элементов.");
+        }
         if (!ModeMatchingIrisSolver::canSolve(request, &reason)) {
             return rejected(request,
                             "Метод частичных областей неприменим к этой геометрии: " + reason);
@@ -109,21 +136,21 @@ FieldSolution EmSolverDispatcher::solve(const SimulationRequest &request,
         break;
     }
 
-    if (!enabled_plates && !enabled_dielectrics &&
+    if (!enabled_shapes && !enabled_plates && !enabled_dielectrics &&
         (!enabled_slots ||
          request.settings.geometry_approximation_policy ==
              GeometryApproximationPolicy::UnperturbedBackgroundForSlots)) {
         return AnalyticWaveguideSolver().solve(request, control);
     }
 
-    if (enabled_plates && !enabled_dielectrics &&
+    if (!enabled_shapes && enabled_plates && !enabled_dielectrics &&
         TransversePecPartitionSolver::canSolve(request)) {
         return TransversePecPartitionSolver().solve(request, control);
     }
 
     // Rectangular-window irises have an exact semi-analytic solution by mode
     // matching (метод частичных областей); everything else falls back to FEM.
-    if (enabled_plates && !enabled_dielectrics && !enabled_slots &&
+    if (!enabled_shapes && enabled_plates && !enabled_dielectrics && !enabled_slots &&
         ModeMatchingIrisSolver::canSolve(request)) {
         return ModeMatchingIrisSolver().solve(request, control);
     }

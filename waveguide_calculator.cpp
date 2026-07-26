@@ -1,5 +1,6 @@
 #include "waveguide_calculator.h"
 
+#include "em/analytic_waveguide_solver.h"
 #include "em/em_solver_dispatcher.h"
 #include "postprocessing/qt_field_glyph_adapter.h"
 #include "postprocessing/slot_excitation_estimator.h"
@@ -66,8 +67,124 @@ bool isCircularSection(const WaveguideParameters &parameters)
     return parameters.cross_section == 1;
 }
 
+// У круглого сечения обе стороны равны внутреннему диаметру: описанный квадрат
+// сечения, по которому строятся отрисовка и постобработка.
+struct InnerCrossSection
+{
+    double width_mm = 0.0;
+    double depth_mm = 0.0;
+};
+
+InnerCrossSection innerCrossSection(const WaveguideParameters &parameters)
+{
+    const double inner_radius_mm = parameters.radius_mm - parameters.wall_thickness_mm;
+    InnerCrossSection inner;
+    inner.width_mm = isCircularSection(parameters)
+                         ? 2.0 * inner_radius_mm
+                         : parameters.width_mm - 2.0 * parameters.wall_thickness_mm;
+    inner.depth_mm = isCircularSection(parameters)
+                         ? 2.0 * inner_radius_mm
+                         : parameters.depth_mm - 2.0 * parameters.wall_thickness_mm;
+    return inner;
+}
+
+QString validateModeSelection(const WaveguideParameters &parameters)
+{
+    if (parameters.mode_automatic) {
+        return {};
+    }
+    const bool transverse_electric = parameters.mode_family != 1;
+    if (parameters.mode_m < 0 || parameters.mode_n < 0) {
+        return QStringLiteral("Индексы моды не могут быть отрицательными.");
+    }
+    if (isCircularSection(parameters)) {
+        // В круглом сечении n — номер корня функции Бесселя, он считается от
+        // единицы; азимутальный m = 0 разрешён обоим семействам (H01, E01).
+        if (parameters.mode_n < 1) {
+            return QStringLiteral(
+                "В круглом волноводе радиальный индекс n считается от единицы: "
+                "низшая мода — H11 (TE11).");
+        }
+        return {};
+    }
+    if (transverse_electric && parameters.mode_m == 0 && parameters.mode_n == 0) {
+        return QStringLiteral("Моды TE00 (H00) не существует: хотя бы один индекс должен быть больше нуля.");
+    }
+    if (!transverse_electric && (parameters.mode_m == 0 || parameters.mode_n == 0)) {
+        return QStringLiteral(
+            "У TM-моды (E) прямоугольного волновода оба индекса больше нуля: "
+            "низшая такая мода — E11 (TM11).");
+    }
+    return {};
+}
+
+// Тела пользователя: вырожденное описание не даёт ни металла, ни отверстия, а в
+// сеточном скрипте булева операция с пустым телом обрывает построение целиком,
+// поэтому такие тела отсекаются здесь, с указанием имени.
+QString validateShapes(const QVector<ShapeParameters> &shapes)
+{
+    bool metal_started = false;
+    for (const ShapeParameters &shape : shapes) {
+        if (!shape.enabled) {
+            continue;
+        }
+        const QString name = shape.name.isEmpty() ? QStringLiteral("без имени") : shape.name;
+        if (!std::isfinite(shape.center_x_mm) || !std::isfinite(shape.center_y_mm) ||
+            !std::isfinite(shape.center_z_mm) || !std::isfinite(shape.rotation_x_deg) ||
+            !std::isfinite(shape.rotation_y_deg) || !std::isfinite(shape.rotation_z_deg)) {
+            return QStringLiteral("У тела «%1» некорректны координаты или углы.").arg(name);
+        }
+        switch (shape.kind) {
+        case 1:
+            if (!positiveFinite(shape.radius_mm) || !positiveFinite(shape.length_mm)) {
+                return QStringLiteral(
+                           "У цилиндра «%1» радиус и длина должны быть больше нуля.").arg(name);
+            }
+            break;
+        case 2:
+            if (!positiveFinite(shape.length_mm)) {
+                return QStringLiteral("У призмы «%1» длина должна быть больше нуля.").arg(name);
+            }
+            if (shape.profile_mm.size() < 3) {
+                return QStringLiteral(
+                           "Профиль призмы «%1» должен содержать хотя бы три точки.").arg(name);
+            }
+            for (const QPointF &point : shape.profile_mm) {
+                if (!std::isfinite(point.x()) || !std::isfinite(point.y())) {
+                    return QStringLiteral("В профиле призмы «%1» есть некорректная точка.")
+                        .arg(name);
+                }
+            }
+            break;
+        default:
+            if (!positiveFinite(shape.size_x_mm) || !positiveFinite(shape.size_y_mm) ||
+                !positiveFinite(shape.size_z_mm)) {
+                return QStringLiteral("У бруска «%1» все размеры должны быть больше нуля.")
+                    .arg(name);
+            }
+            break;
+        }
+        if (!metal_started && shape.operation != 0) {
+            return QStringLiteral(
+                       "Тело «%1» вычитается или пересекается, но до него нет ни одного "
+                       "объединяемого тела: первое включённое тело должно объединяться.")
+                .arg(name);
+        }
+        metal_started = true;
+    }
+    return {};
+}
+
 QString validateParameters(const WaveguideParameters &parameters)
 {
+    const QString mode_error = validateModeSelection(parameters);
+    if (!mode_error.isEmpty()) {
+        return mode_error;
+    }
+    const QString shape_error = validateShapes(parameters.shapes);
+    if (!shape_error.isEmpty()) {
+        return shape_error;
+    }
     if (!positiveFinite(parameters.length_mm)) {
         return QStringLiteral("Длина волновода должна быть конечной и больше нуля.");
     }
@@ -91,8 +208,8 @@ QString validateParameters(const WaveguideParameters &parameters)
                                             });
         if (has_plates || parameters.slot_enabled) {
             return QStringLiteral(
-                "В круглом волноводе пока поддержан только пустой тракт: отключите щель и "
-                "пластины или вернитесь к прямоугольному сечению.");
+                "В круглом волноводе поддержаны пустой тракт и свободные тела: отключите "
+                "щель и пластины-диафрагмы или вернитесь к прямоугольному сечению.");
         }
         if (!positiveFinite(parameters.frequency_ghz)) {
             return QStringLiteral("Частота должна быть конечной и больше нуля.");
@@ -318,6 +435,42 @@ em::SolverMethod toEmSolverMethod(int method)
     }
 }
 
+em::ShapeKind toEmShapeKind(int kind)
+{
+    switch (kind) {
+    case 1:
+        return em::ShapeKind::Cylinder;
+    case 2:
+        return em::ShapeKind::Prism;
+    default:
+        return em::ShapeKind::Brick;
+    }
+}
+
+em::ShapeBoolean toEmShapeBoolean(int operation)
+{
+    switch (operation) {
+    case 1:
+        return em::ShapeBoolean::Subtract;
+    case 2:
+        return em::ShapeBoolean::Intersect;
+    default:
+        return em::ShapeBoolean::Add;
+    }
+}
+
+em::ShapeAxis toEmShapeAxis(int axis)
+{
+    switch (axis) {
+    case 0:
+        return em::ShapeAxis::X;
+    case 1:
+        return em::ShapeAxis::Y;
+    default:
+        return em::ShapeAxis::Z;
+    }
+}
+
 em::SimulationRequest buildRequest(const WaveguideParameters &parameters,
                                    double inner_width_mm,
                                    double inner_height_mm)
@@ -337,6 +490,15 @@ em::SimulationRequest buildRequest(const WaveguideParameters &parameters,
         std::max(0.0, parameters.wall_conductivity_s_per_m);
     request.settings.maximum_m = 3;
     request.settings.maximum_n = 3;
+    // Возбуждение: либо низшая распространяющаяся мода, либо точно указанная.
+    // Перечислитель сам расширяет пределы m и n под ручной выбор, поэтому
+    // maximum_m/maximum_n здесь трогать не нужно.
+    request.excitation.automatic = parameters.mode_automatic;
+    request.excitation.family = parameters.mode_family == 1
+                                    ? em::ModeFamily::TransverseMagnetic
+                                    : em::ModeFamily::TransverseElectric;
+    request.excitation.m = parameters.mode_m;
+    request.excitation.n = parameters.mode_n;
     request.settings.normalization_power_w = 1.0;
     request.settings.fem.relative_tolerance = 1.0e-6;
     request.settings.fem.maximum_iterations = 1200;
@@ -395,8 +557,76 @@ em::SimulationRequest buildRequest(const WaveguideParameters &parameters,
         plate.post_height_m = mmToM(plate_parameters.post_height_mm);
         request.model.pec_plates.push_back(plate);
     }
+
+    for (const ShapeParameters &shape_parameters : parameters.shapes) {
+        if (!shape_parameters.enabled) {
+            continue;
+        }
+        em::ShapeGeometry shape;
+        shape.name = shape_parameters.name.toStdString();
+        shape.enabled = true;
+        shape.kind = toEmShapeKind(shape_parameters.kind);
+        shape.operation = toEmShapeBoolean(shape_parameters.operation);
+        shape.axis = toEmShapeAxis(shape_parameters.axis);
+        shape.center_m = {mmToM(shape_parameters.center_x_mm),
+                          mmToM(shape_parameters.center_y_mm),
+                          mmToM(shape_parameters.center_z_mm)};
+        shape.size_m = {mmToM(shape_parameters.size_x_mm),
+                        mmToM(shape_parameters.size_y_mm),
+                        mmToM(shape_parameters.size_z_mm)};
+        shape.rotation_rad = {shape_parameters.rotation_x_deg * em::pi / 180.0,
+                              shape_parameters.rotation_y_deg * em::pi / 180.0,
+                              shape_parameters.rotation_z_deg * em::pi / 180.0};
+        shape.radius_m = mmToM(shape_parameters.radius_mm);
+        shape.length_m = mmToM(shape_parameters.length_mm);
+        for (const QPointF &point : shape_parameters.profile_mm) {
+            shape.profile_m.push_back({mmToM(point.x()), mmToM(point.y())});
+        }
+        request.model.shapes.push_back(shape);
+    }
     return request;
 }
+}
+
+bool normalizeModeSelection(WaveguideParameters &parameters)
+{
+    if (parameters.mode_automatic) {
+        return false;
+    }
+    const WaveguideParameters before = parameters;
+    parameters.mode_family = parameters.mode_family == 1 ? 1 : 0;
+    parameters.mode_m = std::max(0, parameters.mode_m);
+    parameters.mode_n = std::max(0, parameters.mode_n);
+    if (isCircularSection(parameters)) {
+        parameters.mode_n = std::max(1, parameters.mode_n);
+    } else if (parameters.mode_family == 1) {
+        parameters.mode_m = std::max(1, parameters.mode_m);
+        parameters.mode_n = std::max(1, parameters.mode_n);
+    } else if (parameters.mode_m == 0 && parameters.mode_n == 0) {
+        parameters.mode_m = 1;
+    }
+    return parameters.mode_family != before.mode_family || parameters.mode_m != before.mode_m ||
+           parameters.mode_n != before.mode_n;
+}
+
+QVector<WaveguideMode> enumerateWaveguideModes(const WaveguideParameters &parameters,
+                                               int maximum_index)
+{
+    QVector<WaveguideMode> modes;
+    const InnerCrossSection inner = innerCrossSection(parameters);
+    if (!positiveFinite(inner.width_mm) || !positiveFinite(inner.depth_mm) ||
+        !positiveFinite(parameters.frequency_ghz)) {
+        return modes;
+    }
+    em::SimulationRequest request = buildRequest(parameters, inner.width_mm, inner.depth_mm);
+    // Длина и толщина стенки на отсечки не влияют, но перечислитель проверяет
+    // геометрию целиком, поэтому запрос строится обычным путём.
+    request.settings.maximum_m = std::max(1, maximum_index);
+    request.settings.maximum_n = std::max(1, maximum_index);
+    for (const em::ModeDescriptor &mode : em::enumerateWaveguideModes(request)) {
+        modes.push_back(toWaveguideMode(mode));
+    }
+    return modes;
 }
 
 WaveguideCalculationResult WaveguideCalculator::calculate(
@@ -430,12 +660,9 @@ WaveguideCalculationResult WaveguideCalculator::calculate(
     // по кругу.
     const bool circular = isCircularSection(parameters);
     const double inner_radius_mm = parameters.radius_mm - parameters.wall_thickness_mm;
-    result.inner_width_mm = circular
-                                ? 2.0 * inner_radius_mm
-                                : parameters.width_mm - 2.0 * parameters.wall_thickness_mm;
-    result.inner_depth_mm = circular
-                                ? 2.0 * inner_radius_mm
-                                : parameters.depth_mm - 2.0 * parameters.wall_thickness_mm;
+    const InnerCrossSection inner = innerCrossSection(parameters);
+    result.inner_width_mm = inner.width_mm;
+    result.inner_depth_mm = inner.depth_mm;
     result.area_mm2 = circular ? em::pi * inner_radius_mm * inner_radius_mm
                                : result.inner_width_mm * result.inner_depth_mm;
     result.cavity_volume_mm3 = result.area_mm2 * parameters.length_mm;
@@ -521,12 +748,16 @@ WaveguideCalculationResult WaveguideCalculator::calculate(
         result.modes.push_back(toWaveguideMode(mode));
     }
 
+    // Имя моды переносится и тогда, когда она затухает: при ручном выборе окну
+    // нужно сказать, какая именно мода не проходит и на какой отсечке.
+    if (field_solution->has_selected_mode) {
+        result.selected_mode = toWaveguideMode(field_solution->selected_mode);
+    }
     if (!field_solution->has_selected_mode || !field_solution->selected_mode.propagating) {
         return result;
     }
 
     result.has_propagating_mode = true;
-    result.selected_mode = toWaveguideMode(field_solution->selected_mode);
     result.beta_rad_per_m = std::imag(
         field_solution->selected_mode.propagation_constant_per_m);
     result.attenuation_np_per_m = std::real(
