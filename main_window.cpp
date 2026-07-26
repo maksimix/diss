@@ -7,16 +7,23 @@
 #include "parameter_list_widget.h"
 #include "waveguide_opengl_widget.h"
 
+#include <QtCore/QCoreApplication>
+#include <QtCore/QDateTime>
+#include <QtCore/QDir>
 #include <QtCore/QFileInfo>
 #include <QtCore/QLocale>
+#include <QtCore/QSettings>
 #include <QtCore/QSignalBlocker>
+#include <QtCore/QStandardPaths>
 #include <QtGui/QAction>
+#include <QtGui/QCloseEvent>
 #include <QtGui/QCloseEvent>
 #include <QtGui/QPainter>
 #include <QtWidgets/QAbstractItemView>
 #include <QtWidgets/QFileDialog>
 #include <QtWidgets/QCheckBox>
 #include <QtWidgets/QComboBox>
+#include <QtWidgets/QCommandLinkButton>
 #include <QtWidgets/QDialog>
 #include <QtWidgets/QDialogButtonBox>
 #include <QtWidgets/QDockWidget>
@@ -33,10 +40,13 @@
 #include <QtWidgets/QPlainTextEdit>
 #include <QtWidgets/QProgressBar>
 #include <QtWidgets/QPushButton>
+#include <QtWidgets/QScrollArea>
 #include <QtWidgets/QSlider>
+#include <QtWidgets/QStackedWidget>
 #include <QtWidgets/QStatusBar>
 #include <QtWidgets/QStyle>
 #include <QtWidgets/QSplitter>
+#include <QtWidgets/QToolButton>
 #include <QtWidgets/QTreeWidget>
 #include <QtWidgets/QTreeWidgetItem>
 #include <QtWidgets/QVBoxLayout>
@@ -183,21 +193,120 @@ QStackedWidget#cstRibbonPages QDoubleSpinBox {
     background: #ffffff;
 }
 
-/* --------------------------------------------- вкладка открытой модели --- */
-QTabBar#cstDocumentTabBar {
+/* --------------------------------------------- вкладки открытых проектов --- */
+QWidget#cstDocumentRow {
     background: #e4e4e4;
+    border-bottom: 1px solid #c4c4c4;
+}
+QTabBar#cstDocumentTabBar {
+    background: transparent;
 }
 QTabBar#cstDocumentTabBar::tab {
     background: #e4e4e4;
     border: 1px solid #c4c4c4;
     border-top: none;
-    padding: 3px 12px;
+    padding: 3px 10px;
     margin-right: 2px;
     color: #303030;
+}
+QTabBar#cstDocumentTabBar::tab:hover {
+    background: #eef2f6;
 }
 QTabBar#cstDocumentTabBar::tab:selected {
     background: #ffffff;
     color: #10528a;
+    border-bottom: 1px solid #ffffff;
+}
+/* Крестик закрытия вкладки: серый на светлом фоне, красный под курсором. */
+QToolButton#cstTabCloseButton {
+    background: transparent;
+    border: none;
+    border-radius: 8px;
+}
+QToolButton#cstTabCloseButton:hover {
+    background: #c42b1c;
+}
+QToolButton#cstTabCloseButton:pressed {
+    background: #8e1f14;
+}
+QToolButton#cstNewProjectButton {
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 3px;
+    color: #10528a;
+    font-size: 15pt;
+    font-weight: 600;
+    padding: 0 8px;
+    margin-left: 4px;
+    min-width: 20px;
+    min-height: 20px;
+}
+QToolButton#cstNewProjectButton:hover {
+    background: #d3e5f4;
+    border-color: #a3c8e8;
+}
+
+/* --------------------------------------------------- стартовая страница --- */
+QWidget#cstStartPage {
+    background: #f0f0f0;
+}
+QWidget#cstStartRail {
+    background: #1b5b96;
+}
+/* Подписи на синей панели: без сброса фона они получают серый прямоугольник от
+   общего правила QWidget. */
+QWidget#cstStartRail QLabel {
+    background: transparent;
+}
+QLabel#cstStartTitle {
+    color: #ffffff;
+    font-size: 17pt;
+    font-weight: 600;
+}
+QLabel#cstStartSubtitle {
+    color: #cfe0ef;
+    font-size: 9pt;
+}
+QToolButton#cstStartAction {
+    background: transparent;
+    border: none;
+    color: #ffffff;
+    font-size: 10.5pt;
+    text-align: left;
+    padding: 8px 10px;
+}
+QToolButton#cstStartAction:hover {
+    background: #2c72ad;
+}
+QLabel#cstStartHeading {
+    color: #10528a;
+    font-size: 12pt;
+    font-weight: 600;
+}
+QLabel#cstStartHint {
+    color: #7a7a7a;
+}
+QCommandLinkButton#cstPresetCard {
+    background: #ffffff;
+    border: 1px solid #c9d4dd;
+    border-radius: 4px;
+    text-align: left;
+    padding: 8px;
+}
+QCommandLinkButton#cstPresetCard:hover {
+    border-color: #1b5b96;
+    background: #f5faff;
+}
+QCommandLinkButton#cstRecentItem {
+    background: #ffffff;
+    border: 1px solid #d8dde2;
+    border-radius: 4px;
+    text-align: left;
+    padding: 6px 8px;
+}
+QCommandLinkButton#cstRecentItem:hover {
+    border-color: #1b5b96;
+    background: #f5faff;
 }
 
 /* ------------------------------------------------ панели рабочей зоны --- */
@@ -451,6 +560,13 @@ MainWindow::MainWindow(QWidget *parent)
     vertical_splitter->setStretchFactor(0, 1);
     vertical_splitter->setStretchFactor(1, 0);
 
+    // Рабочая область и стартовая страница делят одно место: пока проект не
+    // открыт, показывается «Старт» (как backstage CST), иначе — рабочая зона.
+    workspace_stack_ = new QStackedWidget(this);
+    start_page_ = buildStartPage();
+    workspace_stack_->addWidget(start_page_);       // индекс 0
+    workspace_stack_->addWidget(vertical_splitter); // индекс 1
+
     // Лента живёт над центральной областью, как в CST: строка вкладок сразу под
     // заголовком окна, ниже — рабочая область.
     QWidget *central = new QWidget(this);
@@ -458,7 +574,7 @@ MainWindow::MainWindow(QWidget *parent)
     central_layout->setContentsMargins(0, 0, 0, 0);
     central_layout->setSpacing(0);
     central_layout->addWidget(ribbon_bar_);
-    central_layout->addWidget(vertical_splitter, 1);
+    central_layout->addWidget(workspace_stack_, 1);
     setCentralWidget(central);
 
     open_gl_widget_->setSlotEditedCallback([this](const WaveguideParameters &parameters) {
@@ -507,15 +623,62 @@ MainWindow::MainWindow(QWidget *parent)
             &MainWindow::handleVolumeFillBuilt);
     worker_thread_->start();
 
-    // Стартовое состояние: геометрия показана, решатель ждёт кнопки Start.
-    updateModelPreview();
+    // Стартовое состояние: ни один проект не открыт, показываем «Старт».
+    refreshStartPageRecents();
+    workspace_stack_->setCurrentIndex(0);
+    ribbon_bar_->setActiveProjectTab(-1);
     updateSimulationActionState();
-    setStatus(QStringLiteral("Модель готова. Нажмите «Начать расчёт» на вкладке Simulation."),
-              false);
+    updateProjectActionsEnabled();
+    setStatus(QStringLiteral("Создайте новый проект или откройте существующий."), false);
 }
 
 void MainWindow::closeEvent(QCloseEvent *event)
 {
+    // Живые правки активного проекта должны попасть в его снимок до проверки.
+    harvestActiveProject();
+
+    QStringList unsaved;
+    for (const OpenProject &project : std::as_const(projects_)) {
+        if (project.dirty) {
+            unsaved.append(project.name);
+        }
+    }
+    if (!unsaved.isEmpty()) {
+        QMessageBox box(this);
+        box.setWindowTitle(QStringLiteral("Выход"));
+        box.setIcon(QMessageBox::Warning);
+        box.setText(QStringLiteral("Есть несохранённые изменения в проектах:\n  %1")
+                        .arg(unsaved.join(QStringLiteral("\n  "))));
+        box.setInformativeText(QStringLiteral("Сохранить их перед выходом?"));
+        box.setStandardButtons(QMessageBox::SaveAll | QMessageBox::Discard | QMessageBox::Cancel);
+        box.button(QMessageBox::SaveAll)->setText(QStringLiteral("Сохранить все"));
+        box.button(QMessageBox::Discard)->setText(QStringLiteral("Не сохранять"));
+        box.button(QMessageBox::Cancel)->setText(QStringLiteral("Отмена"));
+        box.setDefaultButton(QMessageBox::SaveAll);
+        const int choice = box.exec();
+        if (choice == QMessageBox::Cancel) {
+            event->ignore();
+            return;
+        }
+        if (choice == QMessageBox::SaveAll) {
+            for (const OpenProject &project : std::as_const(projects_)) {
+                if (!project.dirty) {
+                    continue;
+                }
+                QString error;
+                if (!saveProjectSnapshot(project, &error)) {
+                    QMessageBox::warning(
+                        this,
+                        QStringLiteral("Сохранение"),
+                        QStringLiteral("Не удалось сохранить «%1»: %2\nВыход отменён.")
+                            .arg(project.name, error));
+                    event->ignore();
+                    return;
+                }
+            }
+        }
+    }
+
     // Отмена просится здесь, а не в деструкторе: между закрытием окна и его
     // разрушением решатель успевает дойти до очередной точки опроса, и ждать в
     // деструкторе приходится заметно меньше.
@@ -556,10 +719,10 @@ MainWindow::~MainWindow()
     worker_thread_ = nullptr;
 }
 
-void MainWindow::markModelChanged()
+void MainWindow::cancelRunningCalculation()
 {
-    // Изменение геометрии отменяет незавершённый расчёт: его результат уже
-    // относился бы к прежней модели.
+    // Изменение геометрии или переключение проекта отменяет незавершённый
+    // расчёт: его результат уже относился бы к прежней модели.
     latest_request_id_ = 0;
     if (worker_ != nullptr) {
         worker_->setLatestRequestId(0);
@@ -570,8 +733,14 @@ void MainWindow::markModelChanged()
         calculation_progress_bar_->setVisible(false);
         calculation_time_label_->setVisible(false);
     }
+}
+
+void MainWindow::markModelChanged()
+{
+    cancelRunningCalculation();
 
     model_changed_since_run_ = true;
+    setDocumentDirty(true);
     updateModelPreview();
     updateSimulationActionState();
     setStatus(QStringLiteral("Модель изменена. Нажмите «Начать расчёт», чтобы пересчитать поле."),
@@ -1006,6 +1175,9 @@ QWidget *MainWindow::createParameterPanel()
     object_tree_widget_->setRootIsDecorated(true);
     object_tree_widget_->setSelectionMode(QAbstractItemView::SingleSelection);
     object_tree_widget_->header()->setStretchLastSection(true);
+    // Панель отображения полей высокая и фиксированная: без запаса по высоте
+    // дерево сжималось до трёх строк со полосой прокрутки.
+    object_tree_widget_->setMinimumHeight(180);
     tree_layout->addWidget(object_tree_widget_, 1);
 
     slot_enabled_check_box_ = new QCheckBox(QStringLiteral("Щель включена в модель"), tree_content);
@@ -2192,6 +2364,78 @@ void MainWindow::applyCstStyle()
     setStyleSheet(cstStyleSheet());
 }
 
+// Официальная подпись ПО: название, версия, состав расчётного ядра и горячие
+// клавиши. Название и версия берутся из метаданных приложения (main.cpp).
+void MainWindow::showAboutDialog()
+{
+    const QString name = QCoreApplication::applicationName();
+    const QString version = QCoreApplication::applicationVersion();
+
+    QDialog dialog(this);
+    dialog.setWindowTitle(QStringLiteral("О программе"));
+    dialog.setModal(true);
+    dialog.setMinimumWidth(520);
+    dialog.setStyleSheet(styleSheet());
+
+    QVBoxLayout *layout = new QVBoxLayout(&dialog);
+    layout->setSpacing(10);
+
+    QWidget *header = new QWidget(&dialog);
+    QHBoxLayout *header_layout = new QHBoxLayout(header);
+    header_layout->setContentsMargins(0, 0, 0, 0);
+    header_layout->setSpacing(12);
+    QLabel *logo = new QLabel(header);
+    logo->setPixmap(ribbonIcon(RibbonIcon::Waveguide, 48).pixmap(48, 48));
+    header_layout->addWidget(logo, 0, Qt::AlignTop);
+
+    QLabel *heading = new QLabel(
+        QStringLiteral("<div style='font-size:14pt;font-weight:600;color:#10528a;'>%1</div>"
+                       "<div style='color:#4a5a66;'>Версия %2 · сборка %3</div>"
+                       "<div style='color:#4a5a66;'>Электродинамическое моделирование "
+                       "волноводных структур</div>")
+            .arg(name, version, QStringLiteral(__DATE__)),
+        header);
+    heading->setTextFormat(Qt::RichText);
+    heading->setWordWrap(true);
+    header_layout->addWidget(heading, 1);
+    layout->addWidget(header);
+
+    QGroupBox *engine_group = new QGroupBox(QStringLiteral("Расчётное ядро"), &dialog);
+    QVBoxLayout *engine_layout = new QVBoxLayout(engine_group);
+    QLabel *engine = new QLabel(
+        QStringLiteral(
+            "Диспетчер методов: аналитический расчёт прямоугольного и круглого волновода, "
+            "метод поперечных сечений, метод частичных областей, конечно-элементный расчёт "
+            "H(curl) в частотной области.\n"
+            "Линейные системы: прямое разложение или GMRES. Сетка — тетраэдральная, "
+            "с локальным измельчением у деталей.\n"
+            "Библиотеки: Qt %1, MFEM, gmsh, Eigen.")
+            .arg(QStringLiteral(QT_VERSION_STR)),
+        engine_group);
+    engine->setWordWrap(true);
+    engine_layout->addWidget(engine);
+    layout->addWidget(engine_group);
+
+    QGroupBox *keys_group = new QGroupBox(QStringLiteral("Горячие клавиши"), &dialog);
+    QVBoxLayout *keys_layout = new QVBoxLayout(keys_group);
+    QLabel *keys = new QLabel(
+        QStringLiteral("Ctrl+N — новый проект        Ctrl+O — открыть проект\n"
+                       "Ctrl+S — сохранить          Ctrl+W — закрыть проект\n"
+                       "F5 — запустить расчёт       Alt+Q — поиск команд ленты\n\n"
+                       "Проект хранится папкой: файл модели .wgproj и подпапка Result с "
+                       "кэшем расчёта. Папку можно целиком перенести на другой ПК."),
+        keys_group);
+    keys->setWordWrap(true);
+    keys_layout->addWidget(keys);
+    layout->addWidget(keys_group);
+
+    QDialogButtonBox *buttons = new QDialogButtonBox(QDialogButtonBox::Ok, &dialog);
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    layout->addWidget(buttons);
+
+    dialog.exec();
+}
+
 QString MainWindow::solverMethodName(int method) const
 {
     static const char *const names[] = {
@@ -2266,25 +2510,53 @@ void MainWindow::createRibbon()
 
     // Команды создаются одним списком: одна и та же кнопка попадает на
     // несколько вкладок ленты, как «Start Simulation» в CST.
-    QAction *open_action =
-        make_action(QStringLiteral("Открыть"), QStringLiteral("Открыть модель волновода (.wgm)"));
+    QAction *new_project_action = make_action(
+        QStringLiteral("Новый\nпроект"),
+        QStringLiteral("Создать проект: приложение заведёт для него отдельную папку с "
+                       "моделью и подпапкой Result, которую можно перенести на другой ПК."));
+    new_project_action->setShortcut(QKeySequence::New);
+    connect(new_project_action, &QAction::triggered, this, &MainWindow::newProject);
+
+    QAction *open_action = make_action(
+        QStringLiteral("Открыть\nпроект"),
+        QStringLiteral("Открыть проект (.wgproj) или отдельную модель (.wgm)"));
     open_action->setShortcut(QKeySequence::Open);
-    connect(open_action, &QAction::triggered, this, &MainWindow::openModelFile);
+    connect(open_action, &QAction::triggered, this, &MainWindow::openProject);
 
-    QAction *save_action =
+    close_project_action_ = make_action(
+        QStringLiteral("Закрыть\nпроект"),
+        QStringLiteral("Закрыть активный проект (Ctrl+W). Несохранённые изменения будут "
+                       "предложены к сохранению."));
+    close_project_action_->setShortcut(QKeySequence::Close);
+    connect(close_project_action_, &QAction::triggered, this, &MainWindow::closeActiveProject);
+
+    QAction *start_page_action = make_action(
+        QStringLiteral("Стартовая\nстраница"),
+        QStringLiteral("Показать стартовую страницу со списком недавних проектов"));
+    connect(start_page_action, &QAction::triggered, this, &MainWindow::showStartPage);
+
+    save_action_ =
         make_action(QStringLiteral("Сохранить"), QStringLiteral("Сохранить модель и расчёт"));
-    save_action->setShortcut(QKeySequence::Save);
-    connect(save_action, &QAction::triggered, this, [this]() { saveModelFile(); });
+    save_action_->setShortcut(QKeySequence::Save);
+    connect(save_action_, &QAction::triggered, this, [this]() { saveModelFile(); });
+    QAction *save_action = save_action_;
 
-    QAction *save_as_action = make_action(QStringLiteral("Сохранить\nкак"),
-                                          QStringLiteral("Сохранить модель в другой файл"));
-    save_as_action->setShortcut(QKeySequence::SaveAs);
-    connect(save_as_action, &QAction::triggered, this, [this]() { saveModelFileAs(); });
+    save_as_action_ = make_action(QStringLiteral("Сохранить\nкак"),
+                                  QStringLiteral("Сохранить модель проекта в другой файл"));
+    save_as_action_->setShortcut(QKeySequence::SaveAs);
+    connect(save_as_action_, &QAction::triggered, this, [this]() { saveModelFileAs(); });
+    QAction *save_as_action = save_as_action_;
 
     QAction *quit_action =
-        make_action(QStringLiteral("Закрыть"), QStringLiteral("Закрыть приложение"));
+        make_action(QStringLiteral("Выход"), QStringLiteral("Закрыть приложение"));
     quit_action->setShortcut(QKeySequence::Quit);
     connect(quit_action, &QAction::triggered, this, &QWidget::close);
+
+    QAction *about_action =
+        make_action(QStringLiteral("О\nпрограмме"),
+                    QStringLiteral("Название и версия ПО, состав расчётного ядра, горячие клавиши"));
+    connect(about_action, &QAction::triggered, this, &MainWindow::showAboutDialog);
+    connect(ribbon_bar_, &RibbonBar::helpRequested, this, &MainWindow::showAboutDialog);
 
     start_simulation_action_ = make_action(
         QStringLiteral("Начать\nрасчёт"),
@@ -2311,10 +2583,11 @@ void MainWindow::createRibbon()
                     QStringLiteral("Показать или скрыть список переменных модели"));
     parameters_action->setCheckable(true);
     parameters_action->setChecked(true);
-    connect(parameters_action, &QAction::toggled, this, [this](bool visible) {
-        if (parameter_dock_ != nullptr) {
-            parameter_dock_->setVisible(visible);
-        }
+    parameters_action_ = parameters_action;
+    connect(parameters_action, &QAction::toggled, this, [this](bool) {
+        // Док показывается только в рабочей области и только если отмечен; общая
+        // логика видимости живёт в updateProjectActionsEnabled.
+        updateProjectActionsEnabled();
     });
 
     QAction *navigation_action =
@@ -2403,9 +2676,19 @@ void MainWindow::createRibbon()
     // ------------------------------------------------------------- File ----
     RibbonTab *file_tab = ribbon_bar_->addRibbonTab(QStringLiteral("File"));
     RibbonGroup *project_group = file_tab->addGroup(QStringLiteral("Проект"));
-    project_group->addLargeButton(open_action, RibbonIcon::Open);
-    project_group->addLargeButton(save_action, RibbonIcon::Save);
-    project_group->addLargeButton(save_as_action, RibbonIcon::SaveAs);
+    project_group->addLargeButton(new_project_action, RibbonIcon::NewProject);
+    project_group->addLargeButton(open_action, RibbonIcon::OpenProject);
+    project_group->addLargeButton(close_project_action_, RibbonIcon::CloseProject);
+
+    RibbonGroup *save_group = file_tab->addGroup(QStringLiteral("Сохранение"));
+    save_group->addLargeButton(save_action, RibbonIcon::Save);
+    save_group->addLargeButton(save_as_action, RibbonIcon::SaveAs);
+
+    RibbonGroup *file_start_group = file_tab->addGroup(QStringLiteral("Старт"));
+    file_start_group->addLargeButton(start_page_action, RibbonIcon::Home);
+
+    RibbonGroup *info_group = file_tab->addGroup(QStringLiteral("Сведения"));
+    info_group->addLargeButton(about_action, RibbonIcon::Help);
 
     RibbonGroup *exit_group = file_tab->addGroup(QStringLiteral("Выход"));
     exit_group->addLargeButton(quit_action, RibbonIcon::Quit);
@@ -2413,9 +2696,9 @@ void MainWindow::createRibbon()
     // ------------------------------------------------------------- Home ----
     RibbonTab *home_tab = ribbon_bar_->addRibbonTab(QStringLiteral("Home"));
     RibbonGroup *home_file_group = home_tab->addGroup(QStringLiteral("Файл"));
-    home_file_group->addSmallButton(open_action, RibbonIcon::Open);
+    home_file_group->addSmallButton(new_project_action, RibbonIcon::NewProject);
+    home_file_group->addSmallButton(open_action, RibbonIcon::OpenProject);
     home_file_group->addSmallButton(save_action, RibbonIcon::Save);
-    home_file_group->addSmallButton(save_as_action, RibbonIcon::SaveAs);
 
     RibbonGroup *home_simulation_group = home_tab->addGroup(QStringLiteral("Simulation"));
     home_simulation_group->addLargeButton(start_simulation_action_,
@@ -2549,8 +2832,31 @@ void MainWindow::createRibbon()
     panels_group->addSmallButton(navigation_action, RibbonIcon::Tree);
     panels_group->addSmallButton(parameters_action, RibbonIcon::Parameters);
 
+    // Правка геометрии и запуск расчёта имеют смысл только при открытом
+    // проекте: на стартовой странице эти кнопки гаснут.
+    project_scoped_actions_ = {start_simulation_action_,
+                               setup_solver_action,
+                               report_action,
+                               waveguide_action,
+                               excitation_action,
+                               slot_action,
+                               add_plate_action,
+                               add_iris_action,
+                               add_round_iris_action,
+                               symmetric_profile_action,
+                               step_profile_action,
+                               fields_action,
+                               reset_view_action};
+
+    // Документная строка под лентой ведёт переключение проектов.
+    connect(ribbon_bar_, &RibbonBar::startPageRequested, this, &MainWindow::showStartPage);
+    connect(ribbon_bar_, &RibbonBar::newProjectRequested, this, &MainWindow::newProject);
+    connect(ribbon_bar_, &RibbonBar::projectActivated, this, &MainWindow::activateProject);
+    connect(ribbon_bar_, &RibbonBar::projectCloseRequested, this, [this](int index) {
+        closeProject(index);
+    });
+
     ribbon_bar_->setCurrentTabIndex(1);
-    ribbon_bar_->setDocumentName(documentName());
 }
 
 void MainWindow::createParameterDock()
@@ -2705,7 +3011,11 @@ void MainWindow::updateSimulationActionState()
         return;
     }
 
-    start_simulation_action_->setEnabled(!calculation_running_);
+    // Решатель запускается только из рабочей области открытого проекта: иначе
+    // F5 на стартовой странице считал бы модель закрытого проекта.
+    const bool on_workspace = active_project_ >= 0 && workspace_stack_ != nullptr &&
+                              workspace_stack_->currentIndex() == 1;
+    start_simulation_action_->setEnabled(!calculation_running_ && on_workspace);
     if (calculation_running_) {
         start_simulation_action_->setText(QStringLiteral("Идёт\nрасчёт"));
     } else if (model_changed_since_run_) {
@@ -2720,20 +3030,23 @@ void MainWindow::updateSimulationActionState()
 QString MainWindow::documentName() const
 {
     return current_model_path_.isEmpty()
-               ? QStringLiteral("krutiev_proj")
+               ? QStringLiteral("Без имени")
                : QFileInfo(current_model_path_).completeBaseName();
 }
 
 void MainWindow::updateWindowTitle()
 {
-    const QString base = QStringLiteral("Waveguide CST-like OpenGL");
-    setWindowTitle(current_model_path_.isEmpty()
-                       ? base
-                       : QStringLiteral("%1 — %2")
-                             .arg(QFileInfo(current_model_path_).fileName(), base));
-    if (ribbon_bar_ != nullptr) {
-        ribbon_bar_->setDocumentName(documentName());
+    const QString base = QStringLiteral("%1 %2")
+                             .arg(QCoreApplication::applicationName(),
+                                  QCoreApplication::applicationVersion());
+    if (active_project_ < 0 || current_model_path_.isEmpty()) {
+        setWindowTitle(base);
+        return;
     }
+    setWindowTitle(QStringLiteral("%1%2 — %3")
+                       .arg(documentName(),
+                            document_dirty_ ? QStringLiteral(" *") : QString(),
+                            base));
 }
 
 void MainWindow::applyLoadedParameters(const WaveguideParameters &parameters)
@@ -2771,91 +3084,57 @@ void MainWindow::applyLoadedParameters(const WaveguideParameters &parameters)
     updateModelPreview();
 }
 
-void MainWindow::openModelFile()
-{
-    const QString path = QFileDialog::getOpenFileName(
-        this,
-        QStringLiteral("Открыть модель волновода"),
-        current_model_path_,
-        QStringLiteral("Модель волновода (*.wgm);;Все файлы (*)"));
-    if (path.isEmpty()) {
-        return;
-    }
-
-    WaveguideParameters loaded;
-    QString error;
-    if (!model_io::loadModel(path, &loaded, &parameter_store_, &error)) {
-        QMessageBox::warning(this, QStringLiteral("Открытие модели"), error);
-        return;
-    }
-
-    current_model_path_ = path;
-    updateWindowTitle();
-    applyLoadedParameters(loaded);
-
-    // Если рядом лежит файл расчёта именно для этой модели — показываем его
-    // сразу, без пересчёта. Иначе считаем заново.
-    const QString results_path = model_io::resultsPathFor(path);
-    WaveguideCalculationResult cached;
-    QString results_error;
-    if (QFileInfo::exists(results_path) &&
-        model_io::loadResults(results_path, parameters_, &cached, &results_error)) {
-        // Отменяем возможный текущий расчёт, чтобы он не затёр загруженное.
-        latest_request_id_ = 0;
-        if (worker_ != nullptr) {
-            worker_->setLatestRequestId(0);
-        }
-        calculation_running_ = false;
-        model_changed_since_run_ = false;
-        progress_timer_.stop();
-        calculation_progress_bar_->setVisible(false);
-        calculation_time_label_->setVisible(false);
-        showResult(cached);
-        updateSimulationActionState();
-        setStatus(QStringLiteral("Модель и готовый расчёт загружены из %1")
-                      .arg(QFileInfo(results_path).fileName()),
-                  false);
-        return;
-    }
-
-    if (!results_error.isEmpty()) {
-        setStatus(QStringLiteral("%1 Пересчитываю...").arg(results_error), false);
-    }
-    markModelChanged();
-}
-
 bool MainWindow::writeModel(const QString &path)
 {
     QString error;
+    if (!model_io::ensureProjectLayout(path, &error)) {
+        QMessageBox::warning(this, QStringLiteral("Сохранение проекта"), error);
+        return false;
+    }
     if (!model_io::saveModel(path, parameters_, &parameter_store_, &error)) {
         QMessageBox::warning(this, QStringLiteral("Сохранение модели"), error);
         return false;
     }
     current_model_path_ = path;
-    updateWindowTitle();
 
-    // Рядом с моделью кладём готовый расчёт, если он есть и актуален.
-    const QString results_path = model_io::resultsPathFor(path);
+    // Расчёт кладём в подпапку Result внутри проекта — так проект переносится
+    // на другой ПК целиком одной папкой.
+    QString results_note;
     if (last_result_.valid) {
+        const QString results_path = model_io::projectResultsPathFor(path);
         QString results_error;
         if (model_io::saveResults(results_path, parameters_, last_result_, &results_error)) {
-            setStatus(QStringLiteral("Сохранены модель и расчёт: %1 + %2")
-                          .arg(QFileInfo(path).fileName(),
-                               QFileInfo(results_path).fileName()),
-                      false);
-            return true;
+            results_note = QStringLiteral(" + Result/%1").arg(QFileInfo(results_path).fileName());
+        } else {
+            results_note = QStringLiteral(" (расчёт не сохранён: %1)").arg(results_error);
         }
-        setStatus(QStringLiteral("Модель сохранена, но расчёт — нет: %1").arg(results_error), true);
-        return true;
+    } else {
+        results_note = QStringLiteral(" (расчёт ещё не готов)");
     }
-    setStatus(QStringLiteral("Модель сохранена: %1 (расчёт ещё не готов)")
-                  .arg(QFileInfo(path).fileName()),
+
+    if (active_project_ >= 0) {
+        OpenProject &project = projects_[active_project_];
+        project.file_path = path;
+        project.directory = QFileInfo(path).absolutePath();
+        project.name = QFileInfo(path).completeBaseName();
+        // «Сохранить как» переносит проект — подсказка вкладки должна вести на
+        // новый файл, иначе она указывала бы на прежнюю папку.
+        ribbon_bar_->setProjectTabToolTip(active_project_,
+                                          QDir::toNativeSeparators(
+                                              QFileInfo(path).absoluteFilePath()));
+    }
+    setDocumentDirty(false);   // обновит имя вкладки и заголовок окна
+    pushRecentProject(path);
+    setStatus(QStringLiteral("Сохранено: %1%2").arg(QFileInfo(path).fileName(), results_note),
               false);
     return true;
 }
 
 bool MainWindow::saveModelFile()
 {
+    if (active_project_ < 0) {
+        return false;
+    }
     if (current_model_path_.isEmpty()) {
         return saveModelFileAs();
     }
@@ -2864,18 +3143,796 @@ bool MainWindow::saveModelFile()
 
 bool MainWindow::saveModelFileAs()
 {
+    if (active_project_ < 0) {
+        return false;
+    }
+    const QString start = current_model_path_.isEmpty()
+                              ? QDir(projectsBaseDir()).filePath(QStringLiteral("waveguide.wgproj"))
+                              : current_model_path_;
     QString path = QFileDialog::getSaveFileName(
         this,
-        QStringLiteral("Сохранить модель волновода"),
-        current_model_path_.isEmpty() ? QStringLiteral("waveguide.wgm") : current_model_path_,
-        QStringLiteral("Модель волновода (*.wgm)"));
+        QStringLiteral("Сохранить проект как"),
+        start,
+        QStringLiteral("Проект волновода (*.wgproj);;Модель волновода (*.wgm)"));
     if (path.isEmpty()) {
         return false;
     }
-    if (!path.endsWith(QStringLiteral(".wgm"), Qt::CaseInsensitive)) {
-        path += QStringLiteral(".wgm");
+    if (!path.endsWith(QStringLiteral(".wgproj"), Qt::CaseInsensitive) &&
+        !path.endsWith(QStringLiteral(".wgm"), Qt::CaseInsensitive)) {
+        path += QStringLiteral(".wgproj");
     }
     return writeModel(path);
+}
+
+// ============================================================ проекты ======
+
+QString MainWindow::projectsBaseDir() const
+{
+    QSettings settings;   // название и организация заданы в main.cpp
+    const QString remembered = settings.value(QStringLiteral("projects/last_dir")).toString();
+    if (!remembered.isEmpty()) {
+        return remembered;
+    }
+    // По умолчанию — папка Projects рядом с приложением (переносимая установка).
+    return QDir(QCoreApplication::applicationDirPath()).filePath(QStringLiteral("Projects"));
+}
+
+void MainWindow::rememberProjectsBaseDir(const QString &dir)
+{
+    if (dir.isEmpty()) {
+        return;
+    }
+    QSettings settings;   // название и организация заданы в main.cpp
+    settings.setValue(QStringLiteral("projects/last_dir"), dir);
+}
+
+QStringList MainWindow::recentProjectPaths() const
+{
+    QSettings settings;   // название и организация заданы в main.cpp
+    return settings.value(QStringLiteral("projects/recent")).toStringList();
+}
+
+void MainWindow::pushRecentProject(const QString &file_path)
+{
+    const QString canonical = QFileInfo(file_path).absoluteFilePath();
+    QStringList list = recentProjectPaths();
+    // Убираем прежнюю запись без учёта регистра — на Windows путь может
+    // отличаться регистром при том же файле.
+    for (int index = list.size() - 1; index >= 0; --index) {
+        if (list.at(index).compare(canonical, Qt::CaseInsensitive) == 0) {
+            list.removeAt(index);
+        }
+    }
+    list.prepend(canonical);
+    while (list.size() > 12) {
+        list.removeLast();
+    }
+    QSettings settings;   // название и организация заданы в main.cpp
+    settings.setValue(QStringLiteral("projects/recent"), list);
+}
+
+void MainWindow::removeRecentProject(const QString &file_path)
+{
+    const QString canonical = QFileInfo(file_path).absoluteFilePath();
+    QStringList list = recentProjectPaths();
+    bool changed = false;
+    for (int index = list.size() - 1; index >= 0; --index) {
+        if (list.at(index).compare(canonical, Qt::CaseInsensitive) == 0) {
+            list.removeAt(index);
+            changed = true;
+        }
+    }
+    if (changed) {
+        QSettings settings;   // название и организация заданы в main.cpp
+        settings.setValue(QStringLiteral("projects/recent"), list);
+    }
+}
+
+QString MainWindow::projectTabTitle(int project_index) const
+{
+    const OpenProject &project = projects_[project_index];
+    return project.dirty ? project.name + QStringLiteral(" *") : project.name;
+}
+
+void MainWindow::setDocumentDirty(bool dirty)
+{
+    document_dirty_ = dirty;
+    if (active_project_ >= 0) {
+        projects_[active_project_].dirty = dirty;
+        if (ribbon_bar_ != nullptr) {
+            ribbon_bar_->setProjectTabName(active_project_, projectTabTitle(active_project_));
+        }
+    }
+    updateWindowTitle();
+}
+
+void MainWindow::updateProjectActionsEnabled()
+{
+    const bool on_workspace = workspace_stack_ != nullptr &&
+                              workspace_stack_->currentIndex() == 1 && active_project_ >= 0;
+    if (close_project_action_ != nullptr) {
+        close_project_action_->setEnabled(on_workspace);
+    }
+    if (save_action_ != nullptr) {
+        save_action_->setEnabled(on_workspace);
+    }
+    if (save_as_action_ != nullptr) {
+        save_as_action_->setEnabled(on_workspace);
+    }
+    for (QAction *action : std::as_const(project_scoped_actions_)) {
+        if (action != nullptr) {
+            action->setEnabled(on_workspace);
+        }
+    }
+    // Кнопку запуска решателя ведёт отдельная логика (идёт ли расчёт).
+    if (on_workspace) {
+        updateSimulationActionState();
+    }
+    // Док параметров живёт вне рабочей области (QMainWindow), поэтому его надо
+    // прятать на стартовой странице вручную.
+    if (parameter_dock_ != nullptr) {
+        const bool wanted = parameters_action_ == nullptr || parameters_action_->isChecked();
+        parameter_dock_->setVisible(on_workspace && wanted);
+    }
+}
+
+void MainWindow::harvestActiveProject()
+{
+    if (active_project_ < 0 || active_project_ >= projects_.size()) {
+        return;
+    }
+    OpenProject &project = projects_[active_project_];
+    project.parameters = parameters_;
+    project.variables = parameter_store_.entries();
+    project.result = last_result_;
+    project.file_path = current_model_path_;
+    project.waveguide_name = waveguide_name_;
+    project.slot_name = slot_name_;
+    project.excitation_name = excitation_name_;
+    project.selected_plate_index = selected_plate_index_;
+    project.dirty = document_dirty_;
+    project.model_changed_since_run = model_changed_since_run_;
+}
+
+void MainWindow::clearFieldDisplay()
+{
+    const WaveguideCalculationResult empty;
+    for (WaveguideOpenGLWidget *widget :
+         {open_gl_widget_, top_projection_widget_, side_projection_widget_}) {
+        if (widget != nullptr) {
+            widget->setCalculationResult(empty);
+            widget->setVolumeSlices({});
+        }
+    }
+    if (color_bar_ != nullptr) {
+        color_bar_->setMaximum(0.0);
+    }
+    if (result_text_edit_ != nullptr) {
+        result_text_edit_->clear();
+    }
+}
+
+void MainWindow::applyActiveProject()
+{
+    if (active_project_ < 0 || active_project_ >= projects_.size()) {
+        return;
+    }
+    const OpenProject &project = projects_[active_project_];
+    current_model_path_ = project.file_path;
+    waveguide_name_ = project.waveguide_name.isEmpty() ? QStringLiteral("wr-90")
+                                                       : project.waveguide_name;
+    slot_name_ = project.slot_name.isEmpty() ? QStringLiteral("figure_1") : project.slot_name;
+    excitation_name_ = project.excitation_name.isEmpty() ? QStringLiteral("signal1")
+                                                         : project.excitation_name;
+    parameter_store_.setEntries(project.variables);
+    document_dirty_ = project.dirty;
+    model_changed_since_run_ = project.model_changed_since_run;
+
+    // Переходные кэши вида относятся к прежнему проекту — сбрасываем.
+    slice_offset_fraction_[0] = slice_offset_fraction_[1] = 0.0;
+    applied_slice_offset_fraction_[0] = applied_slice_offset_fraction_[1] = 0.0;
+    volume_cache_plane_ = -1;
+    volume_cache_.clear();
+    clearFieldDisplay();
+
+    // Время и полоса выполнения относились к прогону прежнего проекта.
+    if (calculation_time_label_ != nullptr) {
+        calculation_time_label_->setVisible(false);
+    }
+    if (calculation_progress_bar_ != nullptr) {
+        calculation_progress_bar_->setVisible(false);
+    }
+
+    applyLoadedParameters(project.parameters);
+    selected_plate_index_ = project.selected_plate_index;
+    rebuildObjectTree();
+
+    last_result_ = project.result;
+    if (project.result.valid) {
+        showResult(project.result);
+    } else {
+        updateModelPreview();
+        setStatus(QStringLiteral("Модель готова. Нажмите «Начать расчёт» на вкладке Simulation."),
+                  false);
+    }
+    updateWindowTitle();
+    updateSimulationActionState();
+}
+
+void MainWindow::activateProject(int project_index)
+{
+    if (project_index < 0 || project_index >= projects_.size()) {
+        return;
+    }
+    if (project_index == active_project_) {
+        workspace_stack_->setCurrentIndex(1);
+        ribbon_bar_->setActiveProjectTab(project_index);
+        updateProjectActionsEnabled();
+        return;
+    }
+    cancelRunningCalculation();
+    harvestActiveProject();
+    active_project_ = project_index;
+    applyActiveProject();
+    workspace_stack_->setCurrentIndex(1);
+    ribbon_bar_->setActiveProjectTab(project_index);
+    updateProjectActionsEnabled();
+}
+
+void MainWindow::showStartPage()
+{
+    harvestActiveProject();   // не теряем правки активного проекта
+    cancelRunningCalculation();
+    workspace_stack_->setCurrentIndex(0);
+    refreshStartPageRecents();
+    ribbon_bar_->setActiveProjectTab(-1);
+    updateProjectActionsEnabled();
+    setStatus(QStringLiteral("Стартовая страница. Создайте новый проект или откройте существующий."),
+              false);
+}
+
+void MainWindow::openProject()
+{
+    const QString path = QFileDialog::getOpenFileName(
+        this,
+        QStringLiteral("Открыть проект"),
+        projectsBaseDir(),
+        QStringLiteral("Проект волновода (*.wgproj *.wgm);;Все файлы (*)"));
+    if (path.isEmpty()) {
+        return;
+    }
+    openProjectPath(path);
+}
+
+void MainWindow::openProjectPath(const QString &file_path)
+{
+    const QString canonical = QFileInfo(file_path).absoluteFilePath();
+
+    // Уже открыт? — просто активируем его вкладку.
+    for (int index = 0; index < projects_.size(); ++index) {
+        if (projects_[index].file_path.compare(canonical, Qt::CaseInsensitive) == 0) {
+            activateProject(index);
+            return;
+        }
+    }
+
+    WaveguideParameters params;
+    ParameterStore variables;
+    QString error;
+    if (!model_io::loadModel(canonical, &params, &variables, &error)) {
+        QMessageBox::warning(this, QStringLiteral("Открытие проекта"), error);
+        removeRecentProject(canonical);
+        refreshStartPageRecents();
+        return;
+    }
+
+    OpenProject project;
+    project.file_path = canonical;
+    project.directory = QFileInfo(canonical).absolutePath();
+    project.name = QFileInfo(canonical).completeBaseName();
+    project.parameters = params;
+    project.variables = variables.entries();
+    project.selected_plate_index = params.pec_plates.isEmpty() ? -1 : 0;
+    project.dirty = false;
+    project.model_changed_since_run = true;
+
+    // Готовый расчёт: сначала внутри Result, затем рядом с моделью (совместимо
+    // со старыми файлами, лежавшими без подпапки).
+    WaveguideCalculationResult cached;
+    QString results_error;
+    const QString project_results = model_io::projectResultsPathFor(canonical);
+    bool have_results = QFileInfo::exists(project_results) &&
+                        model_io::loadResults(project_results, params, &cached, &results_error);
+    if (!have_results) {
+        const QString legacy_results = model_io::resultsPathFor(canonical);
+        have_results = QFileInfo::exists(legacy_results) &&
+                       model_io::loadResults(legacy_results, params, &cached, &results_error);
+    }
+    if (have_results) {
+        project.result = cached;
+        project.model_changed_since_run = false;
+    }
+
+    cancelRunningCalculation();
+    harvestActiveProject();
+    projects_.append(project);
+    const int index = projects_.size() - 1;
+    ribbon_bar_->addProjectTab(projectTabTitle(index));
+    ribbon_bar_->setProjectTabToolTip(index, QDir::toNativeSeparators(canonical));
+    active_project_ = index;
+    applyActiveProject();
+    workspace_stack_->setCurrentIndex(1);
+    ribbon_bar_->setActiveProjectTab(index);
+    updateProjectActionsEnabled();
+
+    pushRecentProject(canonical);
+    refreshStartPageRecents();
+}
+
+void MainWindow::closeActiveProject()
+{
+    if (active_project_ >= 0) {
+        closeProject(active_project_);
+    }
+}
+
+bool MainWindow::closeProject(int project_index)
+{
+    if (project_index < 0 || project_index >= projects_.size()) {
+        return false;
+    }
+    if (project_index == active_project_) {
+        harvestActiveProject();
+    }
+
+    if (projects_[project_index].dirty) {
+        QMessageBox box(this);
+        box.setWindowTitle(QStringLiteral("Закрытие проекта"));
+        box.setIcon(QMessageBox::Warning);
+        box.setText(QStringLiteral("Проект «%1» содержит несохранённые изменения.")
+                        .arg(projects_[project_index].name));
+        box.setInformativeText(QStringLiteral("Сохранить перед закрытием?"));
+        box.setStandardButtons(QMessageBox::Save | QMessageBox::Discard | QMessageBox::Cancel);
+        box.button(QMessageBox::Save)->setText(QStringLiteral("Сохранить"));
+        box.button(QMessageBox::Discard)->setText(QStringLiteral("Не сохранять"));
+        box.button(QMessageBox::Cancel)->setText(QStringLiteral("Отмена"));
+        box.setDefaultButton(QMessageBox::Save);
+        const int choice = box.exec();
+        if (choice == QMessageBox::Cancel) {
+            return false;
+        }
+        if (choice == QMessageBox::Save) {
+            if (project_index == active_project_) {
+                if (!saveModelFile()) {
+                    return false;
+                }
+            } else {
+                QString error;
+                if (!saveProjectSnapshot(projects_[project_index], &error)) {
+                    QMessageBox::warning(this, QStringLiteral("Сохранение"), error);
+                    return false;
+                }
+            }
+        }
+    }
+
+    const bool was_active = (project_index == active_project_);
+    cancelRunningCalculation();
+    ribbon_bar_->removeProjectTab(project_index);
+    projects_.remove(project_index);
+
+    if (was_active) {
+        active_project_ = -1;
+    } else if (project_index < active_project_) {
+        --active_project_;
+    }
+
+    if (projects_.isEmpty()) {
+        active_project_ = -1;
+        clearFieldDisplay();   // иначе поле закрытого проекта осталось бы на видах
+        showStartPage();
+    } else if (was_active) {
+        const int next = std::min(project_index, static_cast<int>(projects_.size()) - 1);
+        active_project_ = -1;   // принудительно применить снимок нового проекта
+        activateProject(next);
+    } else {
+        ribbon_bar_->setActiveProjectTab(active_project_);
+    }
+    updateProjectActionsEnabled();
+    return true;
+}
+
+bool MainWindow::saveProjectSnapshot(const OpenProject &project, QString *error)
+{
+    if (project.file_path.isEmpty()) {
+        if (error) {
+            *error = QStringLiteral("У проекта нет файла для сохранения.");
+        }
+        return false;
+    }
+    if (!model_io::ensureProjectLayout(project.file_path, error)) {
+        return false;
+    }
+    ParameterStore store;
+    store.setEntries(project.variables);
+    if (!model_io::saveModel(project.file_path, project.parameters, &store, error)) {
+        return false;
+    }
+    if (project.result.valid) {
+        const QString results_path = model_io::projectResultsPathFor(project.file_path);
+        QString results_error;   // некритично: модель уже записана
+        model_io::saveResults(results_path, project.parameters, project.result, &results_error);
+    }
+    return true;
+}
+
+void MainWindow::newProject()
+{
+    newProjectFromPreset(0);
+}
+
+void MainWindow::newProjectFromPreset(int preset)
+{
+    QDialog dialog(this);
+    dialog.setWindowTitle(QStringLiteral("Новый проект"));
+    dialog.setModal(true);
+    dialog.setMinimumWidth(470);
+    dialog.setStyleSheet(styleSheet());
+
+    QVBoxLayout *layout = new QVBoxLayout(&dialog);
+    QFormLayout *form = new QFormLayout();
+
+    QLineEdit *name_edit = new QLineEdit(QStringLiteral("waveguide_project"), &dialog);
+    form->addRow(QStringLiteral("Имя проекта"), name_edit);
+
+    QWidget *location_row = new QWidget(&dialog);
+    QHBoxLayout *location_layout = new QHBoxLayout(location_row);
+    location_layout->setContentsMargins(0, 0, 0, 0);
+    location_layout->setSpacing(6);
+    QLineEdit *location_edit = new QLineEdit(projectsBaseDir(), location_row);
+    QPushButton *browse_button = new QPushButton(QStringLiteral("Обзор…"), location_row);
+    location_layout->addWidget(location_edit, 1);
+    location_layout->addWidget(browse_button);
+    form->addRow(QStringLiteral("Расположение"), location_row);
+
+    QComboBox *preset_combo = new QComboBox(&dialog);
+    for (int index = 0; index < 3; ++index) {
+        preset_combo->addItem(presetName(index));
+    }
+    preset_combo->setCurrentIndex(std::clamp(preset, 0, 2));
+    form->addRow(QStringLiteral("Шаблон"), preset_combo);
+    layout->addLayout(form);
+
+    QLabel *preset_hint = new QLabel(&dialog);
+    preset_hint->setWordWrap(true);
+    preset_hint->setStyleSheet(QStringLiteral("color: #4a5a66;"));
+    layout->addWidget(preset_hint);
+
+    QLabel *path_preview = new QLabel(&dialog);
+    path_preview->setWordWrap(true);
+    path_preview->setStyleSheet(QStringLiteral("color: #7a7a7a;"));
+    layout->addWidget(path_preview);
+
+    const auto update_preview = [&]() {
+        preset_hint->setText(presetDescription(preset_combo->currentIndex()));
+        const QString name = name_edit->text().trimmed();
+        if (name.isEmpty()) {
+            path_preview->setText(QStringLiteral("Укажите имя проекта."));
+            return;
+        }
+        const QString project_dir = QDir(location_edit->text().trimmed()).filePath(name);
+        const QString file = QDir(project_dir).filePath(name + QStringLiteral(".wgproj"));
+        path_preview->setText(
+            QStringLiteral("Будет создано: %1\nРасчёты — в подпапке Result того же каталога.")
+                .arg(QDir::toNativeSeparators(file)));
+    };
+    connect(name_edit, &QLineEdit::textChanged, &dialog, [&](const QString &) { update_preview(); });
+    connect(location_edit, &QLineEdit::textChanged, &dialog, [&](const QString &) {
+        update_preview();
+    });
+    connect(preset_combo, qOverload<int>(&QComboBox::currentIndexChanged), &dialog, [&](int) {
+        update_preview();
+    });
+    connect(browse_button, &QPushButton::clicked, &dialog, [&]() {
+        const QString chosen = QFileDialog::getExistingDirectory(
+            &dialog, QStringLiteral("Папка для проектов"), location_edit->text());
+        if (!chosen.isEmpty()) {
+            location_edit->setText(chosen);
+        }
+    });
+    update_preview();
+
+    // Перевод стандартных кнопок Qt в сборку не входит, поэтому подписи задаются
+    // вручную — иначе рядом с «Создать» появилось бы английское «Cancel».
+    QDialogButtonBox *buttons =
+        new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+    buttons->button(QDialogButtonBox::Ok)->setText(QStringLiteral("Создать"));
+    buttons->button(QDialogButtonBox::Cancel)->setText(QStringLiteral("Отмена"));
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    layout->addWidget(buttons);
+
+    if (dialog.exec() != QDialog::Accepted) {
+        return;
+    }
+
+    QString created;
+    QString error;
+    if (!createProjectOnDisk(location_edit->text().trimmed(),
+                             name_edit->text().trimmed(),
+                             preset_combo->currentIndex(),
+                             &created,
+                             &error)) {
+        QMessageBox::warning(this, QStringLiteral("Новый проект"), error);
+        return;
+    }
+    rememberProjectsBaseDir(location_edit->text().trimmed());
+    openProjectPath(created);
+    setStatus(QStringLiteral("Создан проект: %1").arg(QDir::toNativeSeparators(created)), false);
+}
+
+bool MainWindow::createProjectOnDisk(const QString &parent_dir,
+                                     const QString &name,
+                                     int preset,
+                                     QString *created_file,
+                                     QString *error)
+{
+    const QString clean_name = name.trimmed();
+    if (clean_name.isEmpty()) {
+        if (error) {
+            *error = QStringLiteral("Введите имя проекта.");
+        }
+        return false;
+    }
+    const QString forbidden = QStringLiteral("\\/:*?\"<>|");
+    for (const QChar ch : clean_name) {
+        if (forbidden.contains(ch)) {
+            if (error) {
+                *error = QStringLiteral("Имя не должно содержать символы \\ / : * ? \" < > |");
+            }
+            return false;
+        }
+    }
+    if (parent_dir.isEmpty()) {
+        if (error) {
+            *error = QStringLiteral("Укажите расположение проекта.");
+        }
+        return false;
+    }
+
+    QDir base(parent_dir);
+    if (!base.exists() && !base.mkpath(QStringLiteral("."))) {
+        if (error) {
+            *error = QStringLiteral("Не удалось создать папку: %1").arg(parent_dir);
+        }
+        return false;
+    }
+    const QString project_dir = base.filePath(clean_name);
+    const QString file = QDir(project_dir).filePath(clean_name + QStringLiteral(".wgproj"));
+    if (QFileInfo::exists(file)) {
+        if (error) {
+            *error = QStringLiteral("Проект «%1» уже существует в этой папке.").arg(clean_name);
+        }
+        return false;
+    }
+    if (!model_io::ensureProjectLayout(file, error)) {
+        return false;
+    }
+    const WaveguideParameters params = presetParameters(preset);
+    if (!model_io::saveModel(file, params, nullptr, error)) {
+        return false;
+    }
+    if (created_file != nullptr) {
+        *created_file = QFileInfo(file).absoluteFilePath();
+    }
+    return true;
+}
+
+WaveguideParameters MainWindow::presetParameters(int preset)
+{
+    WaveguideParameters params;   // по умолчанию — прямоугольный WR-90
+    switch (preset) {
+    case 1:   // круглый волновод
+        params.cross_section = 1;
+        params.radius_mm = 10.0;
+        params.length_mm = 50.0;
+        params.frequency_ghz = 12.0;
+        break;
+    case 2: {   // прямоугольный с диафрагмой
+        const double inner_width = params.width_mm - 2.0 * params.wall_thickness_mm;
+        const double inner_depth = params.depth_mm - 2.0 * params.wall_thickness_mm;
+        PecPlateParameters iris;
+        iris.name = QStringLiteral("iris_1");
+        iris.enabled = true;
+        iris.x_min_mm = -0.5 * inner_width;
+        iris.x_max_mm = 0.5 * inner_width;
+        iris.y_min_mm = -0.5 * inner_depth;
+        iris.y_max_mm = 0.5 * inner_depth;
+        iris.z_min_mm = -0.25;
+        iris.z_max_mm = 0.25;
+        iris.aperture_enabled = true;
+        iris.aperture_shape = 0;
+        iris.aperture_width_mm = 0.5 * inner_width;
+        iris.aperture_height_mm = 0.6 * inner_depth;
+        params.pec_plates.push_back(iris);
+        break;
+    }
+    default:
+        break;
+    }
+    return params;
+}
+
+QString MainWindow::presetName(int preset)
+{
+    static const char *const names[] = {
+        "Прямоугольный WR-90",
+        "Круглый волновод",
+        "Прямоугольный с диафрагмой",
+    };
+    return QString::fromUtf8(names[std::clamp(preset, 0, 2)]);
+}
+
+QString MainWindow::presetDescription(int preset)
+{
+    static const char *const hints[] = {
+        "Стандартный прямоугольный волновод 22.86 x 10.16 мм, TE10 на 10 ГГц. "
+        "Пустая заготовка для дальнейшего построения.",
+        "Круглый волновод радиусом 10 мм, моды через функции Бесселя, 12 ГГц.",
+        "Прямоугольный волновод с поперечной диафрагмой (прямоугольное окно) — "
+        "готовый пример для FEM-расчёта S-параметров.",
+    };
+    return QString::fromUtf8(hints[std::clamp(preset, 0, 2)]);
+}
+
+QWidget *MainWindow::buildStartPage()
+{
+    QWidget *page = new QWidget(this);
+    page->setObjectName(QStringLiteral("cstStartPage"));
+    QHBoxLayout *outer = new QHBoxLayout(page);
+    outer->setContentsMargins(0, 0, 0, 0);
+    outer->setSpacing(0);
+
+    // Левая синяя панель — фирменный блок с основными действиями.
+    QWidget *rail = new QWidget(page);
+    rail->setObjectName(QStringLiteral("cstStartRail"));
+    rail->setFixedWidth(256);
+    QVBoxLayout *rail_layout = new QVBoxLayout(rail);
+    rail_layout->setContentsMargins(18, 22, 16, 18);
+    rail_layout->setSpacing(4);
+
+    QLabel *title = new QLabel(QCoreApplication::applicationName(), rail);
+    title->setObjectName(QStringLiteral("cstStartTitle"));
+    title->setWordWrap(true);
+    QLabel *subtitle =
+        new QLabel(QStringLiteral("Версия %1\nРасчёт волноводных структур")
+                       .arg(QCoreApplication::applicationVersion()),
+                   rail);
+    subtitle->setObjectName(QStringLiteral("cstStartSubtitle"));
+    rail_layout->addWidget(title);
+    rail_layout->addWidget(subtitle);
+    rail_layout->addSpacing(24);
+
+    const auto rail_action = [&](const QString &text, RibbonIcon icon) {
+        QToolButton *button = new QToolButton(rail);
+        button->setObjectName(QStringLiteral("cstStartAction"));
+        button->setText(text);
+        button->setIcon(ribbonIcon(icon, 20));
+        button->setIconSize(QSize(20, 20));
+        button->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+        button->setCursor(Qt::PointingHandCursor);
+        button->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+        rail_layout->addWidget(button);
+        return button;
+    };
+    connect(rail_action(QStringLiteral("Новый проект"), RibbonIcon::NewProject),
+            &QToolButton::clicked,
+            this,
+            &MainWindow::newProject);
+    connect(rail_action(QStringLiteral("Открыть проект"), RibbonIcon::OpenProject),
+            &QToolButton::clicked,
+            this,
+            &MainWindow::openProject);
+    rail_layout->addStretch(1);
+    connect(rail_action(QStringLiteral("Выход"), RibbonIcon::Quit),
+            &QToolButton::clicked,
+            this,
+            &QWidget::close);
+    outer->addWidget(rail);
+
+    // Правая часть — шаблоны и недавние проекты.
+    QScrollArea *scroll = new QScrollArea(page);
+    scroll->setWidgetResizable(true);
+    scroll->setFrameShape(QFrame::NoFrame);
+    QWidget *content = new QWidget(scroll);
+    QVBoxLayout *content_layout = new QVBoxLayout(content);
+    content_layout->setContentsMargins(28, 26, 28, 26);
+    content_layout->setSpacing(10);
+
+    QLabel *new_heading = new QLabel(QStringLiteral("Новый проект из шаблона"), content);
+    new_heading->setObjectName(QStringLiteral("cstStartHeading"));
+    content_layout->addWidget(new_heading);
+
+    // QCommandLinkButton сам переносит описание по словам — иначе длинный текст
+    // шаблона растянул бы страницу и вылез в горизонтальную прокрутку.
+    QHBoxLayout *cards = new QHBoxLayout();
+    cards->setSpacing(10);
+    for (int preset = 0; preset < 3; ++preset) {
+        QCommandLinkButton *card =
+            new QCommandLinkButton(presetName(preset), presetDescription(preset), content);
+        card->setObjectName(QStringLiteral("cstPresetCard"));
+        const RibbonIcon icon = preset == 2 ? RibbonIcon::Iris : RibbonIcon::Waveguide;
+        card->setIcon(ribbonIcon(icon, 28));
+        card->setIconSize(QSize(28, 28));
+        card->setCursor(Qt::PointingHandCursor);
+        card->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
+        connect(card, &QCommandLinkButton::clicked, this, [this, preset]() {
+            newProjectFromPreset(preset);
+        });
+        cards->addWidget(card, 1);
+    }
+    content_layout->addLayout(cards);
+    content_layout->addSpacing(12);
+
+    QLabel *recent_heading = new QLabel(QStringLiteral("Недавние проекты"), content);
+    recent_heading->setObjectName(QStringLiteral("cstStartHeading"));
+    content_layout->addWidget(recent_heading);
+
+    QWidget *recent_container = new QWidget(content);
+    start_recent_layout_ = new QVBoxLayout(recent_container);
+    start_recent_layout_->setContentsMargins(0, 0, 0, 0);
+    start_recent_layout_->setSpacing(6);
+    content_layout->addWidget(recent_container);
+
+    start_recent_empty_ =
+        new QLabel(QStringLiteral("Пока нет недавних проектов — создайте новый."), content);
+    start_recent_empty_->setObjectName(QStringLiteral("cstStartHint"));
+    content_layout->addWidget(start_recent_empty_);
+
+    content_layout->addStretch(1);
+    scroll->setWidget(content);
+    outer->addWidget(scroll, 1);
+    return page;
+}
+
+void MainWindow::refreshStartPageRecents()
+{
+    if (start_recent_layout_ == nullptr) {
+        return;
+    }
+    while (QLayoutItem *item = start_recent_layout_->takeAt(0)) {
+        if (QWidget *widget = item->widget()) {
+            widget->deleteLater();
+        }
+        delete item;
+    }
+
+    int shown = 0;
+    for (const QString &path : recentProjectPaths()) {
+        const QFileInfo info(path);
+        if (!info.exists()) {
+            continue;   // проект переместили или удалили
+        }
+        QCommandLinkButton *row = new QCommandLinkButton(
+            info.completeBaseName(),
+            QStringLiteral("%1   ·   изменён %2")
+                .arg(QDir::toNativeSeparators(info.absolutePath()),
+                     info.lastModified().toString(QStringLiteral("dd.MM.yyyy HH:mm"))));
+        row->setObjectName(QStringLiteral("cstRecentItem"));
+        row->setIcon(ribbonIcon(RibbonIcon::Project, 22));
+        row->setIconSize(QSize(22, 22));
+        row->setCursor(Qt::PointingHandCursor);
+        row->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+        const QString path_copy = info.absoluteFilePath();
+        connect(row, &QCommandLinkButton::clicked, this, [this, path_copy]() {
+            openProjectPath(path_copy);
+        });
+        start_recent_layout_->addWidget(row);
+        ++shown;
+    }
+    if (start_recent_empty_ != nullptr) {
+        start_recent_empty_->setVisible(shown == 0);
+    }
 }
 
 QString MainWindow::buildResultText(const WaveguideCalculationResult &result) const

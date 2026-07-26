@@ -120,7 +120,6 @@ public:
 
     RibbonTab *addRibbonTab(const QString &title);
     void setCurrentTabIndex(int index);
-    void setDocumentName(const QString &name);
     // Команда попадает в строку поиска (Alt+Q); группы ленты вызывают это сами
     // для каждой добавленной кнопки.
     void registerSearchAction(QAction *action);

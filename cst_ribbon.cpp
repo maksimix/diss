@@ -847,11 +847,6 @@ void RibbonBar::setCurrentTabIndex(int index)
     pages_->setCurrentIndex(index);
 }
 
-void RibbonBar::setDocumentName(const QString &name)
-{
-    document_tab_bar_->setTabText(0, name);
-}
-
 void RibbonBar::registerSearchAction(QAction *action)
 {
     if (action == nullptr || search_actions_.contains(action)) {

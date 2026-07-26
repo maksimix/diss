@@ -27,8 +27,10 @@ class QPlainTextEdit;
 class QPushButton;
 class QProgressBar;
 class QSlider;
+class QStackedWidget;
 class QTreeWidget;
 class QTreeWidgetItem;
+class QVBoxLayout;
 class WaveguideOpenGLWidget;
 
 class MainWindow : public QMainWindow
@@ -63,9 +65,13 @@ protected:
     void closeEvent(QCloseEvent *event) override;
 
 private slots:
-    void openModelFile();
     bool saveModelFile();
     bool saveModelFileAs();
+    // Управление проектами (см. блок методов ниже).
+    void showStartPage();
+    void newProject();
+    void openProject();
+    void closeActiveProject();
     // Помечает модель изменённой и обновляет предпросмотр, но расчёт не
     // запускает: в CST решатель стартует только по кнопке Start Simulation.
     void markModelChanged();
@@ -113,6 +119,7 @@ private:
                          bool round_post_template = false);
     void showExcitationDialog();
     void showSolverSetupDialog();
+    void showAboutDialog();
     void applyCstStyle();
     void setStatus(const QString &message, bool error);
     void createRibbon();
@@ -146,6 +153,56 @@ private:
     bool writeModel(const QString &path);
     void updateWindowTitle();
 
+    // ---------------------------------------------------- проекты -----------
+    // Один открытый проект: полное состояние документа. Активный проект живёт в
+    // «живых» полях окна (parameters_, last_result_ и т.д.); при переключении
+    // вкладок оно снимается сюда (harvest) и восстанавливается обратно (apply).
+    struct OpenProject
+    {
+        QString directory;   // папка проекта
+        QString file_path;   // <папка>/<имя>.wgproj
+        QString name;        // отображаемое имя (база имени файла)
+        WaveguideParameters parameters;
+        QVector<ModelParameter> variables;   // снимок списка параметров
+        WaveguideCalculationResult result;
+        QString waveguide_name;
+        QString slot_name;
+        QString excitation_name;
+        int selected_plate_index = -1;
+        bool dirty = false;                  // есть несохранённые изменения
+        bool model_changed_since_run = true; // показанное поле старше геометрии
+    };
+
+    QWidget *buildStartPage();
+    void refreshStartPageRecents();
+    void newProjectFromPreset(int preset);
+    bool createProjectOnDisk(const QString &parent_dir,
+                             const QString &name,
+                             int preset,
+                             QString *created_file,
+                             QString *error);
+    void openProjectPath(const QString &file_path);
+    bool closeProject(int project_index);
+    void activateProject(int project_index);
+    void harvestActiveProject();
+    void applyActiveProject();
+    void cancelRunningCalculation();
+    // Убирает с видов поле прежнего проекта: setModelPreview обновляет только
+    // геометрию, а стрелки, срезы и стопка объёма остались бы от чужого расчёта.
+    void clearFieldDisplay();
+    bool saveProjectSnapshot(const OpenProject &project, QString *error);
+    void updateProjectActionsEnabled();
+    void setDocumentDirty(bool dirty);
+    QString projectTabTitle(int project_index) const;
+    QString projectsBaseDir() const;
+    void rememberProjectsBaseDir(const QString &dir);
+    QStringList recentProjectPaths() const;
+    void pushRecentProject(const QString &file_path);
+    void removeRecentProject(const QString &file_path);
+    static WaveguideParameters presetParameters(int preset);
+    static QString presetName(int preset);
+    static QString presetDescription(int preset);
+
     WaveguideOpenGLWidget *open_gl_widget_ = nullptr;
     WaveguideOpenGLWidget *top_projection_widget_ = nullptr;
     WaveguideOpenGLWidget *side_projection_widget_ = nullptr;
@@ -164,7 +221,21 @@ private:
     QComboBox *linear_solver_combo_box_ = nullptr;
     RibbonBar *ribbon_bar_ = nullptr;
     CstPanel *navigation_panel_ = nullptr;
+    QStackedWidget *workspace_stack_ = nullptr;   // 0 — стартовая страница, 1 — работа
+    QWidget *start_page_ = nullptr;
+    QVBoxLayout *start_recent_layout_ = nullptr;
+    QLabel *start_recent_empty_ = nullptr;
+    QVector<OpenProject> projects_;
+    int active_project_ = -1;
+    bool document_dirty_ = false;
     QAction *start_simulation_action_ = nullptr;
+    QAction *close_project_action_ = nullptr;
+    QAction *save_action_ = nullptr;
+    QAction *save_as_action_ = nullptr;
+    QAction *parameters_action_ = nullptr;
+    // Команды, которым нужен открытый проект: на стартовой странице они
+    // выключены, чтобы кнопка не правила несуществующую модель.
+    QVector<QAction *> project_scoped_actions_;
     QDockWidget *parameter_dock_ = nullptr;
     ParameterListWidget *parameter_list_widget_ = nullptr;
     ParameterStore parameter_store_;

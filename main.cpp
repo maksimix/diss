@@ -8,6 +8,15 @@ int main(int argc, char *argv[])
 {
     QApplication app(argc, argv);
 
+    // Официальные сведения о ПО: отсюда их берут заголовок окна, стартовая
+    // страница, окно «О программе» и путь к настройкам (QSettings без
+    // аргументов). Менять название и версию нужно только здесь.
+    // setApplicationDisplayName здесь не задаётся намеренно: Qt дописывал бы его
+    // ко всем заголовкам окон, и получалось «проект — ПО 1.0 - ПО».
+    QApplication::setOrganizationName(QStringLiteral("EM Waveguide Studio"));
+    QApplication::setApplicationName(QStringLiteral("EM Waveguide Studio"));
+    QApplication::setApplicationVersion(QStringLiteral("1.0"));
+
     qRegisterMetaType<WaveguideParameters>("WaveguideParameters");
     qRegisterMetaType<WaveguideCalculationResult>("WaveguideCalculationResult");
     qRegisterMetaType<QVector<FieldGlyph>>("QVector<FieldGlyph>");
