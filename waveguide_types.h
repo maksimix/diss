@@ -3,6 +3,7 @@
 #include "em/em_solution.h"
 
 #include <QtCore/QMetaType>
+#include <QtCore/QPointF>
 #include <QtCore/QString>
 #include <QtCore/QVector>
 #include <QtGui/QColor>
@@ -40,6 +41,37 @@ struct PecPlateParameters
     double post_height_mm = 5.0;
 };
 
+// Свободное тело, которое пользователь строит сам: примитив плюс булева
+// операция над уже построенным металлом. Порядок в списке — история построения,
+// как в дереве CST: «брусок, затем вычесть цилиндр» и обратный порядок дают
+// разные модели. Через этот список описываются перегородки, штыри и диафрагмы с
+// окном любого очертания, которых фиксированная PecPlateParameters не покрывает.
+struct ShapeParameters
+{
+    QString name = QStringLiteral("solid_1");
+    bool enabled = true;
+    int kind = 0;        // 0 — брусок, 1 — цилиндр, 2 — призма по профилю
+    int operation = 0;   // 0 — объединение, 1 — вычитание, 2 — пересечение
+    int axis = 2;        // ось цилиндра / вытягивания призмы: 0 — X, 1 — Y, 2 — Z
+    double center_x_mm = 0.0;
+    double center_y_mm = 0.0;
+    double center_z_mm = 0.0;
+    // Брусок.
+    double size_x_mm = 5.0;
+    double size_y_mm = 5.0;
+    double size_z_mm = 1.0;
+    // Цилиндр.
+    double radius_mm = 2.0;
+    // Длина вдоль оси: цилиндр и призма.
+    double length_mm = 5.0;
+    double rotation_x_deg = 0.0;
+    double rotation_y_deg = 0.0;
+    double rotation_z_deg = 0.0;
+    // Призма: замкнутый профиль в плоскости, перпендикулярной оси, относительно
+    // центра тела. Последняя точка соединяется с первой.
+    QVector<QPointF> profile_mm;
+};
+
 struct WaveguideParameters
 {
     // Форма сечения: 0 — прямоугольное, 1 — круглое. У круглого используется
@@ -62,6 +94,14 @@ struct WaveguideParameters
     // поэтому автоматический выбор берёт прямой, пока хватает памяти.
     int linear_solver_method = 0;
     double frequency_ghz = 10.0;
+    // Мода возбуждения. В автоматическом режиме решатель берёт низшую
+    // распространяющуюся моду (H10 в прямоугольном волноводе, H11 в круглом);
+    // ручной выбор задаёт её точно, и только так можно посмотреть поле высшей
+    // моды — например H11 или E12 в прямоугольном тракте.
+    bool mode_automatic = true;
+    int mode_family = 0;   // 0 — TE (H), 1 — TM (E)
+    int mode_m = 1;
+    int mode_n = 0;
     bool slot_enabled = false;
     double slot_length_mm = 12.0;
     double slot_width_mm = 1.0;
@@ -70,6 +110,9 @@ struct WaveguideParameters
     double slot_rotation_deg = 0.0;
     int slot_surface = 0; // 0 top, 1 right, 2 bottom, 3 left
     QVector<PecPlateParameters> pec_plates;
+    // Свободные тела: их понимает только сеточный решатель, поэтому модель с
+    // непустым списком считается методом конечных элементов.
+    QVector<ShapeParameters> shapes;
 };
 
 enum class FieldGlyphType

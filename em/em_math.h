@@ -13,6 +13,12 @@ constexpr double vacuum_permeability_h_per_m = 1.25663706212e-6;
 constexpr double vacuum_permittivity_f_per_m =
     1.0 / (vacuum_permeability_h_per_m * speed_of_light_m_per_s * speed_of_light_m_per_s);
 
+struct Vec2
+{
+    double x = 0.0;
+    double y = 0.0;
+};
+
 struct Vec3
 {
     double x = 0.0;

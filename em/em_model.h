@@ -2,6 +2,7 @@
 
 #include "em_math.h"
 
+#include <algorithm>
 #include <string>
 #include <vector>
 
@@ -168,6 +169,176 @@ inline bool insidePlateStub(const PecPlateGeometry &plate,
            local_y_m >= bottom_m && local_y_m <= bottom_m + plate.post_height_m;
 }
 
+// ------------------------------------------------------------- формы -------
+// Свободная геометрия, которую пользователь строит сам, как в CST: список
+// примитивов, каждый со своей булевой операцией над накопленным металлом.
+// Порядок в списке — это история построения: тела применяются одно за другим,
+// поэтому «брусок, затем вычесть цилиндр» и «цилиндр, затем вычесть брусок»
+// дают разные модели. Из этого набора собираются и перегородки, и штыри, и
+// диафрагмы с окном произвольного очертания — то, чего фиксированная
+// PecPlateGeometry описать не может.
+enum class ShapeKind
+{
+    Brick,      // параллелепипед
+    Cylinder,   // цилиндр вдоль выбранной оси (диск, штырь, круглая вставка)
+    Prism       // призма: замкнутый профиль, вытянутый вдоль выбранной оси
+};
+
+enum class ShapeBoolean
+{
+    Add,        // объединить с металлом
+    Subtract,   // вычесть из металла (окно, паз, отверстие)
+    Intersect   // оставить общую часть
+};
+
+// Ось цилиндра или направление вытягивания призмы. Профиль призмы лежит в
+// плоскости, перпендикулярной этой оси, в её собственных координатах: для оси Z
+// это (x, y), для оси Y — (z, x), для оси X — (y, z). Такой порядок сохраняет
+// правую тройку, поэтому положительный обход профиля остаётся положительным.
+enum class ShapeAxis
+{
+    X,
+    Y,
+    Z
+};
+
+struct ShapeGeometry
+{
+    std::string name = "shape";
+    bool enabled = true;
+    ShapeKind kind = ShapeKind::Brick;
+    ShapeBoolean operation = ShapeBoolean::Add;
+    Vec3 center_m;
+    Vec3 rotation_rad;
+    Vec3 size_m;               // Brick: полные размеры по осям
+    double radius_m = 0.0;     // Cylinder
+    double length_m = 0.0;     // Cylinder и Prism: длина вдоль оси
+    ShapeAxis axis = ShapeAxis::Z;
+    // Prism: замкнутый профиль в плоскости, перпендикулярной оси, относительно
+    // центра тела. Последняя точка соединяется с первой автоматически.
+    std::vector<Vec2> profile_m;
+};
+
+// Тело, которое действительно занимает объём: вырожденное описание (нулевой
+// радиус, профиль из двух точек) не даёт ни металла, ни отверстия, и его нельзя
+// отправлять в сеточный генератор — булева операция с пустым телом обрывает
+// весь скрипт.
+inline bool shapeIsSolid(const ShapeGeometry &shape)
+{
+    switch (shape.kind) {
+    case ShapeKind::Brick:
+        return shape.size_m.x > 0.0 && shape.size_m.y > 0.0 && shape.size_m.z > 0.0;
+    case ShapeKind::Cylinder:
+        return shape.radius_m > 0.0 && shape.length_m > 0.0;
+    case ShapeKind::Prism:
+        return shape.length_m > 0.0 && shape.profile_m.size() >= 3;
+    }
+    return false;
+}
+
+inline bool hasEnabledShapes(const std::vector<ShapeGeometry> &shapes)
+{
+    for (const ShapeGeometry &shape : shapes) {
+        if (shape.enabled && shapeIsSolid(shape)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Габаритный ящик тела в мировых осях — по нему строится локальное измельчение
+// сетки и оценка объёма металла. Поворот учитывается грубо, через половину
+// диагонали: точный ящик повёрнутой призмы стоил бы разбора профиля, а нужен он
+// только для того, чтобы очертить область измельчения с запасом.
+inline void shapeBoundingBox(const ShapeGeometry &shape, Vec3 *minimum_m, Vec3 *maximum_m)
+{
+    double half_x = 0.0;
+    double half_y = 0.0;
+    double half_z = 0.0;
+    const auto axis_half = [&shape](double transverse_half, double axial_half) {
+        switch (shape.axis) {
+        case ShapeAxis::X:
+            return Vec3{axial_half, transverse_half, transverse_half};
+        case ShapeAxis::Y:
+            return Vec3{transverse_half, axial_half, transverse_half};
+        case ShapeAxis::Z:
+        default:
+            return Vec3{transverse_half, transverse_half, axial_half};
+        }
+    };
+    switch (shape.kind) {
+    case ShapeKind::Brick: {
+        half_x = 0.5 * shape.size_m.x;
+        half_y = 0.5 * shape.size_m.y;
+        half_z = 0.5 * shape.size_m.z;
+        break;
+    }
+    case ShapeKind::Cylinder: {
+        const Vec3 half = axis_half(shape.radius_m, 0.5 * shape.length_m);
+        half_x = half.x;
+        half_y = half.y;
+        half_z = half.z;
+        break;
+    }
+    case ShapeKind::Prism: {
+        double reach = 0.0;
+        for (const Vec2 &point : shape.profile_m) {
+            reach = std::max(reach, std::max(std::abs(point.x), std::abs(point.y)));
+        }
+        const Vec3 half = axis_half(reach, 0.5 * shape.length_m);
+        half_x = half.x;
+        half_y = half.y;
+        half_z = half.z;
+        break;
+    }
+    }
+    const double rotation_reach =
+        std::sqrt(half_x * half_x + half_y * half_y + half_z * half_z) *
+        (std::abs(shape.rotation_rad.x) + std::abs(shape.rotation_rad.y) +
+         std::abs(shape.rotation_rad.z));
+    half_x += rotation_reach;
+    half_y += rotation_reach;
+    half_z += rotation_reach;
+    if (minimum_m != nullptr) {
+        *minimum_m = {shape.center_m.x - half_x,
+                      shape.center_m.y - half_y,
+                      shape.center_m.z - half_z};
+    }
+    if (maximum_m != nullptr) {
+        *maximum_m = {shape.center_m.x + half_x,
+                      shape.center_m.y + half_y,
+                      shape.center_m.z + half_z};
+    }
+}
+
+// Наименьший характерный размер тела: по нему сеточный генератор решает, каким
+// элементом его разрешать. Для призмы это длина самой короткой стороны профиля,
+// потому что именно она, а не габарит, определяет тонкие перемычки.
+inline double shapeSmallestFeature(const ShapeGeometry &shape)
+{
+    switch (shape.kind) {
+    case ShapeKind::Brick:
+        return std::min({shape.size_m.x, shape.size_m.y, shape.size_m.z});
+    case ShapeKind::Cylinder:
+        return std::min(2.0 * shape.radius_m, shape.length_m);
+    case ShapeKind::Prism: {
+        double smallest = shape.length_m;
+        const std::size_t count = shape.profile_m.size();
+        for (std::size_t index = 0; index < count; ++index) {
+            const Vec2 &from = shape.profile_m[index];
+            const Vec2 &to = shape.profile_m[(index + 1) % count];
+            const double edge = std::sqrt((to.x - from.x) * (to.x - from.x) +
+                                          (to.y - from.y) * (to.y - from.y));
+            if (edge > 0.0) {
+                smallest = std::min(smallest, edge);
+            }
+        }
+        return smallest;
+    }
+    }
+    return 0.0;
+}
+
 struct DielectricBlockGeometry
 {
     bool enabled = false;
@@ -295,6 +466,10 @@ struct EmModel
     std::vector<SlotGeometry> slot_geometries;
     std::vector<PecPlateGeometry> pec_plates;
     std::vector<DielectricBlockGeometry> dielectric_blocks;
+    // Свободные тела пользователя. Их видит только сеточный решатель: замкнутые
+    // формулы и методы частичных областей выведены для пластин известного вида и
+    // произвольную форму описать не могут.
+    std::vector<ShapeGeometry> shapes;
 };
 
 struct ModeSelection

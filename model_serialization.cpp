@@ -80,6 +80,67 @@ PecPlateParameters plateFromJson(const QJsonObject &object)
     return plate;
 }
 
+QJsonObject shapeToJson(const ShapeParameters &shape)
+{
+    QJsonObject object;
+    object[QStringLiteral("name")] = shape.name;
+    object[QStringLiteral("enabled")] = shape.enabled;
+    object[QStringLiteral("kind")] = shape.kind;
+    object[QStringLiteral("operation")] = shape.operation;
+    object[QStringLiteral("axis")] = shape.axis;
+    object[QStringLiteral("center_x_mm")] = shape.center_x_mm;
+    object[QStringLiteral("center_y_mm")] = shape.center_y_mm;
+    object[QStringLiteral("center_z_mm")] = shape.center_z_mm;
+    object[QStringLiteral("size_x_mm")] = shape.size_x_mm;
+    object[QStringLiteral("size_y_mm")] = shape.size_y_mm;
+    object[QStringLiteral("size_z_mm")] = shape.size_z_mm;
+    object[QStringLiteral("radius_mm")] = shape.radius_mm;
+    object[QStringLiteral("length_mm")] = shape.length_mm;
+    object[QStringLiteral("rotation_x_deg")] = shape.rotation_x_deg;
+    object[QStringLiteral("rotation_y_deg")] = shape.rotation_y_deg;
+    object[QStringLiteral("rotation_z_deg")] = shape.rotation_z_deg;
+    QJsonArray profile;
+    for (const QPointF &point : shape.profile_mm) {
+        QJsonObject vertex;
+        vertex[QStringLiteral("u_mm")] = point.x();
+        vertex[QStringLiteral("v_mm")] = point.y();
+        profile.append(vertex);
+    }
+    object[QStringLiteral("profile")] = profile;
+    return object;
+}
+
+ShapeParameters shapeFromJson(const QJsonObject &object)
+{
+    ShapeParameters shape;
+    shape.name = object.value(QStringLiteral("name")).toString(shape.name);
+    shape.enabled = object.value(QStringLiteral("enabled")).toBool(shape.enabled);
+    shape.kind = object.value(QStringLiteral("kind")).toInt(shape.kind);
+    shape.operation = object.value(QStringLiteral("operation")).toInt(shape.operation);
+    shape.axis = object.value(QStringLiteral("axis")).toInt(shape.axis);
+    shape.center_x_mm = object.value(QStringLiteral("center_x_mm")).toDouble(shape.center_x_mm);
+    shape.center_y_mm = object.value(QStringLiteral("center_y_mm")).toDouble(shape.center_y_mm);
+    shape.center_z_mm = object.value(QStringLiteral("center_z_mm")).toDouble(shape.center_z_mm);
+    shape.size_x_mm = object.value(QStringLiteral("size_x_mm")).toDouble(shape.size_x_mm);
+    shape.size_y_mm = object.value(QStringLiteral("size_y_mm")).toDouble(shape.size_y_mm);
+    shape.size_z_mm = object.value(QStringLiteral("size_z_mm")).toDouble(shape.size_z_mm);
+    shape.radius_mm = object.value(QStringLiteral("radius_mm")).toDouble(shape.radius_mm);
+    shape.length_mm = object.value(QStringLiteral("length_mm")).toDouble(shape.length_mm);
+    shape.rotation_x_deg =
+        object.value(QStringLiteral("rotation_x_deg")).toDouble(shape.rotation_x_deg);
+    shape.rotation_y_deg =
+        object.value(QStringLiteral("rotation_y_deg")).toDouble(shape.rotation_y_deg);
+    shape.rotation_z_deg =
+        object.value(QStringLiteral("rotation_z_deg")).toDouble(shape.rotation_z_deg);
+    shape.profile_mm.clear();
+    for (const QJsonValue &value : object.value(QStringLiteral("profile")).toArray()) {
+        const QJsonObject vertex = value.toObject();
+        shape.profile_mm.push_back(QPointF(vertex.value(QStringLiteral("u_mm")).toDouble(),
+                                           vertex.value(QStringLiteral("v_mm")).toDouble()));
+    }
+    return shape;
+}
+
 QJsonObject parametersToJson(const WaveguideParameters &parameters)
 {
     QJsonObject waveguide;
@@ -93,6 +154,10 @@ QJsonObject parametersToJson(const WaveguideParameters &parameters)
 
     QJsonObject excitation;
     excitation[QStringLiteral("frequency_ghz")] = parameters.frequency_ghz;
+    excitation[QStringLiteral("mode_automatic")] = parameters.mode_automatic;
+    excitation[QStringLiteral("mode_family")] = parameters.mode_family;
+    excitation[QStringLiteral("mode_m")] = parameters.mode_m;
+    excitation[QStringLiteral("mode_n")] = parameters.mode_n;
 
     QJsonObject slot;
     slot[QStringLiteral("enabled")] = parameters.slot_enabled;
@@ -108,6 +173,11 @@ QJsonObject parametersToJson(const WaveguideParameters &parameters)
         plates.append(plateToJson(plate));
     }
 
+    QJsonArray shapes;
+    for (const ShapeParameters &shape : parameters.shapes) {
+        shapes.append(shapeToJson(shape));
+    }
+
     QJsonObject root;
     root[QStringLiteral("format")] = QStringLiteral("krutiev-waveguide-model");
     root[QStringLiteral("version")] = 1;
@@ -115,6 +185,7 @@ QJsonObject parametersToJson(const WaveguideParameters &parameters)
     root[QStringLiteral("excitation")] = excitation;
     root[QStringLiteral("slot")] = slot;
     root[QStringLiteral("plates")] = plates;
+    root[QStringLiteral("shapes")] = shapes;
     root[QStringLiteral("accuracy_level")] = parameters.accuracy_level;
     root[QStringLiteral("solver_method")] = parameters.solver_method;
     root[QStringLiteral("linear_solver_method")] = parameters.linear_solver_method;
@@ -142,6 +213,14 @@ WaveguideParameters parametersFromJson(const QJsonObject &root)
     const QJsonObject excitation = root.value(QStringLiteral("excitation")).toObject();
     parameters.frequency_ghz =
         excitation.value(QStringLiteral("frequency_ghz")).toDouble(parameters.frequency_ghz);
+    // Модели, записанные до появления выбора моды, этих ключей не имеют: значения
+    // по умолчанию оставляют их на автоматическом выборе, как и раньше.
+    parameters.mode_automatic =
+        excitation.value(QStringLiteral("mode_automatic")).toBool(parameters.mode_automatic);
+    parameters.mode_family =
+        excitation.value(QStringLiteral("mode_family")).toInt(parameters.mode_family);
+    parameters.mode_m = excitation.value(QStringLiteral("mode_m")).toInt(parameters.mode_m);
+    parameters.mode_n = excitation.value(QStringLiteral("mode_n")).toInt(parameters.mode_n);
 
     const QJsonObject slot = root.value(QStringLiteral("slot")).toObject();
     parameters.slot_enabled = slot.value(QStringLiteral("enabled")).toBool(parameters.slot_enabled);
@@ -170,6 +249,13 @@ WaveguideParameters parametersFromJson(const QJsonObject &root)
     const QJsonArray plates = root.value(QStringLiteral("plates")).toArray();
     for (const QJsonValue &value : plates) {
         parameters.pec_plates.push_back(plateFromJson(value.toObject()));
+    }
+
+    // Файлы, записанные до появления свободных тел, ключа не имеют: список
+    // остаётся пустым, и модель читается как прежде.
+    parameters.shapes.clear();
+    for (const QJsonValue &value : root.value(QStringLiteral("shapes")).toArray()) {
+        parameters.shapes.push_back(shapeFromJson(value.toObject()));
     }
     return parameters;
 }
