@@ -53,6 +53,7 @@ public:
     void setVolumeSlices(const QVector<FieldSlice> &slices);
     void setModelPreview(const WaveguideParameters &parameters);
     void setSelectedPlateIndex(int plate_index);
+    void setSelectedShapeIndex(int shape_index);
     void setFieldDisplayMode(FieldDisplayMode mode);
     void setViewPreset(WaveguideViewPreset preset);
     void setFieldFillMode(FieldFillMode mode);
@@ -101,6 +102,19 @@ private:
                            const QColor &edge_color) const;
     void drawSlot() const;
     void drawPecPlates() const;
+    // Свободные тела пользователя. Вычитаемые тела рисуются каркасом другого
+    // цвета: в кадре они означают не металл, а вырезанную в нём полость.
+    void drawUserShapes() const;
+    void drawShapeCylinder(const ShapeParameters &shape,
+                           const QColor &body_color,
+                           double body_alpha,
+                           const QColor &edge_color,
+                           bool wireframe) const;
+    void drawShapePrism(const ShapeParameters &shape,
+                        const QColor &body_color,
+                        double body_alpha,
+                        const QColor &edge_color,
+                        bool wireframe) const;
     void drawBox(double min_x,
                  double max_x,
                  double min_y,
@@ -186,4 +200,5 @@ private:
     bool slot_editing_ = false;
     bool slot_rotating_ = false;
     int selected_plate_index_ = -1;
+    int selected_shape_index_ = -1;
 };

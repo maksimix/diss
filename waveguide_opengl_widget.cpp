@@ -116,6 +116,12 @@ void WaveguideOpenGLWidget::setSelectedPlateIndex(int plate_index)
     update();
 }
 
+void WaveguideOpenGLWidget::setSelectedShapeIndex(int shape_index)
+{
+    selected_shape_index_ = shape_index;
+    update();
+}
+
 void WaveguideOpenGLWidget::setFieldDisplayMode(FieldDisplayMode mode)
 {
     field_display_mode_ = mode;
@@ -207,6 +213,7 @@ void WaveguideOpenGLWidget::paintGL()
             drawVolumeSlices();
         }
         drawPecPlates();
+        drawUserShapes();
         drawFields();
         drawPropagationArrow();
     }
@@ -781,6 +788,202 @@ void WaveguideOpenGLWidget::drawWaveguide() const
     glEnd();
 
     drawSlot();
+}
+
+void WaveguideOpenGLWidget::drawUserShapes() const
+{
+    for (int shape_index = 0; shape_index < result_.parameters.shapes.size(); ++shape_index) {
+        const ShapeParameters &shape = result_.parameters.shapes[shape_index];
+        if (!shape.enabled) {
+            continue;
+        }
+        const bool selected = shape_index == selected_shape_index_;
+        // Вычитание и пересечение не добавляют металла, поэтому тело рисуется
+        // каркасом: сплошная заливка выглядела бы как деталь, которой в модели
+        // нет. Сама вырезанная полость видна на срезе поля после расчёта.
+        const bool wireframe = shape.operation != 0;
+        const QColor body_color = selected ? QColor(62, 151, 210)
+                                           : (wireframe ? QColor(210, 130, 60)
+                                                        : QColor(145, 157, 168));
+        const double body_alpha = wireframe ? 0.0 : (selected ? 0.98 : 0.9);
+        const QColor edge_color = selected ? QColor(255, 210, 68)
+                                           : (wireframe ? QColor(235, 165, 90)
+                                                        : QColor(225, 235, 242));
+
+        glPushMatrix();
+        glTranslated(shape.center_x_mm, shape.center_y_mm, shape.center_z_mm);
+        // Тот же порядок, что у сеточного генератора: X, затем Y, затем Z.
+        glRotated(shape.rotation_z_deg, 0.0, 0.0, 1.0);
+        glRotated(shape.rotation_y_deg, 0.0, 1.0, 0.0);
+        glRotated(shape.rotation_x_deg, 1.0, 0.0, 0.0);
+        switch (shape.kind) {
+        case 1:
+            drawShapeCylinder(shape, body_color, body_alpha, edge_color, wireframe);
+            break;
+        case 2:
+            drawShapePrism(shape, body_color, body_alpha, edge_color, wireframe);
+            break;
+        default: {
+            const double half_x = 0.5 * shape.size_x_mm;
+            const double half_y = 0.5 * shape.size_y_mm;
+            const double half_z = 0.5 * shape.size_z_mm;
+            if (!wireframe) {
+                drawBox(-half_x, half_x, -half_y, half_y, -half_z, half_z, body_color,
+                        body_alpha);
+            }
+            ::glLineWidth(selected ? 2.2f : 1.5f);
+            drawBoxEdges(-half_x, half_x, -half_y, half_y, -half_z, half_z, edge_color);
+            break;
+        }
+        }
+        glPopMatrix();
+    }
+}
+
+void WaveguideOpenGLWidget::drawShapeCylinder(const ShapeParameters &shape,
+                                              const QColor &body_color,
+                                              double body_alpha,
+                                              const QColor &edge_color,
+                                              bool wireframe) const
+{
+    constexpr int segments = 40;
+    const double half_length = 0.5 * shape.length_mm;
+    const double radius = shape.radius_mm;
+    // Ось тела задаёт, какая пара координат образует окружность: остальная
+    // геометрия одинакова, поэтому точка строится одной лямбдой.
+    const auto point = [&shape, radius, half_length](double angle, double axial) {
+        const double u = radius * std::cos(angle);
+        const double v = radius * std::sin(angle);
+        switch (shape.axis) {
+        case 0:
+            return QVector3D(static_cast<float>(axial * half_length),
+                             static_cast<float>(u),
+                             static_cast<float>(v));
+        case 1:
+            return QVector3D(static_cast<float>(v),
+                             static_cast<float>(axial * half_length),
+                             static_cast<float>(u));
+        default:
+            return QVector3D(static_cast<float>(u),
+                             static_cast<float>(v),
+                             static_cast<float>(axial * half_length));
+        }
+    };
+
+    if (!wireframe) {
+        setColor(body_color, body_alpha);
+        glBegin(GL_QUAD_STRIP);
+        for (int segment = 0; segment <= segments; ++segment) {
+            const double angle = 2.0 * pi * segment / segments;
+            const QVector3D bottom = point(angle, -1.0);
+            const QVector3D top = point(angle, 1.0);
+            glVertex3f(bottom.x(), bottom.y(), bottom.z());
+            glVertex3f(top.x(), top.y(), top.z());
+        }
+        glEnd();
+        for (const double axial : {-1.0, 1.0}) {
+            // Торец — веер от точки на оси тела к ободу.
+            glBegin(GL_TRIANGLE_FAN);
+            glVertex3f(shape.axis == 0 ? static_cast<float>(axial * half_length) : 0.0f,
+                       shape.axis == 1 ? static_cast<float>(axial * half_length) : 0.0f,
+                       shape.axis == 2 ? static_cast<float>(axial * half_length) : 0.0f);
+            for (int segment = 0; segment <= segments; ++segment) {
+                const QVector3D rim = point(2.0 * pi * segment / segments, axial);
+                glVertex3f(rim.x(), rim.y(), rim.z());
+            }
+            glEnd();
+        }
+    }
+
+    setColor(edge_color, 0.95);
+    for (const double axial : {-1.0, 1.0}) {
+        glBegin(GL_LINE_LOOP);
+        for (int segment = 0; segment < segments; ++segment) {
+            const QVector3D rim = point(2.0 * pi * segment / segments, axial);
+            glVertex3f(rim.x(), rim.y(), rim.z());
+        }
+        glEnd();
+    }
+    glBegin(GL_LINES);
+    for (int segment = 0; segment < 4; ++segment) {
+        const double angle = 0.5 * pi * segment;
+        const QVector3D bottom = point(angle, -1.0);
+        const QVector3D top = point(angle, 1.0);
+        glVertex3f(bottom.x(), bottom.y(), bottom.z());
+        glVertex3f(top.x(), top.y(), top.z());
+    }
+    glEnd();
+}
+
+void WaveguideOpenGLWidget::drawShapePrism(const ShapeParameters &shape,
+                                           const QColor &body_color,
+                                           double body_alpha,
+                                           const QColor &edge_color,
+                                           bool wireframe) const
+{
+    const int count = shape.profile_mm.size();
+    if (count < 3) {
+        return;
+    }
+    const double half_length = 0.5 * shape.length_mm;
+    // Профиль живёт в плоскости, перпендикулярной оси, в тех же координатах,
+    // что и в сеточном скрипте: для оси Z это (x, y), для Y — (z, x), для X —
+    // (y, z). Иначе тело в кадре и тело в расчёте разъехались бы.
+    const auto point = [&shape, half_length](const QPointF &profile_point, double axial) {
+        switch (shape.axis) {
+        case 0:
+            return QVector3D(static_cast<float>(axial * half_length),
+                             static_cast<float>(profile_point.x()),
+                             static_cast<float>(profile_point.y()));
+        case 1:
+            return QVector3D(static_cast<float>(profile_point.y()),
+                             static_cast<float>(axial * half_length),
+                             static_cast<float>(profile_point.x()));
+        default:
+            return QVector3D(static_cast<float>(profile_point.x()),
+                             static_cast<float>(profile_point.y()),
+                             static_cast<float>(axial * half_length));
+        }
+    };
+
+    if (!wireframe) {
+        // Боковая поверхность: она одна показывает форму профиля, а торцы
+        // невыпуклого профиля треугольниками веером не закрыть — их заменяет
+        // обводка контура ниже.
+        setColor(body_color, body_alpha);
+        glBegin(GL_QUADS);
+        for (int index = 0; index < count; ++index) {
+            const QPointF &from = shape.profile_mm[index];
+            const QPointF &to = shape.profile_mm[(index + 1) % count];
+            const QVector3D a = point(from, -1.0);
+            const QVector3D b = point(to, -1.0);
+            const QVector3D c = point(to, 1.0);
+            const QVector3D d = point(from, 1.0);
+            glVertex3f(a.x(), a.y(), a.z());
+            glVertex3f(b.x(), b.y(), b.z());
+            glVertex3f(c.x(), c.y(), c.z());
+            glVertex3f(d.x(), d.y(), d.z());
+        }
+        glEnd();
+    }
+
+    setColor(edge_color, 0.95);
+    for (const double axial : {-1.0, 1.0}) {
+        glBegin(GL_LINE_LOOP);
+        for (const QPointF &profile_point : shape.profile_mm) {
+            const QVector3D vertex = point(profile_point, axial);
+            glVertex3f(vertex.x(), vertex.y(), vertex.z());
+        }
+        glEnd();
+    }
+    glBegin(GL_LINES);
+    for (const QPointF &profile_point : shape.profile_mm) {
+        const QVector3D bottom = point(profile_point, -1.0);
+        const QVector3D top = point(profile_point, 1.0);
+        glVertex3f(bottom.x(), bottom.y(), bottom.z());
+        glVertex3f(top.x(), top.y(), top.z());
+    }
+    glEnd();
 }
 
 void WaveguideOpenGLWidget::drawPecPlates() const
