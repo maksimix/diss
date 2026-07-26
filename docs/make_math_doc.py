@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Генерирует PDF с полной математикой расчёта, как реализовано в krutiev."""
+"""Генерирует PDF с полной математикой расчёта, как реализовано в EM Waveguide Studio."""
 import textwrap
 
 import matplotlib
@@ -45,7 +45,7 @@ class DocBuilder:
                       "— %d —" % self.page_number,
                       ha="center", va="bottom", fontsize=8, color="0.45")
         self.fig.text(MARGIN_L / PAGE_W, MARGIN_B * 0.45 / PAGE_H,
-                      "krutiev: методика ЭМ-расчёта",
+                      "EM Waveguide Studio: методика ЭМ-расчёта",
                       ha="left", va="bottom", fontsize=7.2, color="0.6")
         self.pdf.savefig(self.fig)
         plt.close(self.fig)
@@ -96,7 +96,7 @@ def build(path):
 
     # ------------------------------------------------------------- титул
     d.add("title", "Математика расчёта полей в прямоугольном волноводе")
-    d.add("sub", "Методика в точности повторяет реализацию программы krutiev: "
+    d.add("sub", "Методика в точности повторяет реализацию программы EM Waveguide Studio: "
                  "аналитические решатели (em/analytic_waveguide_solver, em/transverse_pec_partition_solver, "
                  "em/rectangular_mode_field), конечноэлементный решатель (em/mfem_frequency_domain_backend, "
                  "em/gmsh_tetrahedral_mesher) и постобработку (postprocessing/*). Все контрольные соотношения "
@@ -260,7 +260,7 @@ def build(path):
     d.add("body", "Интеграл профиля подобран так, что двойной проход слоя ослабляет волну до уровня R "
                   "(интеграл k·|Im s| по толщине равен σ0, и exp(−2σ0) = R). Контроль физичности: "
                   "|S11|² + |S21|² ≤ 1 — доля излучения неотрицательна.")
-    d.add("note", "Код: em/mfem_frequency_domain_backend.cpp (stretch, MaxwellMatrixCoefficient). Тест (KRUTIEV_RUN_FEM_SLOT_TEST): "
+    d.add("note", "Код: em/mfem_frequency_domain_backend.cpp (stretch, MaxwellMatrixCoefficient). Тест (EMWS_RUN_FEM_SLOT_TEST): "
                   "ненулевое внешнее поле и пассивный баланс мощности.")
 
     # ------------------------------------------------------------- 12

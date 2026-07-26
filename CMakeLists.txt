@@ -1,12 +1,12 @@
 cmake_minimum_required(VERSION 3.24)
-project(krutiev_waveguide LANGUAGES CXX)
+project(EMWaveguideStudio LANGUAGES CXX)
 
-option(KRUTIEV_ENABLE_MFEM "Build the complex H(curl) FEM backend" ON)
-option(KRUTIEV_BUILD_GUI "Build the Qt/OpenGL application" OFF)
-set(KRUTIEV_MFEM_SOURCE_DIR "" CACHE PATH "Optional MFEM source include directory")
+option(EMWS_ENABLE_MFEM "Build the complex H(curl) FEM backend" ON)
+option(EMWS_BUILD_GUI "Build the Qt/OpenGL application" OFF)
+set(EMWS_MFEM_SOURCE_DIR "" CACHE PATH "Optional MFEM source include directory")
 # Header-only Eigen enables the sparse direct solver. Without it the FEM backend
 # builds unchanged and falls back on the iterative solver.
-set(KRUTIEV_EIGEN_SOURCE_DIR "C:/eigen" CACHE PATH "Optional Eigen include directory")
+set(EMWS_EIGEN_SOURCE_DIR "C:/eigen" CACHE PATH "Optional Eigen include directory")
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -15,8 +15,8 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 # Which optional feature the test binary will actually contain. The test sources
 # hide whole groups behind #ifdef, so these two flags decide what "all tests
 # passed" is worth; they are reported at run time by the generated banner below.
-set(KRUTIEV_TESTS_HAVE_MFEM OFF)
-set(KRUTIEV_TESTS_HAVE_EIGEN OFF)
+set(EMWS_TESTS_HAVE_MFEM OFF)
+set(EMWS_TESTS_HAVE_EIGEN OFF)
 
 set(EM_CORE_SOURCES
     em/circular_mode_field.cpp
@@ -31,10 +31,10 @@ set(EM_CORE_SOURCES
     postprocessing/field_visualization_generator.cpp
     postprocessing/slot_excitation_estimator.cpp)
 
-add_library(krutiev_em_core STATIC ${EM_CORE_SOURCES})
-target_include_directories(krutiev_em_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+add_library(emws_em_core STATIC ${EM_CORE_SOURCES})
+target_include_directories(emws_em_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 
-if(KRUTIEV_ENABLE_MFEM)
+if(EMWS_ENABLE_MFEM)
     find_package(MFEM CONFIG QUIET)
     if(NOT MFEM_FOUND)
         include(FetchContent)
@@ -51,33 +51,33 @@ if(KRUTIEV_ENABLE_MFEM)
             GIT_TAG v4.8)
         FetchContent_MakeAvailable(mfem)
     endif()
-    target_sources(krutiev_em_core PRIVATE em/mfem_frequency_domain_backend.cpp)
-    target_compile_definitions(krutiev_em_core PUBLIC KRUTIEV_WITH_MFEM=1)
-    set(KRUTIEV_TESTS_HAVE_MFEM ON)
-    if(KRUTIEV_MFEM_SOURCE_DIR)
-        target_include_directories(krutiev_em_core BEFORE PRIVATE ${KRUTIEV_MFEM_SOURCE_DIR})
+    target_sources(emws_em_core PRIVATE em/mfem_frequency_domain_backend.cpp)
+    target_compile_definitions(emws_em_core PUBLIC EMWS_WITH_MFEM=1)
+    set(EMWS_TESTS_HAVE_MFEM ON)
+    if(EMWS_MFEM_SOURCE_DIR)
+        target_include_directories(emws_em_core BEFORE PRIVATE ${EMWS_MFEM_SOURCE_DIR})
         if(MFEM_DIR)
-            file(TO_CMAKE_PATH "${MFEM_DIR}/config/_config.hpp" KRUTIEV_MFEM_CONFIG_PATH)
-            target_compile_definitions(krutiev_em_core PRIVATE
-                KRUTIEV_MFEM_CONFIG_FILE="${KRUTIEV_MFEM_CONFIG_PATH}")
+            file(TO_CMAKE_PATH "${MFEM_DIR}/config/_config.hpp" EMWS_MFEM_CONFIG_PATH)
+            target_compile_definitions(emws_em_core PRIVATE
+                EMWS_MFEM_CONFIG_FILE="${EMWS_MFEM_CONFIG_PATH}")
         endif()
     endif()
     if(TARGET mfem)
-        target_link_libraries(krutiev_em_core PUBLIC mfem)
+        target_link_libraries(emws_em_core PUBLIC mfem)
     elseif(TARGET MFEM::mfem)
-        target_link_libraries(krutiev_em_core PUBLIC MFEM::mfem)
+        target_link_libraries(emws_em_core PUBLIC MFEM::mfem)
     else()
         message(FATAL_ERROR "MFEM target was not found")
     endif()
 
-    if(KRUTIEV_EIGEN_SOURCE_DIR AND EXISTS "${KRUTIEV_EIGEN_SOURCE_DIR}/Eigen/Dense")
-        # PUBLIC, like KRUTIEV_WITH_MFEM above: tests/em_core_tests.cpp guards the
+    if(EMWS_EIGEN_SOURCE_DIR AND EXISTS "${EMWS_EIGEN_SOURCE_DIR}/Eigen/Dense")
+        # PUBLIC, like EMWS_WITH_MFEM above: tests/em_core_tests.cpp guards the
         # only check of the direct solver's real block layout with
-        # #ifdef KRUTIEV_WITH_EIGEN, so a PRIVATE definition dropped that test from
+        # #ifdef EMWS_WITH_EIGEN, so a PRIVATE definition dropped that test from
         # the CMake build while the run still ended with "All EM core tests passed".
-        target_include_directories(krutiev_em_core SYSTEM PUBLIC ${KRUTIEV_EIGEN_SOURCE_DIR})
-        target_compile_definitions(krutiev_em_core PUBLIC KRUTIEV_WITH_EIGEN=1)
-        set(KRUTIEV_TESTS_HAVE_EIGEN ON)
+        target_include_directories(emws_em_core SYSTEM PUBLIC ${EMWS_EIGEN_SOURCE_DIR})
+        target_compile_definitions(emws_em_core PUBLIC EMWS_WITH_EIGEN=1)
+        set(EMWS_TESTS_HAVE_EIGEN ON)
     else()
         message(STATUS "Eigen not found: the FEM sparse direct solver is disabled")
     endif()
@@ -88,24 +88,24 @@ endif()
 # coverage. The notice cannot live in the test source, which is shared verbatim
 # with the MSBuild project, so it is generated here into the build tree and
 # printed by a static object before and after main.
-set(KRUTIEV_TEST_FEATURE_SUMMARY "")
-set(KRUTIEV_COMPILED_OUT_TEST_GROUPS "")
-if(KRUTIEV_TESTS_HAVE_MFEM)
-    string(APPEND KRUTIEV_TEST_FEATURE_SUMMARY "KRUTIEV_WITH_MFEM=on ")
+set(EMWS_TEST_FEATURE_SUMMARY "")
+set(EMWS_COMPILED_OUT_TEST_GROUPS "")
+if(EMWS_TESTS_HAVE_MFEM)
+    string(APPEND EMWS_TEST_FEATURE_SUMMARY "EMWS_WITH_MFEM=on ")
 else()
-    string(APPEND KRUTIEV_TEST_FEATURE_SUMMARY "KRUTIEV_WITH_MFEM=OFF ")
-    string(APPEND KRUTIEV_COMPILED_OUT_TEST_GROUPS
-           "    \"KRUTIEV_WITH_MFEM: every FEM backend test (empty guide, short circuit, post)\",\n")
+    string(APPEND EMWS_TEST_FEATURE_SUMMARY "EMWS_WITH_MFEM=OFF ")
+    string(APPEND EMWS_COMPILED_OUT_TEST_GROUPS
+           "    \"EMWS_WITH_MFEM: every FEM backend test (empty guide, short circuit, post)\",\n")
 endif()
-if(KRUTIEV_TESTS_HAVE_EIGEN)
-    string(APPEND KRUTIEV_TEST_FEATURE_SUMMARY "KRUTIEV_WITH_EIGEN=on")
+if(EMWS_TESTS_HAVE_EIGEN)
+    string(APPEND EMWS_TEST_FEATURE_SUMMARY "EMWS_WITH_EIGEN=on")
 else()
-    string(APPEND KRUTIEV_TEST_FEATURE_SUMMARY "KRUTIEV_WITH_EIGEN=OFF")
-    string(APPEND KRUTIEV_COMPILED_OUT_TEST_GROUPS
-           "    \"KRUTIEV_WITH_EIGEN: testDirectAndIterativeSolversAgree, the only check of the direct solver block layout\",\n")
+    string(APPEND EMWS_TEST_FEATURE_SUMMARY "EMWS_WITH_EIGEN=OFF")
+    string(APPEND EMWS_COMPILED_OUT_TEST_GROUPS
+           "    \"EMWS_WITH_EIGEN: testDirectAndIterativeSolversAgree, the only check of the direct solver block layout\",\n")
 endif()
 
-set(KRUTIEV_TEST_BANNER_TEMPLATE [==[
+set(EMWS_TEST_BANNER_TEMPLATE [==[
 // Generated by CMakeLists.txt at configure time. Do not edit, do not commit.
 //
 // tests/em_core_tests.cpp is shared verbatim with the MSBuild project, so the
@@ -118,7 +118,7 @@ set(KRUTIEV_TEST_BANNER_TEMPLATE [==[
 namespace
 {
 const char *const compiled_out_test_groups[] = {
-@KRUTIEV_COMPILED_OUT_TEST_GROUPS@    nullptr,
+@EMWS_COMPILED_OUT_TEST_GROUPS@    nullptr,
 };
 
 void reportCompiledOutTestGroups(const char *moment)
@@ -141,7 +141,7 @@ struct CompiledOutTestGroupBanner
 {
     CompiledOutTestGroupBanner()
     {
-        std::fprintf(stdout, "em core tests build: @KRUTIEV_TEST_FEATURE_SUMMARY@\n");
+        std::fprintf(stdout, "em core tests build: @EMWS_TEST_FEATURE_SUMMARY@\n");
         std::fflush(stdout);
         reportCompiledOutTestGroups("before");
     }
@@ -152,19 +152,19 @@ struct CompiledOutTestGroupBanner
 const CompiledOutTestGroupBanner build_configuration_banner;
 }
 ]==])
-string(CONFIGURE "${KRUTIEV_TEST_BANNER_TEMPLATE}" KRUTIEV_TEST_BANNER_SOURCE_TEXT @ONLY)
+string(CONFIGURE "${EMWS_TEST_BANNER_TEMPLATE}" EMWS_TEST_BANNER_SOURCE_TEXT @ONLY)
 file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/em_core_test_build_banner.cpp"
-     "${KRUTIEV_TEST_BANNER_SOURCE_TEXT}")
+     "${EMWS_TEST_BANNER_SOURCE_TEXT}")
 
 add_executable(em_core_tests
     tests/em_core_tests.cpp
     "${CMAKE_CURRENT_BINARY_DIR}/em_core_test_build_banner.cpp")
-target_link_libraries(em_core_tests PRIVATE krutiev_em_core)
+target_link_libraries(em_core_tests PRIVATE emws_em_core)
 
 enable_testing()
 add_test(NAME em_core_tests COMMAND em_core_tests)
 
-if(KRUTIEV_BUILD_GUI)
+if(EMWS_BUILD_GUI)
     find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets OpenGL OpenGLWidgets)
     qt_standard_project_setup()
 
@@ -177,7 +177,7 @@ if(KRUTIEV_BUILD_GUI)
     target_link_libraries(parameter_expression_tests PRIVATE Qt6::Core)
     add_test(NAME parameter_expression_tests COMMAND parameter_expression_tests)
 
-    qt_add_executable(krutiev
+    qt_add_executable(EMWaveguideStudio
         calculation_worker.cpp
         cst_ribbon.cpp
         expression_spin_box.cpp
@@ -189,6 +189,6 @@ if(KRUTIEV_BUILD_GUI)
         postprocessing/qt_field_glyph_adapter.cpp
         waveguide_calculator.cpp
         waveguide_opengl_widget.cpp)
-    target_link_libraries(krutiev PRIVATE krutiev_em_core Qt6::Core Qt6::Gui
+    target_link_libraries(EMWaveguideStudio PRIVATE emws_em_core Qt6::Core Qt6::Gui
                           Qt6::Widgets Qt6::OpenGL Qt6::OpenGLWidgets opengl32)
 endif()

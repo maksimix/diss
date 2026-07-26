@@ -1,5 +1,5 @@
 #include "fem_frequency_domain_solver.h"
-#ifdef KRUTIEV_WITH_MFEM
+#ifdef EMWS_WITH_MFEM
 #include "mfem_frequency_domain_backend.h"
 #endif
 
@@ -13,7 +13,7 @@ FemFrequencyDomainSolver::FemFrequencyDomainSolver(
     std::shared_ptr<const IFemFrequencyDomainBackend> backend)
     : backend_(std::move(backend))
 {
-#ifdef KRUTIEV_WITH_MFEM
+#ifdef EMWS_WITH_MFEM
     if (!backend_) {
         backend_ = createDefaultFemBackend();
     }
