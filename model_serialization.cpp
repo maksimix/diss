@@ -151,6 +151,7 @@ QJsonObject parametersToJson(const WaveguideParameters &parameters)
     waveguide[QStringLiteral("length_mm")] = parameters.length_mm;
     waveguide[QStringLiteral("wall_thickness_mm")] = parameters.wall_thickness_mm;
     waveguide[QStringLiteral("wall_conductivity_s_per_m")] = parameters.wall_conductivity_s_per_m;
+    waveguide[QStringLiteral("shell_display")] = parameters.shell_display;
 
     QJsonObject excitation;
     excitation[QStringLiteral("frequency_ghz")] = parameters.frequency_ghz;
@@ -209,6 +210,8 @@ WaveguideParameters parametersFromJson(const QJsonObject &root)
     parameters.wall_conductivity_s_per_m =
         waveguide.value(QStringLiteral("wall_conductivity_s_per_m"))
             .toDouble(parameters.wall_conductivity_s_per_m);
+    parameters.shell_display =
+        waveguide.value(QStringLiteral("shell_display")).toInt(parameters.shell_display);
 
     const QJsonObject excitation = root.value(QStringLiteral("excitation")).toObject();
     parameters.frequency_ghz =
