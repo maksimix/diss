@@ -154,6 +154,16 @@ void paintRibbonIcon(QPainter &painter, RibbonIcon icon)
         painter.drawPolygon(QPolygonF({QPointF(13, 9), QPointF(23, 16), QPointF(13, 23)}));
         break;
     }
+    case RibbonIcon::Stop: {
+        // Парный к Start: тот же круг, но красный и с белым квадратом стопа.
+        painter.setPen(QPen(QColor(140, 40, 40), 1.4));
+        painter.setBrush(QColor(210, 80, 75));
+        painter.drawEllipse(QRectF(3, 3, 26, 26));
+        painter.setBrush(QColor(255, 255, 255));
+        painter.setPen(Qt::NoPen);
+        painter.drawRect(QRectF(11, 11, 10, 10));
+        break;
+    }
     case RibbonIcon::Setup: {
         painter.setPen(QPen(QColor(90, 100, 110), 1.3));
         painter.setBrush(QColor(175, 185, 195));

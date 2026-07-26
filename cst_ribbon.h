@@ -25,6 +25,7 @@ enum class RibbonIcon
     SaveAs,
     Quit,
     Start,
+    Stop,
     Setup,
     Parameters,
     Waveguide,

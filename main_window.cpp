@@ -96,6 +96,20 @@ QString modeTitle(bool transverse_electric, int m, int n)
         .arg(n);
 }
 
+QString shellDisplayName(int mode)
+{
+    switch (mode) {
+    case 1:
+        return QStringLiteral("Сплошной корпус");
+    case 2:
+        return QStringLiteral("Полупрозрачный");
+    case 3:
+        return QStringLiteral("Только каркас");
+    default:
+        return QStringLiteral("Автоматически (по выбору в дереве)");
+    }
+}
+
 QString shapeKindName(int kind)
 {
     switch (kind) {
@@ -205,25 +219,63 @@ QVector<QPointF> lProfile(double arm_u_mm, double arm_v_mm, double thickness_mm)
                             QPointF(wall, -wall), QPointF(wall, -arm_v), QPointF(0.0, -arm_v)});
 }
 
-// Штырь с поперечной полкой на конце — буква T, лежащая на боку: ножка идёт от
-// стенки внутрь тракта вдоль u, полка стоит поперёк неё вдоль v.
-QVector<QPointF> tProfile(double stem_length_mm,
-                          double stem_width_mm,
-                          double flange_length_mm,
-                          double flange_width_mm)
+// T-образная вставка, стоящая на боковой стенке тракта. Профиль строится сразу
+// в координатах сечения (центр тела — на оси волновода), а его основание
+// повторяет стенку: у круглого сечения это дуга, у прямоугольного — прямая.
+// Прямое основание в круглом волноводе оставляло бы между вставкой и стенкой
+// серп пустоты, а вставка, просто продлённая наружу, торчала бы сквозь стенку.
+// Основание уходит за стенку на малую долю радиуса: точное касание дуги и
+// цилиндра оставляет плёнку металла толщиной в погрешность построения.
+QVector<QPointF> wallMountedTProfile(double wall_reach_mm,
+                                     bool circular,
+                                     double side,
+                                     double stem_length_mm,
+                                     double stem_width_mm,
+                                     double flange_length_mm,
+                                     double flange_width_mm)
 {
-    const double stem_length = std::abs(stem_length_mm);
+    const double reach = std::abs(wall_reach_mm);
+    const double outer = reach * 1.03;
     const double stem_half = 0.5 * std::abs(stem_width_mm);
     const double flange_half = std::max(0.5 * std::abs(flange_length_mm), stem_half);
     const double flange_width = std::abs(flange_width_mm);
-    return centeredProfile({QPointF(0.0, -stem_half),
-                            QPointF(stem_length, -stem_half),
-                            QPointF(stem_length, -flange_half),
-                            QPointF(stem_length + flange_width, -flange_half),
-                            QPointF(stem_length + flange_width, flange_half),
-                            QPointF(stem_length, flange_half),
-                            QPointF(stem_length, stem_half),
-                            QPointF(0.0, stem_half)});
+    const double stem_end = std::clamp(reach - std::abs(stem_length_mm),
+                                       0.05 * reach,
+                                       0.95 * reach);
+    const double flange_inner = std::max(0.02 * reach, stem_end - flange_width);
+    const auto wall_x = [circular, outer](double y) {
+        return circular ? std::sqrt(std::max(0.0, outer * outer - y * y)) : outer;
+    };
+
+    QVector<QPointF> profile;
+    profile.push_back(QPointF(wall_x(-stem_half), -stem_half));
+    profile.push_back(QPointF(stem_end, -stem_half));
+    profile.push_back(QPointF(stem_end, -flange_half));
+    profile.push_back(QPointF(flange_inner, -flange_half));
+    profile.push_back(QPointF(flange_inner, flange_half));
+    profile.push_back(QPointF(stem_end, flange_half));
+    profile.push_back(QPointF(stem_end, stem_half));
+    profile.push_back(QPointF(wall_x(stem_half), stem_half));
+    if (circular) {
+        // Дуга вдоль стенки, сверху вниз: столько отрезков, чтобы стрелка
+        // прогиба осталась заметно меньше толщины ножки.
+        constexpr int arc_segments = 10;
+        for (int segment = 1; segment < arc_segments; ++segment) {
+            const double y = stem_half - 2.0 * stem_half * segment / arc_segments;
+            profile.push_back(QPointF(wall_x(y), y));
+        }
+    }
+    if (side < 0.0) {
+        // Левая вставка — зеркальное отражение по x; порядок обхода при этом
+        // разворачивается, чтобы контур остался обойдённым в ту же сторону.
+        QVector<QPointF> mirrored;
+        mirrored.reserve(profile.size());
+        for (int index = profile.size() - 1; index >= 0; --index) {
+            mirrored.push_back(QPointF(-profile[index].x(), profile[index].y()));
+        }
+        return mirrored;
+    }
+    return profile;
 }
 
 // Проверка одного тела теми же правилами, что применяет решатель: вырожденное
@@ -334,17 +386,22 @@ QVector<ShapeParameters> makeShapeTemplate(int shape_template,
     }
     case 3: {
         // Встречные T-образные вставки: ножка идёт от боковой стенки внутрь,
-        // полка стоит поперёк неё.
+        // полка стоит поперёк неё у самого центра. Профиль задан в координатах
+        // сечения, поэтому тело стоит в нуле и не требует ни сдвига, ни
+        // поворота — основание само садится на стенку.
         for (const double side : {-1.0, 1.0}) {
             ShapeParameters stub;
             stub.name = name_for(QStringLiteral("t_stub"));
             stub.kind = 2;
             stub.axis = 2;
             stub.length_mm = thickness_mm;
-            stub.profile_mm = tProfile(0.55 * half_width_mm, 0.25 * half_height_mm,
-                                       0.9 * half_height_mm, 0.25 * half_width_mm);
-            stub.center_x_mm = side * 0.55 * half_width_mm;
-            stub.rotation_z_deg = side > 0.0 ? 180.0 : 0.0;
+            stub.profile_mm = wallMountedTProfile(half_width_mm,
+                                                  circular,
+                                                  side,
+                                                  0.6 * half_width_mm,
+                                                  0.22 * half_height_mm,
+                                                  0.75 * half_height_mm,
+                                                  0.18 * half_width_mm);
             shapes.push_back(stub);
         }
         break;
@@ -1060,6 +1117,24 @@ void MainWindow::cancelRunningCalculation()
         calculation_progress_bar_->setVisible(false);
         calculation_time_label_->setVisible(false);
     }
+    // Кнопки запуска и остановки должны отражать отмену на любом пути сюда:
+    // смена геометрии, переключение проекта или явная кнопка «Остановить».
+    updateSimulationActionState();
+}
+
+void MainWindow::stopCalculation()
+{
+    if (!calculation_running_) {
+        return;
+    }
+    cancelRunningCalculation();
+    // Отмена кооперативная: флаг проверяется между шагами решателя, поэтому
+    // сетка gmsh или разложение матрицы могут дорабатывать в фоне. Их результат
+    // будет отброшен по номеру запроса; новый расчёт можно запускать сразу — он
+    // встанет в очередь того же рабочего потока.
+    setStatus(QStringLiteral("Расчёт остановлен. Тяжёлый шаг решателя может дорабатывать в "
+                             "фоне — его результат будет отброшен."),
+              true);
 }
 
 void MainWindow::markModelChanged()
@@ -1911,6 +1986,9 @@ void MainWindow::rebuildObjectTree()
          {open_gl_widget_, top_projection_widget_, side_projection_widget_}) {
         view->setSelectedPlateIndex(selected_plate_index_);
         view->setSelectedShapeIndex(selected_shape_index_);
+        // Перестроенное дерево возвращает выделение телу или пластине, но не
+        // волноводу: держать корпус выделенным после этого было бы неверно.
+        view->setShellSelected(false);
     }
 }
 
@@ -1918,6 +1996,7 @@ void MainWindow::handleObjectSelectionChanged()
 {
     selected_plate_index_ = -1;
     selected_shape_index_ = -1;
+    bool waveguide_selected = false;
     const QList<QTreeWidgetItem *> selected_items = object_tree_widget_->selectedItems();
     if (!selected_items.isEmpty()) {
         const QString object_type =
@@ -1926,6 +2005,8 @@ void MainWindow::handleObjectSelectionChanged()
             selected_plate_index_ = selected_items.constFirst()->data(0, object_index_role).toInt();
         } else if (object_type == QStringLiteral("shape")) {
             selected_shape_index_ = selected_items.constFirst()->data(0, object_index_role).toInt();
+        } else if (object_type == QStringLiteral("waveguide")) {
+            waveguide_selected = true;
         }
     }
 
@@ -1933,6 +2014,7 @@ void MainWindow::handleObjectSelectionChanged()
          {open_gl_widget_, top_projection_widget_, side_projection_widget_}) {
         view->setSelectedPlateIndex(selected_plate_index_);
         view->setSelectedShapeIndex(selected_shape_index_);
+        view->setShellSelected(waveguide_selected);
     }
 }
 
@@ -2092,6 +2174,20 @@ void MainWindow::showWaveguideDialog()
     grid_layout->addWidget(cross_section_combo_box, 15, 0);
     grid_layout->addWidget(radius_spin_box, 15, 1);
 
+    // Прозрачность корпуса — свойство объекта, как в CST: она сохраняется с
+    // моделью и решает, видно ли вставки внутри тракта сбоку.
+    QComboBox *shell_display_combo_box = new QComboBox(&dialog);
+    for (int mode = 0; mode < 4; ++mode) {
+        shell_display_combo_box->addItem(shellDisplayName(mode));
+    }
+    shell_display_combo_box->setCurrentIndex(std::clamp(parameters_.shell_display, 0, 3));
+    shell_display_combo_box->setToolTip(
+        QStringLiteral("Автоматически: корпус становится прозрачным, как только в дереве "
+                       "выбрано тело или пластина."));
+    grid_layout->addWidget(new QLabel(QStringLiteral("Отображение корпуса:"), &dialog),
+                           16, 0, 1, 2);
+    grid_layout->addWidget(shell_display_combo_box, 17, 0, 1, 2);
+
     // У круглого сечения ширина и глубина не имеют смысла, а у прямоугольного —
     // радиус. Ненужные поля прячутся, чтобы диалог не предлагал задать размер,
     // который всё равно будет проигнорирован.
@@ -2167,6 +2263,11 @@ void MainWindow::showWaveguideDialog()
         parameters_.wall_conductivity_s_per_m =
             material_combo_box->currentData().toDouble();
         parameters_.frequency_ghz = frequency_spin_box->value();
+        parameters_.shell_display = shell_display_combo_box->currentIndex();
+        if (shell_display_combo_box_ != nullptr) {
+            const QSignalBlocker block(shell_display_combo_box_);
+            shell_display_combo_box_->setCurrentIndex(parameters_.shell_display);
+        }
         rebuildObjectTree();
         markModelChanged();
         return true;
@@ -2894,8 +2995,13 @@ void MainWindow::showShapeDialog(int shape_index, int new_kind)
                     profile = lProfile(half_width_mm, half_height_mm, 0.3 * half_height_mm);
                     break;
                 case 4:
-                    profile = tProfile(0.7 * half_width_mm, 0.3 * half_height_mm,
-                                       half_height_mm, 0.3 * half_width_mm);
+                    // Буква T строится сразу на стенке: её основание повторяет
+                    // очертание сечения, поэтому вставка прилегает без зазора.
+                    profile = wallMountedTProfile(half_width_mm, circular, 1.0,
+                                                  0.6 * half_width_mm,
+                                                  0.22 * half_height_mm,
+                                                  0.75 * half_height_mm,
+                                                  0.18 * half_width_mm);
                     break;
                 default:
                     break;
@@ -3427,6 +3533,15 @@ void MainWindow::createRibbon()
     start_simulation_action_->setShortcut(QKeySequence(Qt::Key_F5));
     connect(start_simulation_action_, &QAction::triggered, this, &MainWindow::runCalculation);
 
+    stop_simulation_action_ = make_action(
+        QStringLiteral("Остановить\nрасчёт"),
+        QStringLiteral("Прервать идущий расчёт (Shift+F5). Решатель останавливается на "
+                       "ближайшей проверке отмены: текущий шаг — сетка или разложение "
+                       "матрицы — может дорабатывать в фоне, его результат отбрасывается."));
+    stop_simulation_action_->setShortcut(QKeySequence(Qt::SHIFT | Qt::Key_F5));
+    stop_simulation_action_->setEnabled(false);
+    connect(stop_simulation_action_, &QAction::triggered, this, &MainWindow::stopCalculation);
+
     QAction *setup_solver_action =
         make_action(QStringLiteral("Настройка\nрешателя"),
                     QStringLiteral("Выбрать метод расчёта и уровень качества сетки"));
@@ -3625,6 +3740,7 @@ void MainWindow::createRibbon()
     home_simulation_group->addLargeButton(start_simulation_action_,
                                           RibbonIcon::Start,
                                           make_start_menu());
+    home_simulation_group->addLargeButton(stop_simulation_action_, RibbonIcon::Stop);
     home_simulation_group->addLargeButton(setup_solver_action, RibbonIcon::Setup);
 
     RibbonGroup *home_shapes_group = home_tab->addGroup(QStringLiteral("Объекты"));
@@ -3690,6 +3806,7 @@ void MainWindow::createRibbon()
     solver_group->addLargeButton(start_simulation_action_,
                                  RibbonIcon::Start,
                                  make_start_menu());
+    solver_group->addLargeButton(stop_simulation_action_, RibbonIcon::Stop);
     solver_group->addLargeButton(setup_solver_action, RibbonIcon::Setup);
 
     RibbonGroup *settings_group = simulation_tab->addGroup(QStringLiteral("Настройки расчёта"));
@@ -3768,6 +3885,38 @@ void MainWindow::createRibbon()
     RibbonGroup *view_group = view_tab->addGroup(QStringLiteral("Вид"));
     view_group->addLargeButton(reset_view_action, RibbonIcon::ResetView);
     view_group->addLargeButton(fields_action, RibbonIcon::Fields);
+
+    // Тот же переключатель, что в свойствах волновода: он нужен прямо во время
+    // осмотра модели, а не через диалог.
+    RibbonGroup *shell_group = view_tab->addGroup(QStringLiteral("Корпус"));
+    shell_display_combo_box_ = new QComboBox();
+    for (int mode = 0; mode < 4; ++mode) {
+        shell_display_combo_box_->addItem(shellDisplayName(mode));
+    }
+    shell_display_combo_box_->setCurrentIndex(std::clamp(parameters_.shell_display, 0, 3));
+    shell_display_combo_box_->setToolTip(
+        QStringLiteral("Автоматически: корпус становится прозрачным, как только в дереве "
+                       "выбрано тело или пластина."));
+    connect(shell_display_combo_box_,
+            QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this,
+            [this](int mode) {
+                parameters_.shell_display = mode;
+                // Прозрачность корпуса — свойство отображения: геометрия не
+                // менялась, поэтому пересчёт не требуется и показанное поле
+                // остаётся на месте, обновляется только вид.
+                if (last_result_.valid) {
+                    last_result_.parameters.shell_display = mode;
+                    for (WaveguideOpenGLWidget *view :
+                         {open_gl_widget_, top_projection_widget_, side_projection_widget_}) {
+                        view->setCalculationResult(last_result_);
+                    }
+                } else {
+                    updateModelPreview();
+                }
+                setDocumentDirty(true);
+            });
+    shell_group->addLabeledWidget(QStringLiteral("Отображение"), shell_display_combo_box_);
 
     RibbonGroup *panels_group = view_tab->addGroup(QStringLiteral("Панели"));
     panels_group->addSmallButton(navigation_action, RibbonIcon::Tree);
@@ -3973,6 +4122,9 @@ void MainWindow::updateSimulationActionState()
     } else {
         start_simulation_action_->setText(QStringLiteral("Пересчитать"));
     }
+    if (stop_simulation_action_ != nullptr) {
+        stop_simulation_action_->setEnabled(calculation_running_ && on_workspace);
+    }
 }
 
 // Имя на документной вкладке под лентой: в CST там стоит имя проекта без
@@ -4019,6 +4171,10 @@ void MainWindow::applyLoadedParameters(const WaveguideParameters &parameters)
     if (solver_method_combo_box_ != nullptr) {
         const QSignalBlocker blocker(solver_method_combo_box_);
         solver_method_combo_box_->setCurrentIndex(std::clamp(parameters_.solver_method, 0, 4));
+    }
+    if (shell_display_combo_box_ != nullptr) {
+        const QSignalBlocker blocker(shell_display_combo_box_);
+        shell_display_combo_box_->setCurrentIndex(std::clamp(parameters_.shell_display, 0, 3));
     }
     if (linear_solver_combo_box_ != nullptr) {
         const QSignalBlocker blocker(linear_solver_combo_box_);
@@ -4946,11 +5102,21 @@ QString MainWindow::buildResultText(const WaveguideCalculationResult &result) co
                         accuracy_names[std::clamp(result.parameters.accuracy_level, 0, 2)]));
         text += QStringLiteral("  Частота: %1 ГГц\n")
                     .arg(number(result.parameters.frequency_ghz, 4));
-        text += QStringLiteral("  Волновод: %1 x %2 x %3 мм, стенка %4 мм\n")
-                    .arg(number(result.parameters.width_mm))
-                    .arg(number(result.parameters.depth_mm))
-                    .arg(number(result.parameters.length_mm))
-                    .arg(number(result.parameters.wall_thickness_mm));
+        // У круглого тракта ширина и глубина — чужие поля: печатать 22.86 x
+        // 10.16 для цилиндра значило бы отчитаться о другой геометрии.
+        if (result.parameters.cross_section == 1) {
+            text += QStringLiteral("  Волновод: круглый, радиус %1 мм, длина %2 мм, "
+                                   "стенка %3 мм\n")
+                        .arg(number(result.parameters.radius_mm))
+                        .arg(number(result.parameters.length_mm))
+                        .arg(number(result.parameters.wall_thickness_mm));
+        } else {
+            text += QStringLiteral("  Волновод: %1 x %2 x %3 мм, стенка %4 мм\n")
+                        .arg(number(result.parameters.width_mm))
+                        .arg(number(result.parameters.depth_mm))
+                        .arg(number(result.parameters.length_mm))
+                        .arg(number(result.parameters.wall_thickness_mm));
+        }
         if (result.mesh_tetrahedron_count > 0) {
             text += QStringLiteral("  Сетка: %1 тетраэдров, %2 неизвестных\n")
                         .arg(result.mesh_tetrahedron_count)

@@ -76,6 +76,11 @@ private slots:
     // запускает: в CST решатель стартует только по кнопке Start Simulation.
     void markModelChanged();
     void runCalculation();
+    // Останавливает идущий расчёт по кнопке. Отмена кооперативная: решатель
+    // прерывается на ближайшей проверке флага, поэтому тяжёлый шаг (сетка gmsh,
+    // разложение матрицы) может дорабатывать в фоне, но его результат
+    // отбрасывается.
+    void stopCalculation();
     void handleCalculationResult(int request_id, const WaveguideCalculationResult &result);
     void handleCalculationProgress(int request_id, const QString &stage);
     void changeFieldDisplayMode(int index);
@@ -222,6 +227,7 @@ private:
     QSlider *slice_position_slider_ = nullptr;
     QLabel *slice_position_value_label_ = nullptr;
     QComboBox *slice_plane_combo_box_ = nullptr;
+    QComboBox *shell_display_combo_box_ = nullptr;
     QComboBox *accuracy_combo_box_ = nullptr;
     QComboBox *solver_method_combo_box_ = nullptr;
     QComboBox *linear_solver_combo_box_ = nullptr;
@@ -235,6 +241,7 @@ private:
     int active_project_ = -1;
     bool document_dirty_ = false;
     QAction *start_simulation_action_ = nullptr;
+    QAction *stop_simulation_action_ = nullptr;
     QAction *close_project_action_ = nullptr;
     QAction *save_action_ = nullptr;
     QAction *save_as_action_ = nullptr;
