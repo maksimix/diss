@@ -28,6 +28,14 @@ bool loadModel(const QString &path,
 // Путь к файлу расчёта рядом с моделью: <модель>.wgr
 QString resultsPathFor(const QString &model_path);
 
+// Путь к кэшу расчёта внутри проекта: <каталог модели>/Result/<база>.wgr.
+// Проект — самодостаточная папка (модель + Result рядом), поэтому переносится
+// на другой ПК целиком и открывается без пересчёта.
+QString projectResultsPathFor(const QString &model_path);
+
+// Создаёт каталог проекта и подпапку Result, если их ещё нет.
+bool ensureProjectLayout(const QString &model_path, QString *error);
+
 bool saveResults(const QString &path,
                  const WaveguideParameters &parameters,
                  const WaveguideCalculationResult &result,

@@ -335,6 +335,32 @@ QString resultsPathFor(const QString &model_path)
     return info.dir().filePath(info.completeBaseName() + QStringLiteral(".wgr"));
 }
 
+QString projectResultsPathFor(const QString &model_path)
+{
+    const QFileInfo info(model_path);
+    const QDir result_dir(info.dir().filePath(QStringLiteral("Result")));
+    return result_dir.filePath(info.completeBaseName() + QStringLiteral(".wgr"));
+}
+
+bool ensureProjectLayout(const QString &model_path, QString *error)
+{
+    const QFileInfo info(model_path);
+    QDir dir(info.absolutePath());
+    if (!dir.exists() && !dir.mkpath(QStringLiteral("."))) {
+        if (error) {
+            *error = QStringLiteral("Не удалось создать папку проекта: %1").arg(dir.absolutePath());
+        }
+        return false;
+    }
+    if (!dir.exists(QStringLiteral("Result")) && !dir.mkpath(QStringLiteral("Result"))) {
+        if (error) {
+            *error = QStringLiteral("Не удалось создать папку Result в проекте.");
+        }
+        return false;
+    }
+    return true;
+}
+
 bool saveResults(const QString &path,
                  const WaveguideParameters &parameters,
                  const WaveguideCalculationResult &result,
