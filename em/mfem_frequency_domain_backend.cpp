@@ -14,13 +14,14 @@
 #endif
 
 #include "analytic_waveguide_solver.h"
+#include "circular_mode_field.h"
 
-#ifdef KRUTIEV_MFEM_CONFIG_FILE
-#define MFEM_CONFIG_FILE KRUTIEV_MFEM_CONFIG_FILE
+#ifdef EMWS_MFEM_CONFIG_FILE
+#define MFEM_CONFIG_FILE EMWS_MFEM_CONFIG_FILE
 #endif
 #include <mfem.hpp>
 
-#ifdef KRUTIEV_WITH_EIGEN
+#ifdef EMWS_WITH_EIGEN
 #ifdef _MSC_VER
 // Eigen is noisy under /W4: constant conditionals in its template dispatch and
 // locals that shadow class members. Not our code, and not worth 80 warnings.
@@ -95,6 +96,15 @@ void buildElementGrid(FemState &state)
     grid.element_bounds.assign(element_count,
                                {infinity, infinity, infinity,
                                 -infinity, -infinity, -infinity});
+    // Криволинейная сетка (круглый тракт): грань элемента второго порядка
+    // выгибается за пределы вершинного ящика — на цилиндрической стенке
+    // серединный узел лежит на самой окружности, до стрелки прогиба хорды
+    // снаружи от неё. Ящик по вершинам тогда отбраковывал бы точки у стенки
+    // ещё до обратного преобразования, и поле там читалось бы нулём. Запас в
+    // несколько процентов диаметра элемента накрывает выгиб; окончательное
+    // решение о принадлежности всё равно принимает обратное преобразование,
+    // поэтому запас не может дать неверного значения — только лишние кандидаты.
+    const double curved_padding_fraction = mesh.GetNodes() != nullptr ? 0.06 : 1.0e-6;
     for (int element = 0; element < element_count; ++element) {
         mfem::Array<int> vertices;
         mesh.GetElementVertices(element, vertices);
@@ -106,9 +116,12 @@ void buildElementGrid(FemState &state)
                 bounds[axis + 3] = std::max(bounds[axis + 3], coordinates[axis]);
             }
         }
+        double largest_extent = 0.0;
         for (int axis = 0; axis < 3; ++axis) {
-            const double padding = 1.0e-10 +
-                                   1.0e-6 * (bounds[axis + 3] - bounds[axis]);
+            largest_extent = std::max(largest_extent, bounds[axis + 3] - bounds[axis]);
+        }
+        for (int axis = 0; axis < 3; ++axis) {
+            const double padding = 1.0e-10 + curved_padding_fraction * largest_extent;
             bounds[axis] -= padding;
             bounds[axis + 3] += padding;
             global_minimum[axis] = std::min(global_minimum[axis], bounds[axis]);
@@ -553,7 +566,7 @@ mfem::Array<int> boundaryMarker(const mfem::Mesh &mesh, int attribute)
     return marker;
 }
 
-#ifdef KRUTIEV_WITH_EIGEN
+#ifdef EMWS_WITH_EIGEN
 // Factorises the real 2N x 2N block form of the complex system and solves it.
 // Returns an empty string on success, otherwise the reason the caller has to
 // fall back on the Krylov solver.
@@ -643,14 +656,18 @@ Complex projectPortElectric(const IFieldEvaluator &field,
 {
     constexpr int x_samples = 36;
     constexpr int y_samples = 24;
+    // Сетка выборки строится по описанному прямоугольнику сечения через общие
+    // помощники: у круглого тракта это квадрат со стороной в диаметр, точки вне
+    // круга отбрасывает проверка ниже.
+    const double half_width_m = crossSectionHalfWidth(geometry);
+    const double half_height_m = crossSectionHalfHeight(geometry);
     Complex numerator = 0.0;
     double denominator = 0.0;
     for (int x_index = 0; x_index < x_samples; ++x_index) {
-        const double x_m = -0.5 * geometry.inner_width_m +
-                           (x_index + 0.5) * geometry.inner_width_m / x_samples;
+        const double x_m = -half_width_m + (x_index + 0.5) * 2.0 * half_width_m / x_samples;
         for (int y_index = 0; y_index < y_samples; ++y_index) {
-            const double y_m = -0.5 * geometry.inner_height_m +
-                               (y_index + 0.5) * geometry.inner_height_m / y_samples;
+            const double y_m = -half_height_m +
+                               (y_index + 0.5) * 2.0 * half_height_m / y_samples;
             // У круглого тракта сетка выборки строится по описанному квадрату,
             // поэтому углы лежат вне полости: там поля нет, и в проекцию моды
             // они внесли бы только шум.
@@ -676,7 +693,7 @@ MfemFrequencyDomainBackend::MfemFrequencyDomainBackend(
     std::filesystem::path working_directory)
     : mesher_(std::move(gmsh_executable)),
       working_directory_(working_directory.empty()
-                             ? std::filesystem::temp_directory_path() / "krutiev_fem"
+                             ? std::filesystem::temp_directory_path() / "em_waveguide_studio_fem"
                              : std::move(working_directory))
 {
 }
@@ -785,7 +802,7 @@ FieldSolution MfemFrequencyDomainBackend::solve(const SimulationRequest &request
 
     const LinearSolverMethod requested_method = request.settings.fem.linear_solver_method;
     bool plan_is_direct = requested_method == LinearSolverMethod::Direct;
-#ifdef KRUTIEV_WITH_EIGEN
+#ifdef EMWS_WITH_EIGEN
     if (requested_method == LinearSolverMethod::Automatic) {
         plan_is_direct = direct_fits_memory || !iterative_can_converge;
     }
@@ -1004,7 +1021,7 @@ FieldSolution MfemFrequencyDomainBackend::solve(const SimulationRequest &request
     bool solved_directly = false;
     int total_iterations = 0;
     double relative_residual = 0.0;
-#ifdef KRUTIEV_WITH_EIGEN
+#ifdef EMWS_WITH_EIGEN
     if (plan_is_direct) {
         mfem::ComplexSparseMatrix *complex_matrix =
             system_operator.Is<mfem::ComplexSparseMatrix>();
@@ -1245,14 +1262,45 @@ FieldSolution MfemFrequencyDomainBackend::solve(const SimulationRequest &request
     solution.scattering.s21 =
         output_projection * std::exp(Complex(0.0, -beta * output_distance));
 
+    // Вырожденная пара круглого волновода. У мод с m >= 1 есть вторая, sin,
+    // поляризация с той же отсечкой; возбуждение здесь чисто cos, но
+    // несимметричное тело поворачивает поляризацию, и проекция только на cos
+    // молча теряла бы эту мощность из баланса. Решение проецируется и на
+    // sin-моду той же амплитуды: cos и sin ортогональны по сечению, поэтому
+    // проекции разделяются точно. Падающей sin-волны нет — на входе ничего не
+    // вычитается, фазовая привязка к плоскостям портов та же.
+    Complex cross_polarized_s11 = 0.0;
+    Complex cross_polarized_s21 = 0.0;
+    if (isCircular(waveguide) && incident.selected_mode.m >= 1) {
+        const auto cross_reference = std::make_shared<CircularModeFieldEvaluator>(
+            incident_request,
+            incident.selected_mode,
+            incident.forward_longitudinal_amplitude,
+            Complex(0.0),
+            std::nullopt,
+            true);
+        const Complex cross_input =
+            projectPortElectric(*solution.field, *cross_reference, waveguide, input_z);
+        const Complex cross_output =
+            projectPortElectric(*solution.field, *cross_reference, waveguide, output_z);
+        cross_polarized_s11 = cross_input * std::exp(Complex(0.0, -beta * input_distance));
+        cross_polarized_s21 = cross_output * std::exp(Complex(0.0, -beta * output_distance));
+    }
+    solution.diagnostics.cross_polarized_s11_magnitude = std::abs(cross_polarized_s11);
+    solution.diagnostics.cross_polarized_s21_magnitude = std::abs(cross_polarized_s21);
+
     // The powers below are all derived from the two projected S-parameters, so
     // their sum balances by construction and proves nothing. The single piece of
     // independent information is the unitarity residual 1 - |S11|^2 - |S21|^2:
     // the port projection never enforces it, so for a model without a physical
     // power sink it measures the numerical error of the whole solve.
+    // Кросс-поляризация входит в отражённую и прошедшую доли: это та же мода на
+    // тех же портах, просто во второй поляризации.
     const double incident_power_w = request.settings.normalization_power_w;
-    const double reflected_fraction = std::norm(solution.scattering.s11);
-    const double transmitted_fraction = std::norm(solution.scattering.s21);
+    const double reflected_fraction = std::norm(solution.scattering.s11) +
+                                      std::norm(cross_polarized_s11);
+    const double transmitted_fraction = std::norm(solution.scattering.s21) +
+                                        std::norm(cross_polarized_s21);
     const double unitarity_residual = 1.0 - reflected_fraction - transmitted_fraction;
     solution.diagnostics.incident_power_w = incident_power_w;
     solution.diagnostics.reflected_power_w = reflected_fraction * incident_power_w;
@@ -1312,6 +1360,20 @@ FieldSolution MfemFrequencyDomainBackend::solve(const SimulationRequest &request
                           "much numerical error; refine the mesh or tighten the "
                           "solver tolerance.";
         solution.diagnostics.warnings.push_back(defect_warning.str());
+    }
+    // Ниже этого проекционный шум: сетка 36 x 24 и дискретизация дают порядка
+    // 1e-3 даже на осесимметричной задаче, где кросс-поляризации нет физически.
+    constexpr double cross_polarization_note_level = 5.0e-3;
+    if (solution.diagnostics.cross_polarized_s11_magnitude > cross_polarization_note_level ||
+        solution.diagnostics.cross_polarized_s21_magnitude > cross_polarization_note_level) {
+        std::ostringstream cross_note;
+        cross_note << "Structure couples into the orthogonal polarization of the degenerate "
+                      "circular mode: |S11_x| = "
+                   << solution.diagnostics.cross_polarized_s11_magnitude
+                   << ", |S21_x| = "
+                   << solution.diagnostics.cross_polarized_s21_magnitude
+                   << "; this power is included in the reflected/transmitted totals.";
+        solution.diagnostics.warnings.push_back(cross_note.str());
     }
     solution.diagnostics.warnings.push_back(
         "S11 and S21 are projected for port-1 excitation; S12/S22 require a second solve.");

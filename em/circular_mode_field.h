@@ -11,9 +11,11 @@ namespace em
 // RectangularModeFieldEvaluator: амплитуда задаёт продольную компоненту (H_z для
 // TE, E_z для TM), прямая волна идёт как exp(-gamma * (z + L/2)).
 //
-// Азимутальная зависимость взята как cos(m*phi) для продольной компоненты. У
-// мод с m >= 1 есть вырожденная пара (cos и sin, повёрнутая на 90/m градусов);
-// здесь считается одна поляризация из пары.
+// Азимутальная зависимость продольной компоненты — cos(m*phi) по умолчанию. У
+// мод с m >= 1 есть вырожденная пара с той же отсечкой: sin(m*phi), повёрнутая
+// на 90/m градусов. Флаг azimuthal_sine выбирает её — обе поляризации нужны
+// портам FEM, чтобы мощность, ушедшая в ортогональную поляризацию на
+// несимметричном теле, не терялась из баланса.
 class CircularModeFieldEvaluator final : public IFieldEvaluator
 {
 public:
@@ -22,7 +24,8 @@ public:
         const ModeDescriptor &mode,
         Complex forward_longitudinal_amplitude,
         Complex backward_longitudinal_amplitude = 0.0,
-        std::optional<AxialFieldRegion> active_region = std::nullopt);
+        std::optional<AxialFieldRegion> active_region = std::nullopt,
+        bool azimuthal_sine = false);
 
     bool contains(const Vec3 &position_m) const override;
     FieldPhasor evaluate(const Vec3 &position_m) const override;
@@ -38,5 +41,6 @@ private:
     Complex permeability_h_per_m_ = vacuum_permeability_h_per_m;
     Complex permittivity_f_per_m_ = vacuum_permittivity_f_per_m;
     std::optional<AxialFieldRegion> active_region_;
+    bool azimuthal_sine_ = false;
 };
 }

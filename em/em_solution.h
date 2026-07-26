@@ -89,6 +89,12 @@ struct SolverDiagnostics
     double linear_relative_residual = 0.0;
     double estimated_pml_reflection = 0.0;
     double maximum_pec_tangential_electric_v_per_m = 0.0;
+    // Круглый волновод, мода с m >= 1: амплитуды решения в ортогональной (sin)
+    // поляризации вырожденной пары на портах. Возбуждение идёт чистой
+    // cos-поляризацией, поэтому ненулевые значения означают, что вставка
+    // повернула поляризацию; эта мощность входит в отражённую и прошедшую.
+    double cross_polarized_s11_magnitude = 0.0;
+    double cross_polarized_s21_magnitude = 0.0;
     // Conductor loss and stored-energy diagnostics (analytic guide solver).
     double conductor_attenuation_np_per_m = 0.0;
     double stored_electric_energy_j = 0.0;

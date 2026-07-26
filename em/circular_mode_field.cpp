@@ -17,14 +17,16 @@ CircularModeFieldEvaluator::CircularModeFieldEvaluator(
     const ModeDescriptor &mode,
     Complex forward_longitudinal_amplitude,
     Complex backward_longitudinal_amplitude,
-    std::optional<AxialFieldRegion> active_region)
+    std::optional<AxialFieldRegion> active_region,
+    bool azimuthal_sine)
     : geometry_(request.model.waveguide),
       mode_(mode),
       angular_frequency_rad_per_s_(2.0 * pi * request.frequency_hz),
       forward_longitudinal_amplitude_(forward_longitudinal_amplitude),
       backward_longitudinal_amplitude_(backward_longitudinal_amplitude),
       cutoff_wavenumber_per_m_(mode.cutoff_wavenumber_per_m),
-      active_region_(active_region)
+      active_region_(active_region),
+      azimuthal_sine_(azimuthal_sine)
 {
     const Material &material = request.model.filling_material;
     permeability_h_per_m_ = vacuum_permeability_h_per_m * material.relative_permeability;
@@ -80,13 +82,19 @@ FieldPhasor CircularModeFieldEvaluator::evaluate(const Vec3 &position_m) const
                                      (backward_factor - forward_factor);
     const Complex imaginary_unit(0.0, 1.0);
 
-    // Продольная функция psi = J_m(k_c r) cos(m phi) и её поперечный градиент в
+    // Продольная функция psi = J_m(k_c r) cos(m phi) — или sin(m phi) для
+    // второй поляризации вырожденной пары — и её поперечный градиент в
     // цилиндрических координатах. Формулы те же, что в декартовом случае, с
-    // заменой d/dx -> d/dr и d/dy -> (1/r) d/dphi.
-    const double pattern = bessel * cos_azimuth;
-    const double gradient_radial = cutoff_wavenumber_per_m_ * bessel_derivative * cos_azimuth;
-    const double gradient_azimuthal = -static_cast<double>(order) * bessel * sin_azimuth /
-                                      radius_m;
+    // заменой d/dx -> d/dr и d/dy -> (1/r) d/dphi; у sin-варианта производная
+    // по phi меняет знак и функцию: d(sin)/dphi = +m cos.
+    const double azimuthal_pattern = azimuthal_sine_ ? sin_azimuth : cos_azimuth;
+    const double azimuthal_derivative = azimuthal_sine_
+                                            ? static_cast<double>(order) * cos_azimuth
+                                            : -static_cast<double>(order) * sin_azimuth;
+    const double pattern = bessel * azimuthal_pattern;
+    const double gradient_radial = cutoff_wavenumber_per_m_ * bessel_derivative *
+                                   azimuthal_pattern;
+    const double gradient_azimuthal = bessel * azimuthal_derivative / radius_m;
 
     Complex radial_component = 0.0;
     Complex azimuthal_component = 0.0;

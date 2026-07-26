@@ -59,8 +59,13 @@ double automaticMeshSize(const SimulationRequest &request)
     // Five elements across the height keep the serial GMRES/GS solver inside
     // its convergent range; h/8 produced systems that stall near 1e-4 while
     // changing the S-parameters of the converged solution by under 0.2%.
-    const double base_size_m = std::min({waveguide.inner_width_m / 8.0,
-                                         waveguide.inner_height_m / 5.0,
+    // Поперечник берётся через общие помощники сечения: у круглого тракта это
+    // диаметр по обеим осям, и размер ячейки не зависит от того, продублировал
+    // ли вызывающий диаметр в inner_width_m / inner_height_m.
+    const double width_m = 2.0 * crossSectionHalfWidth(waveguide);
+    const double height_m = 2.0 * crossSectionHalfHeight(waveguide);
+    const double base_size_m = std::min({width_m / 8.0,
+                                         height_m / 5.0,
                                          wavelength / 12.0});
     // The element count per wavelength above is a first-order budget. A Nedelec
     // element of order p carries a degree-p field inside the tetrahedron and
@@ -212,36 +217,41 @@ std::string appendUserShape(std::ostringstream &script, int &next_tag, const Sha
     }
     case ShapeKind::Prism: {
         const std::size_t count = shape.profile_m.size();
-        const int first_point_tag = next_tag;
-        for (const Vec2 &profile_point : shape.profile_m) {
-            const Vec3 offset = shapeProfilePoint(shape.axis, profile_point);
+        // Теги точек, линий, контура и грани выдаёт сам gmsh (newp/newl/...):
+        // Extrude и булевы операции нумеруют созданные ИМИ сущности
+        // автоматически, и явный счётчик тегов сталкивался с ними — у модели с
+        // двумя призмами вторая падала на «curve with tag N already exists», и
+        // вся сетка обрывалась. next_tag здесь остаётся только именем: он
+        // делает переменные скрипта уникальными между телами.
+        const std::string prefix = "prism" + std::to_string(next_tag++);
+        for (std::size_t index = 0; index < count; ++index) {
+            const Vec3 offset = shapeProfilePoint(shape.axis, shape.profile_m[index]);
             // Грань лежит на «дне» тела, вытягивание идёт вдоль оси на всю длину.
-            script << "Point(" << next_tag++ << ") = {"
+            script << prefix << "p" << index << " = newp;\n"
+                   << "Point(" << prefix << "p" << index << ") = {"
                    << shape.center_m.x + offset.x - 0.5 * shape.length_m * axis.x << ","
                    << shape.center_m.y + offset.y - 0.5 * shape.length_m * axis.y << ","
                    << shape.center_m.z + offset.z - 0.5 * shape.length_m * axis.z << "};\n";
         }
-        const int first_line_tag = next_tag;
         for (std::size_t index = 0; index < count; ++index) {
-            const int from = first_point_tag + static_cast<int>(index);
-            const int to = first_point_tag + static_cast<int>((index + 1) % count);
-            script << "Line(" << next_tag++ << ") = {" << from << "," << to << "};\n";
+            script << prefix << "l" << index << " = newl;\n"
+                   << "Line(" << prefix << "l" << index << ") = {" << prefix << "p" << index
+                   << "," << prefix << "p" << (index + 1) % count << "};\n";
         }
-        const int loop_tag = next_tag++;
-        script << "Curve Loop(" << loop_tag << ") = {";
+        script << prefix << "ll = newll;\n"
+               << "Curve Loop(" << prefix << "ll) = {";
         for (std::size_t index = 0; index < count; ++index) {
-            script << (index == 0 ? "" : ",") << first_line_tag + static_cast<int>(index);
+            script << (index == 0 ? "" : ",") << prefix << "l" << index;
         }
-        script << "};\n";
-        const int surface_tag = next_tag++;
-        script << "Plane Surface(" << surface_tag << ") = {" << loop_tag << "};\n";
-        const std::string extrusion = "prism" + std::to_string(surface_tag);
-        script << extrusion << "[] = Extrude {" << shape.length_m * axis.x << ","
+        script << "};\n"
+               << prefix << "s = news;\n"
+               << "Plane Surface(" << prefix << "s) = {" << prefix << "ll};\n";
+        script << prefix << "[] = Extrude {" << shape.length_m * axis.x << ","
                << shape.length_m * axis.y << "," << shape.length_m * axis.z << "} { Surface{"
-               << surface_tag << "}; };\n"
-               << extrusion << "Volume[] = {" << extrusion << "[1]};\n";
-        appendRotations(script, extrusion + "Volume[]", shape.rotation_rad, shape.center_m);
-        return extrusion + "Volume[]";
+               << prefix << "s}; };\n"
+               << prefix << "Volume[] = {" << prefix << "[1]};\n";
+        appendRotations(script, prefix + "Volume[]", shape.rotation_rad, shape.center_m);
+        return prefix + "Volume[]";
     }
     }
     return {};
@@ -926,6 +936,18 @@ std::string GmshTetrahedralMesher::buildGeometryScript(const SimulationRequest &
     if (mesh.minimum_element_size_m > 0.0) {
         script << "Mesh.CharacteristicLengthMin = " << mesh.minimum_element_size_m << ";\n";
     }
+    if (isCircular(waveguide)) {
+        // Точная стенка круглого тракта. Прямые тетраэдры соединяют узлы на
+        // цилиндре хордами: сечение становится вписанным многоугольником,
+        // эффективный радиус меньше настоящего на стрелку прогиба h^2/(8R), и
+        // отсечка (а с ней и beta) сдвигается на проценты. Десятиузловые
+        // элементы второго порядка следуют цилиндру квадратично, так что
+        // геометрическая ошибка падает до O(h^3) и перестаёт быть видимой на
+        // фоне ошибки самого поля. Оптимизация высокого порядка выправляет
+        // приграничные элементы, чтобы искривление не вывернуло якобианы.
+        script << "Mesh.ElementOrder = 2;\n"
+               << "Mesh.HighOrderOptimize = 1;\n";
+    }
 
     const double wavelength = speed_of_light_m_per_s / request.frequency_hz;
     const double pml_thickness = request.settings.fem.pml.thickness_m > 0.0
@@ -1204,17 +1226,22 @@ std::string GmshTetrahedralMesher::buildGeometryScript(const SimulationRequest &
         script << "backgroundVolumes[] -= {" << dielectric_tags[i] << "};\n"
                << "Physical Volume(" << i + 2 << ") = {" << dielectric_tags[i] << "};\n";
     }
+    // Рамки портов через полупоперечник сечения: у круглого тракта это радиус,
+    // и торцевые диски накрываются независимо от того, заполнены ли
+    // inner_width_m / inner_height_m у вызывающего.
+    const double port_half_width_m = crossSectionHalfWidth(waveguide);
+    const double port_half_height_m = crossSectionHalfHeight(waveguide);
     script << "Physical Volume(1) = {backgroundVolumes[]};\n"
-           << "portIn[] = Surface In BoundingBox{" << -0.5 * waveguide.inner_width_m - tolerance
-           << "," << -0.5 * waveguide.inner_height_m - tolerance << ","
+           << "portIn[] = Surface In BoundingBox{" << -port_half_width_m - tolerance
+           << "," << -port_half_height_m - tolerance << ","
            << -0.5 * waveguide.length_m - tolerance << ","
-           << 0.5 * waveguide.inner_width_m + tolerance << ","
-           << 0.5 * waveguide.inner_height_m + tolerance << ","
+           << port_half_width_m + tolerance << ","
+           << port_half_height_m + tolerance << ","
            << -0.5 * waveguide.length_m + tolerance << "};\n"
-           << "portOut[] = Surface In BoundingBox{" << -0.5 * waveguide.inner_width_m - tolerance
-           << "," << -0.5 * waveguide.inner_height_m - tolerance << ","
-           << 0.5 * waveguide.length_m - tolerance << "," << 0.5 * waveguide.inner_width_m + tolerance
-           << "," << 0.5 * waveguide.inner_height_m + tolerance << ","
+           << "portOut[] = Surface In BoundingBox{" << -port_half_width_m - tolerance
+           << "," << -port_half_height_m - tolerance << ","
+           << 0.5 * waveguide.length_m - tolerance << "," << port_half_width_m + tolerance
+           << "," << port_half_height_m + tolerance << ","
            << 0.5 * waveguide.length_m + tolerance << "};\n"
            << "allBoundary[] = CombinedBoundary{ Volume{allVolumes[]}; };\n"
            << "pecBoundary[] = Abs(allBoundary[]);\n"
@@ -1225,6 +1252,14 @@ std::string GmshTetrahedralMesher::buildGeometryScript(const SimulationRequest &
            << "Physical Surface(102) = {portOut[]};\n";
     appendMeshSizeFields(script, refinement_regions, mesh_size,
                          refinement_limits.smallest_element_size_m);
+    if (isCircular(waveguide)) {
+        // После блока фоновых полей: он выключает все источники размера, в том
+        // числе кривизну, а у круглой стенки именно кривизна держит хорды
+        // короткими. 24 сегмента на полный оборот дают стрелку прогиба меньше
+        // одного процента радиуса ещё до учёта криволинейности элементов;
+        // фоновое поле при этом продолжает действовать — берётся минимум.
+        script << "Mesh.MeshSizeFromCurvature = 24;\n";
+    }
     script << "Mesh 3;\n";
     return script.str();
 }

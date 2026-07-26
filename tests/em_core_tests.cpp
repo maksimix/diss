@@ -1,7 +1,7 @@
 #include "em/derived_fields.h"
 #include "em/em_solver_dispatcher.h"
 #include "em/gmsh_tetrahedral_mesher.h"
-#ifdef KRUTIEV_WITH_MFEM
+#ifdef EMWS_WITH_MFEM
 #include "em/mfem_frequency_domain_backend.h"
 #endif
 #include "em/mode_matching_iris_solver.h"
@@ -1422,7 +1422,7 @@ void testFemGeometryGeneration()
     std::size_t gmsh_path_length = 0;
     if (_dupenv_s(&gmsh_path, &gmsh_path_length, "GMSH_EXECUTABLE") == 0 && gmsh_path) {
         const std::filesystem::path output_directory =
-            std::filesystem::temp_directory_path() / "krutiev_fem_mesh_test";
+            std::filesystem::temp_directory_path() / "em_waveguide_studio_mesh_test";
         const em::FemMeshFiles files =
             em::GmshTetrahedralMesher(gmsh_path).generate(request, output_directory);
         expectTrue(files.error_message.empty(), "Gmsh accepts generated FEM geometry");
@@ -1508,7 +1508,7 @@ em::SimulationRequest makeRefinementCostRequest(bool with_window,
 int meshTetrahedronCount(const em::SimulationRequest &request, const std::string &tag)
 {
     const std::filesystem::path output_directory =
-        std::filesystem::temp_directory_path() / "krutiev_refinement_cost_test" / tag;
+        std::filesystem::temp_directory_path() / "em_waveguide_studio_refinement_test" / tag;
     const em::FemMeshFiles files =
         em::GmshTetrahedralMesher().generate(request, output_directory);
     if (!files.error_message.empty()) {
@@ -1848,7 +1848,7 @@ void testZeroThicknessSheetKeepsItsEdgeRefinement()
                    describeCellSizes(free_edge_script));
 }
 
-#ifdef KRUTIEV_WITH_MFEM
+#ifdef EMWS_WITH_MFEM
 void testMfemEmptyGuide()
 {
     em::SimulationRequest request = createRequest(10.0e9);
@@ -1922,7 +1922,7 @@ void testMfemEmptyGuide()
                    std::to_string(wrapped_difference) + " deg");
 }
 
-#ifdef KRUTIEV_WITH_EIGEN
+#ifdef EMWS_WITH_EIGEN
 em::SimulationRequest makeLinearSolverRequest(em::LinearSolverMethod method)
 {
     em::SimulationRequest request = createRequest(10.0e9);
@@ -2172,7 +2172,7 @@ void testMfemSlotFringing()
 {
     char *run_test = nullptr;
     std::size_t value_length = 0;
-    _dupenv_s(&run_test, &value_length, "KRUTIEV_RUN_FEM_SLOT_TEST");
+    _dupenv_s(&run_test, &value_length, "EMWS_RUN_FEM_SLOT_TEST");
     const bool enabled = run_test && std::string(run_test) == "1";
     std::free(run_test);
     if (!enabled) {
@@ -2372,7 +2372,7 @@ void testMfemCenteredPecPost()
 {
     char *run_test = nullptr;
     std::size_t value_length = 0;
-    _dupenv_s(&run_test, &value_length, "KRUTIEV_RUN_FEM_PLATE_TEST");
+    _dupenv_s(&run_test, &value_length, "EMWS_RUN_FEM_PLATE_TEST");
     const bool enabled = run_test && std::string(run_test) == "1";
     std::free(run_test);
     if (!enabled) {
@@ -2565,13 +2565,80 @@ void testCircularDispatchPolicy()
     expectTrue(!rejected_plate.success && !rejected_plate.error_message.empty(),
                "пластина в круглом волноводе отклоняется с сообщением");
 
-    // Явно выбранный метод, не работающий с круглым сечением, тоже отклоняется.
+    // Явный выбор FEM на пустом круглом тракте разрешён: это перекрёстная
+    // проверка дискретизации на геометрии с точным решением.
     em::SimulationRequest forced_fem = createCircularRequest(10.0e9, 10.0e-3);
     forced_fem.settings.solver_method = em::SolverMethod::FiniteElement;
-    const em::FieldSolution rejected_fem = dispatcher.solve(forced_fem);
-    expectTrue(!rejected_fem.success && !rejected_fem.error_message.empty(),
-               "FEM для круглого волновода отклоняется с сообщением");
+    const em::FieldSolution fem_check = dispatcher.solve(forced_fem);
+    expectTrue(fem_check.success &&
+                   fem_check.diagnostics.backend_name == "Test FEM backend",
+               "пустой круглый волновод по явному выбору уходит в FEM");
+
+    // А методы, выведенные для прямоугольных мод, по-прежнему отклоняются.
+    em::SimulationRequest forced_partition = createCircularRequest(10.0e9, 10.0e-3);
+    forced_partition.settings.solver_method = em::SolverMethod::TransversePartition;
+    const em::FieldSolution rejected_partition = dispatcher.solve(forced_partition);
+    expectTrue(!rejected_partition.success && !rejected_partition.error_message.empty(),
+               "метод поперечных сечений для круглого волновода отклоняется с сообщением");
 }
+
+#if defined(EMWS_WITH_MFEM) && defined(EMWS_WITH_EIGEN)
+// Перекрёстная проверка круглого тракта: у пустого волновода решение точное
+// (функции Бесселя), поэтому FEM обязан воспроизвести его S21 и по модулю, и
+// по фазе. Фаза — чувствительный индикатор именно геометрии стенки: у TE11 на
+// 10 ГГц при a = 10 мм beta реагирует на радиус как d_beta/beta ~ 3.4 dR/R,
+// и прямые элементы без учёта кривизны (вписанный многоугольник вместо
+// цилиндра) дали бы здесь ошибку фазы на порядок больше допуска этого теста.
+void testCircularFemMatchesAnalytic()
+{
+    em::SimulationRequest request = createCircularRequest(10.0e9, 10.0e-3);
+    request.model.waveguide.length_m = 25.0e-3;
+    request.excitation.automatic = false;
+    request.excitation.family = em::ModeFamily::TransverseElectric;
+    request.excitation.m = 1;
+    request.excitation.n = 1;
+    request.settings.fem.relative_tolerance = 1.0e-6;
+    request.settings.fem.maximum_iterations = 1200;
+    // Разложение: тест сверяет дискретизацию, а не итерационный решатель.
+    request.settings.fem.linear_solver_method = em::LinearSolverMethod::Direct;
+
+    const em::FieldSolution fem =
+        em::MfemFrequencyDomainBackend().solve(request, em::SolveControl{});
+    expectTrue(fem.success && fem.has_selected_mode && fem.field,
+               "FEM решает пустой круглый волновод: " + fem.error_message);
+    if (!fem.success) {
+        return;
+    }
+    const em::FieldSolution analytic = em::AnalyticWaveguideSolver().solve(request);
+    expectTrue(analytic.success && analytic.has_selected_mode,
+               "аналитический эталон круглого волновода решается");
+
+    expectTrue(std::abs(fem.scattering.s11) < 0.08,
+               "TE11 не отражается от порта пустого круглого тракта: |S11| = " +
+                   std::to_string(std::abs(fem.scattering.s11)));
+    expectNear(std::abs(fem.scattering.s21),
+               1.0,
+               0.06,
+               "пустой круглый тракт передаёт единичную амплитуду TE11");
+
+    const double phase_difference =
+        std::abs(std::arg(fem.scattering.s21) - std::arg(analytic.scattering.s21));
+    const double wrapped_difference_deg =
+        std::min(phase_difference, 2.0 * em::pi - phase_difference) * 180.0 / em::pi;
+    expectTrue(wrapped_difference_deg < 6.0,
+               "фаза S21 круглого FEM совпадает с точной beta*L: расхождение " +
+                   std::to_string(wrapped_difference_deg) + " град");
+
+    // Пустой осесимметричный тракт не переливает мощность во вторую поляризацию
+    // вырожденной пары: её амплитуда — проекционный и сеточный шум.
+    expectTrue(fem.diagnostics.cross_polarized_s11_magnitude < 0.05 &&
+                   fem.diagnostics.cross_polarized_s21_magnitude < 0.05,
+               "кросс-поляризация в пустом круглом тракте мала: |S11_x| = " +
+                   std::to_string(fem.diagnostics.cross_polarized_s11_magnitude) +
+                   ", |S21_x| = " +
+                   std::to_string(fem.diagnostics.cross_polarized_s21_magnitude));
+}
+#endif
 
 int main()
 {
@@ -2621,14 +2688,15 @@ int main()
     runTest("testCapacitiveGapFollowsTheFeatureKnob",
             testCapacitiveGapFollowsTheFeatureKnob);
     runTest("testPlateRefinementCost", testPlateRefinementCost);
-#ifdef KRUTIEV_WITH_MFEM
+#ifdef EMWS_WITH_MFEM
     runTest("testMfemEmptyGuide", testMfemEmptyGuide);
-#ifdef KRUTIEV_WITH_EIGEN
+#ifdef EMWS_WITH_EIGEN
     runTest("testDirectAndIterativeSolversAgree", testDirectAndIterativeSolversAgree);
     runTest("testSecondOrderSolutionIsNotCalledActive",
             testSecondOrderSolutionIsNotCalledActive);
     runTest("testDefaultConfigurationSolvesWithTheDirectSolver",
             testDefaultConfigurationSolvesWithTheDirectSolver);
+    runTest("testCircularFemMatchesAnalytic", testCircularFemMatchesAnalytic);
 #endif
     testMfemSlotFringing();
     runTest("testMfemTransverseShortCircuit", testMfemTransverseShortCircuit);
@@ -2641,12 +2709,12 @@ int main()
     // looked exactly like success. The guards are visible from inside this file,
     // so the warning belongs here and works under either build system.
     const char *const compiled_out_groups[] = {
-#ifndef KRUTIEV_WITH_MFEM
-        "KRUTIEV_WITH_MFEM: every finite element test, including the ports, the "
+#ifndef EMWS_WITH_MFEM
+        "EMWS_WITH_MFEM: every finite element test, including the ports, the "
         "short circuit and the slot",
 #endif
-#ifndef KRUTIEV_WITH_EIGEN
-        "KRUTIEV_WITH_EIGEN: testDirectAndIterativeSolversAgree, the only check "
+#ifndef EMWS_WITH_EIGEN
+        "EMWS_WITH_EIGEN: testDirectAndIterativeSolversAgree, the only check "
         "of the direct solver block layout",
 #endif
         nullptr,

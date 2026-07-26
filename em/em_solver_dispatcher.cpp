@@ -84,11 +84,19 @@ FieldSolution EmSolverDispatcher::solve(const SimulationRequest &request,
             }
             return FemFrequencyDomainSolver(fem_backend_).solve(request, control);
         }
+        // Пустой круглый тракт имеет точное решение, и Automatic всегда берёт
+        // его. Явный выбор FEM оставлен намеренно: на геометрии с известным
+        // ответом он измеряет ошибку дискретизации самого FEM — единственная
+        // прямая проверка криволинейной сетки и портов круглого сечения.
+        if (request.settings.solver_method == SolverMethod::FiniteElement) {
+            return FemFrequencyDomainSolver(fem_backend_).solve(request, control);
+        }
         if (request.settings.solver_method != SolverMethod::Automatic &&
             request.settings.solver_method != SolverMethod::AnalyticRectangular) {
             return rejected(request,
-                            "Пустой круглый волновод считается аналитически; выберите метод "
-                            "«Автоматически» или «Аналитический».");
+                            "Пустой круглый волновод считается точными формулами Бесселя; "
+                            "методы поперечных сечений и частичных областей к круглому "
+                            "сечению неприменимы.");
         }
         return AnalyticWaveguideSolver().solve(request, control);
     }
