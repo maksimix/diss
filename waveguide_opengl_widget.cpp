@@ -3,11 +3,14 @@
 #include <QtCore/QRect>
 #include <QtGui/QKeyEvent>
 #include <QtGui/QMouseEvent>
+#include <QtGui/QPainterPath>
+#include <QtGui/QPolygonF>
 #include <QtGui/QWheelEvent>
 #include <QtGui/qopengl.h>
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <utility>
 
 namespace
@@ -23,6 +26,369 @@ QVector3D safeNormal(const QVector3D &vector, const QVector3D &fallback)
     }
 
     return vector.normalized();
+}
+
+// Разбиение простого многоугольника на треугольники отсечением ушей. Торец
+// призмы бывает невыпуклым — буквы C, Г, T именно такие, — и веером из одной
+// точки он закрывается неверно: часть треугольников ложится поверх выреза, и
+// тело выглядит то дырявым, то залитым насквозь.
+//
+// Контуры сюда приходят из булевых операций, обрезки по полости и врезки дырок
+// мостиками, поэтому обязательны три вещи, на которых наивное отсечение глохнет
+// и оставляет область незалитой (пластина с C-вырезом рисовалась без внешнего
+// кольца металла — «металл только в островке»):
+//   - коллинеарные вершины (булева операция дробит прямые стороны) — ухо
+//     нулевой площади не срезается никогда, они выбрасываются отдельно;
+//   - сдвоенные вершины мостиков (bridgeHoles проходит разрез дважды) — они
+//     лежат ровно на сторонах соседних ушей, и нестрогая проверка «внутри»
+//     блокировала любое ухо рядом с мостиком; принадлежность считается строго;
+//   - допуски по площади, а не точные нули: после пересечений координаты
+//     совпадают лишь с точностью округления.
+QVector<int> triangulateProfile(const QVector<QPointF> &profile)
+{
+    QVector<int> triangles;
+    const int count = profile.size();
+    if (count < 3) {
+        return triangles;
+    }
+    const auto cross = [](const QPointF &origin, const QPointF &first, const QPointF &second) {
+        return (first.x() - origin.x()) * (second.y() - origin.y()) -
+               (first.y() - origin.y()) * (second.x() - origin.x());
+    };
+    double reach = 0.0;
+    for (const QPointF &point : profile) {
+        reach = std::max({reach, std::abs(point.x()), std::abs(point.y())});
+    }
+    const double area_epsilon = std::max(1.0e-12, reach * reach * 1.0e-12);
+
+    double signed_area = 0.0;
+    for (int index = 0; index < count; ++index) {
+        const QPointF &from = profile[index];
+        const QPointF &to = profile[(index + 1) % count];
+        signed_area += from.x() * to.y() - to.x() * from.y();
+    }
+    // Обход приводится к положительному: дальше «ухо» распознаётся по знаку
+    // векторного произведения, и для обратного обхода знак был бы другим.
+    QVector<int> remaining;
+    remaining.reserve(count);
+    for (int index = 0; index < count; ++index) {
+        remaining.push_back(signed_area >= 0.0 ? index : count - 1 - index);
+    }
+
+    int guard = 0;
+    const int guard_limit = 8 * count + 16;
+    while (remaining.size() > 3 && guard++ < guard_limit) {
+        bool clipped = false;
+        // Сначала вершины нулевой площади: и коллинеарные, и точки-дубли
+        // мостиков просто выбрасываются, треугольника они не дают.
+        for (int position = 0; position < remaining.size(); ++position) {
+            const QPointF &a =
+                profile[remaining[(position + remaining.size() - 1) % remaining.size()]];
+            const QPointF &b = profile[remaining[position]];
+            const QPointF &c = profile[remaining[(position + 1) % remaining.size()]];
+            if (std::abs(cross(a, b, c)) <= area_epsilon) {
+                remaining.removeAt(position);
+                clipped = true;
+                break;
+            }
+        }
+        if (clipped) {
+            continue;
+        }
+        for (int position = 0; position < remaining.size(); ++position) {
+            const int previous = remaining[(position + remaining.size() - 1) % remaining.size()];
+            const int current = remaining[position];
+            const int next = remaining[(position + 1) % remaining.size()];
+            const QPointF &a = profile[previous];
+            const QPointF &b = profile[current];
+            const QPointF &c = profile[next];
+            if (cross(a, b, c) <= area_epsilon) {
+                continue;   // вершина вогнутая — ухом быть не может
+            }
+            bool contains_other = false;
+            for (const int index : remaining) {
+                if (index == previous || index == current || index == next) {
+                    continue;
+                }
+                // Строго внутри: точка на стороне уха (дубль вершины мостика)
+                // уху не мешает.
+                const QPointF &point = profile[index];
+                if (cross(a, b, point) > area_epsilon && cross(b, c, point) > area_epsilon &&
+                    cross(c, a, point) > area_epsilon) {
+                    contains_other = true;
+                    break;
+                }
+            }
+            if (contains_other) {
+                continue;
+            }
+            triangles << previous << current << next;
+            remaining.removeAt(position);
+            clipped = true;
+            break;
+        }
+        if (!clipped) {
+            break;   // профиль с самопересечением: закрываем тем, что уже есть
+        }
+    }
+    if (remaining.size() == 3) {
+        triangles << remaining[0] << remaining[1] << remaining[2];
+    }
+    return triangles;
+}
+
+// Точка строго внутри многоугольника — центр первого попавшегося уха. Первая
+// вершина контура для проверок вложенности не годится: после булевых операций
+// она часто лежит ровно на границе соседнего контура, и чёт-нечет отвечает
+// случайным образом.
+QPointF polygonInteriorPoint(const QPolygonF &polygon)
+{
+    const int count = polygon.size();
+    if (count < 3) {
+        return polygon.isEmpty() ? QPointF() : polygon.first();
+    }
+    const QVector<QPointF> points(polygon.begin(), polygon.end());
+    const QVector<int> triangles = triangulateProfile(points);
+    if (triangles.size() >= 3) {
+        const QPointF &a = points[triangles[0]];
+        const QPointF &b = points[triangles[1]];
+        const QPointF &c = points[triangles[2]];
+        return QPointF((a.x() + b.x() + c.x()) / 3.0, (a.y() + b.y() + c.y()) / 3.0);
+    }
+    QPointF sum;
+    for (const QPointF &point : polygon) {
+        sum += point;
+    }
+    return sum / count;
+}
+
+// Плоское тело, приведённое к «профиль плюс толщина вдоль оси». В таком виде
+// булевы операции над телами одной оси и одной толщины считаются как обычные
+// операции над плоскими контурами, и вырез виден в кадре дыркой, а не рамкой
+// поверх целого металла.
+struct PlanarSolid
+{
+    int axis = 2;              // 0 — X, 1 — Y, 2 — Z
+    double axial_min_mm = 0.0;
+    double axial_max_mm = 0.0;
+    QPolygonF outline;         // в мировых координатах плоскости (u, v)
+};
+
+// Центр тела в координатах плоскости выбранной оси. Порядок (u, v) тот же, что
+// у сеточного генератора: ось Z — (x, y), ось Y — (z, x), ось X — (y, z).
+QPointF planarCenter(int axis, const ShapeParameters &shape)
+{
+    switch (axis) {
+    case 0:
+        return QPointF(shape.center_y_mm, shape.center_z_mm);
+    case 1:
+        return QPointF(shape.center_z_mm, shape.center_x_mm);
+    default:
+        return QPointF(shape.center_x_mm, shape.center_y_mm);
+    }
+}
+
+double planarAxialCenter(int axis, const ShapeParameters &shape)
+{
+    switch (axis) {
+    case 0:
+        return shape.center_x_mm;
+    case 1:
+        return shape.center_y_mm;
+    default:
+        return shape.center_z_mm;
+    }
+}
+
+// Приведение тела к плоскому виду. Поворот вокруг собственной оси допустим — он
+// разворачивает профиль внутри его же плоскости; поворот вокруг любой из двух
+// других осей выводит профиль из плоскости, и плоским контуром такое тело уже
+// не описать.
+bool toPlanarSolid(const ShapeParameters &shape, PlanarSolid *solid)
+{
+    int axis = 2;
+    double thickness_mm = 0.0;
+    QPolygonF outline;
+    switch (shape.kind) {
+    case 1: {   // цилиндр: профиль — окружность в плоскости своей оси
+        if (!(shape.radius_mm > 0.0) || !(shape.length_mm > 0.0)) {
+            return false;
+        }
+        axis = std::clamp(shape.axis, 0, 2);
+        thickness_mm = shape.length_mm;
+        constexpr int segments = 48;
+        for (int segment = 0; segment < segments; ++segment) {
+            const double angle = 2.0 * pi * segment / segments;
+            outline << QPointF(shape.radius_mm * std::cos(angle),
+                               shape.radius_mm * std::sin(angle));
+        }
+        break;
+    }
+    case 2: {   // призма: профиль задан пользователем
+        if (!(shape.length_mm > 0.0) || shape.profile_mm.size() < 3) {
+            return false;
+        }
+        axis = std::clamp(shape.axis, 0, 2);
+        thickness_mm = shape.length_mm;
+        for (const QPointF &point : shape.profile_mm) {
+            outline << point;
+        }
+        break;
+    }
+    default: {   // брусок: плоским считается поперёк своего самого тонкого размера
+        if (!(shape.size_x_mm > 0.0) || !(shape.size_y_mm > 0.0) ||
+            !(shape.size_z_mm > 0.0)) {
+            return false;
+        }
+        const double sizes[3] = {shape.size_x_mm, shape.size_y_mm, shape.size_z_mm};
+        axis = 2;
+        for (int index = 0; index < 3; ++index) {
+            if (sizes[index] < sizes[axis]) {
+                axis = index;
+            }
+        }
+        thickness_mm = sizes[axis];
+        const double half_u = 0.5 * (axis == 0 ? shape.size_y_mm : shape.size_x_mm);
+        const double half_v = 0.5 * (axis == 2 ? shape.size_y_mm : shape.size_z_mm);
+        // Для оси Y плоскость — (z, x): по u идёт z, по v идёт x.
+        const double half_u_final = axis == 1 ? 0.5 * shape.size_z_mm : half_u;
+        const double half_v_final = axis == 1 ? 0.5 * shape.size_x_mm : half_v;
+        outline << QPointF(-half_u_final, -half_v_final) << QPointF(half_u_final, -half_v_final)
+                << QPointF(half_u_final, half_v_final) << QPointF(-half_u_final, half_v_final);
+        break;
+    }
+    }
+
+    const double rotations_deg[3] = {shape.rotation_x_deg, shape.rotation_y_deg,
+                                     shape.rotation_z_deg};
+    for (int index = 0; index < 3; ++index) {
+        if (index != axis && rotations_deg[index] != 0.0) {
+            return false;
+        }
+    }
+    // Поворот вокруг собственной оси — обычный поворот профиля вокруг центра
+    // тела. Формула одна для всех трёх осей: пары (u, v) подобраны так, что
+    // тройка (u, v, ось) остаётся правой.
+    const double angle_rad = rotations_deg[axis] * pi / 180.0;
+    if (angle_rad != 0.0) {
+        const double cosine = std::cos(angle_rad);
+        const double sine = std::sin(angle_rad);
+        for (QPointF &point : outline) {
+            point = QPointF(point.x() * cosine - point.y() * sine,
+                            point.x() * sine + point.y() * cosine);
+        }
+    }
+
+    const QPointF center = planarCenter(axis, shape);
+    for (QPointF &point : outline) {
+        point += center;
+    }
+    const double axial_center = planarAxialCenter(axis, shape);
+    solid->axis = axis;
+    solid->axial_min_mm = axial_center - 0.5 * thickness_mm;
+    solid->axial_max_mm = axial_center + 0.5 * thickness_mm;
+    solid->outline = outline;
+    return true;
+}
+
+// Контуры из QPainterPath приходят замкнутыми — с повтором первой точки в
+// конце, — а совпадающие подряд вершины дают треугольники нулевой площади, на
+// которых отсечение ушей останавливается. Здесь они убираются.
+QPolygonF cleanedContour(const QPolygonF &contour)
+{
+    constexpr double tolerance_mm = 1.0e-7;
+    QPolygonF cleaned;
+    for (const QPointF &point : contour) {
+        if (!cleaned.isEmpty()) {
+            const QPointF delta = point - cleaned.last();
+            if (std::abs(delta.x()) < tolerance_mm && std::abs(delta.y()) < tolerance_mm) {
+                continue;
+            }
+        }
+        cleaned << point;
+    }
+    while (cleaned.size() > 1) {
+        const QPointF delta = cleaned.last() - cleaned.first();
+        if (std::abs(delta.x()) < tolerance_mm && std::abs(delta.y()) < tolerance_mm) {
+            cleaned.removeLast();
+            continue;
+        }
+        break;
+    }
+    return cleaned;
+}
+
+// Врезает дырки во внешний контур мостиками: контур с дыркой разрезается до
+// односвязного, и его уже можно разбить на треугольники отсечением ушей.
+// Мостик проводится от самой правой вершины дырки к ближайшей вершине внешнего
+// контура — для очертаний, которые встречаются в диафрагмах, этого довольно.
+QVector<QPointF> bridgeHoles(const QPolygonF &outer, const QVector<QPolygonF> &holes)
+{
+    const auto signed_area = [](const QVector<QPointF> &polygon) {
+        double area = 0.0;
+        for (int index = 0; index < polygon.size(); ++index) {
+            const QPointF &from = polygon[index];
+            const QPointF &to = polygon[(index + 1) % polygon.size()];
+            area += from.x() * to.y() - to.x() * from.y();
+        }
+        return area;
+    };
+
+    QVector<QPointF> contour;
+    for (const QPointF &point : outer) {
+        contour.push_back(point);
+    }
+    for (const QPolygonF &hole : holes) {
+        if (hole.size() < 3 || contour.size() < 3) {
+            continue;
+        }
+        int hole_start = 0;
+        for (int index = 1; index < hole.size(); ++index) {
+            if (hole[index].x() > hole[hole_start].x()) {
+                hole_start = index;
+            }
+        }
+        int outer_index = 0;
+        double best_distance = std::numeric_limits<double>::max();
+        for (int index = 0; index < contour.size(); ++index) {
+            const QPointF delta = contour[index] - hole[hole_start];
+            const double distance = delta.x() * delta.x() + delta.y() * delta.y();
+            if (distance < best_distance) {
+                best_distance = distance;
+                outer_index = index;
+            }
+        }
+        // Дырка должна обходиться против внешнего контура — тогда после врезки
+        // она остаётся отверстием, а не вторым куском металла. Направление
+        // обхода у QPainterPath не гарантировано, поэтому оно определяется по
+        // знаку площади, а не предполагается.
+        QVector<QPointF> hole_points;
+        hole_points.reserve(hole.size());
+        for (const QPointF &point : hole) {
+            hole_points.push_back(point);
+        }
+        const bool same_orientation =
+            (signed_area(contour) >= 0.0) == (signed_area(hole_points) >= 0.0);
+        QVector<QPointF> merged;
+        merged.reserve(contour.size() + hole.size() + 2);
+        for (int index = 0; index <= outer_index; ++index) {
+            merged.push_back(contour[index]);
+        }
+        for (int step = 0; step <= hole.size(); ++step) {
+            const int offset = step % hole.size();
+            const int hole_index =
+                same_orientation
+                    ? (hole_start - offset + hole.size()) % hole.size()
+                    : (hole_start + offset) % hole.size();
+            merged.push_back(hole[hole_index]);
+        }
+        merged.push_back(contour[outer_index]);
+        for (int index = outer_index + 1; index < contour.size(); ++index) {
+            merged.push_back(contour[index]);
+        }
+        contour = merged;
+    }
+    return contour;
 }
 
 double normalizedRotationDeg(double value)
@@ -119,6 +485,12 @@ void WaveguideOpenGLWidget::setSelectedPlateIndex(int plate_index)
 void WaveguideOpenGLWidget::setSelectedShapeIndex(int shape_index)
 {
     selected_shape_index_ = shape_index;
+    update();
+}
+
+void WaveguideOpenGLWidget::setShellSelected(bool selected)
+{
+    shell_selected_ = selected;
     update();
 }
 
@@ -659,16 +1031,19 @@ void WaveguideOpenGLWidget::drawCircularShell(double inner_radius,
                                               double z0,
                                               double z1,
                                               const QColor &metal_color,
-                                              const QColor &edge_color) const
+                                              const QColor &edge_color,
+                                              double body_alpha) const
 {
     constexpr int segment_count = 64;
     const auto angle_at = [](int index) {
         return 2.0 * pi * index / segment_count;
     };
 
-    setColor(metal_color, 0.22);
+    // В режиме каркаса поверхности не рисуются вовсе: полностью прозрачная
+    // грань всё равно пишет глубину и заслоняет то, что стоит за ней.
+    setColor(metal_color, body_alpha);
     glBegin(GL_QUADS);
-    for (int index = 0; index < segment_count; ++index) {
+    for (int index = 0; body_alpha > 0.0 && index < segment_count; ++index) {
         const double a0 = angle_at(index);
         const double a1 = angle_at(index + 1);
         const double c0 = std::cos(a0);
@@ -712,10 +1087,32 @@ void WaveguideOpenGLWidget::drawCircularShell(double inner_radius,
     }
 }
 
+double WaveguideOpenGLWidget::shellAlpha() const
+{
+    switch (result_.parameters.shell_display) {
+    case 1:
+        return 0.82;   // сплошной: внутренности не видно
+    case 2:
+        return 0.22;   // полупрозрачный
+    case 3:
+        return 0.0;    // каркас: только рёбра
+    default:
+        break;
+    }
+    // Автоматически: выбранное в дереве тело или пластина должны быть видны
+    // сквозь стенку, иначе вставку внутри тракта не рассмотреть сбоку. Выбран
+    // сам волновод — наоборот, корпус закрывает внутренности, как в CST.
+    if (selected_plate_index_ >= 0 || selected_shape_index_ >= 0) {
+        return 0.07;
+    }
+    return shell_selected_ ? 0.82 : 0.22;
+}
+
 void WaveguideOpenGLWidget::drawWaveguide() const
 {
     const QColor shell_metal_color(116, 132, 148);
     const QColor shell_edge_color(212, 226, 240);
+    const double body_alpha = shellAlpha();
     if (result_.parameters.cross_section == 1) {
         const double outer_radius = result_.parameters.radius_mm;
         const double inner_radius = std::max(0.0, 0.5 * result_.inner_width_mm);
@@ -725,7 +1122,8 @@ void WaveguideOpenGLWidget::drawWaveguide() const
                           -half_length,
                           half_length,
                           shell_metal_color,
-                          shell_edge_color);
+                          shell_edge_color,
+                          body_alpha);
 
         // Подсветка входного и выходного отверстий, как у прямоугольного тракта.
         ::glLineWidth(2.0f);
@@ -761,10 +1159,12 @@ void WaveguideOpenGLWidget::drawWaveguide() const
     const QColor metal_color(116, 132, 148);
     const QColor edge_color(212, 226, 240);
 
-    drawBox(outer_x0, outer_x1, inner_y1, outer_y1, z0, z1, metal_color, 0.22);
-    drawBox(outer_x0, outer_x1, outer_y0, inner_y0, z0, z1, metal_color, 0.22);
-    drawBox(outer_x0, inner_x0, inner_y0, inner_y1, z0, z1, metal_color, 0.22);
-    drawBox(inner_x1, outer_x1, inner_y0, inner_y1, z0, z1, metal_color, 0.22);
+    if (body_alpha > 0.0) {
+        drawBox(outer_x0, outer_x1, inner_y1, outer_y1, z0, z1, metal_color, body_alpha);
+        drawBox(outer_x0, outer_x1, outer_y0, inner_y0, z0, z1, metal_color, body_alpha);
+        drawBox(outer_x0, inner_x0, inner_y0, inner_y1, z0, z1, metal_color, body_alpha);
+        drawBox(inner_x1, outer_x1, inner_y0, inner_y1, z0, z1, metal_color, body_alpha);
+    }
 
     ::glLineWidth(1.4f);
     drawBoxEdges(outer_x0, outer_x1, inner_y1, outer_y1, z0, z1, edge_color);
@@ -792,15 +1192,244 @@ void WaveguideOpenGLWidget::drawWaveguide() const
 
 void WaveguideOpenGLWidget::drawUserShapes() const
 {
-    for (int shape_index = 0; shape_index < result_.parameters.shapes.size(); ++shape_index) {
-        const ShapeParameters &shape = result_.parameters.shapes[shape_index];
+    const QVector<ShapeParameters> &shapes = result_.parameters.shapes;
+    if (shapes.isEmpty()) {
+        return;
+    }
+
+    // Тела, лежащие в одной плоскости и одинаково толстые, складываются в один
+    // контур обычными плоскими булевыми операциями. Так вычитание видно в кадре
+    // дыркой в металле, а не рамкой поверх целой пластины: настоящий объёмный
+    // CSG считает сеточный генератор, но до отрисовки его результат не доходит.
+    struct PlanarGroup
+    {
+        int axis = 2;
+        double axial_min_mm = 0.0;
+        double axial_max_mm = 0.0;
+        QPainterPath path;
+        bool holds_selection = false;
+    };
+
+    constexpr double axial_tolerance_mm = 1.0e-6;
+    QVector<PlanarGroup> groups;
+    QVector<int> standalone;
+    PlanarGroup current;
+    bool current_started = false;
+    // Металл за стенкой в расчёте не существует: сеточный генератор вычитает
+    // тела из объёма полости, и всё, что выходит за стенку, отрезается ею.
+    // Отрисовка обязана показывать то же самое — иначе основание, нарочно
+    // заведённое в стенку для надёжной булевой сварки, торчит сквозь корпус,
+    // как у T-вставок круглого тракта. Точно обрезается группа вдоль оси Z:
+    // только у неё сечение полости постоянно вдоль оси тела.
+    // Полость берётся с волосяным запасом: пластина во всё сечение совпадает с
+    // ней ровно, а пересечение двух совпадающих границ рождает у Qt мусорные
+    // осколочные контуры, на которых ломается заливка.
+    constexpr double cavity_margin_mm = 1.0e-3;
+    QPainterPath cavity_cross_section;
+    if (result_.inner_width_mm > 0.0 && result_.inner_depth_mm > 0.0) {
+        if (result_.parameters.cross_section == 1) {
+            const double inner_radius_mm = 0.5 * result_.inner_width_mm + cavity_margin_mm;
+            cavity_cross_section.addEllipse(QPointF(0.0, 0.0), inner_radius_mm,
+                                            inner_radius_mm);
+        } else {
+            const double half_width_mm = 0.5 * result_.inner_width_mm + cavity_margin_mm;
+            const double half_depth_mm = 0.5 * result_.inner_depth_mm + cavity_margin_mm;
+            cavity_cross_section.addRect(QRectF(-half_width_mm,
+                                                -half_depth_mm,
+                                                2.0 * half_width_mm,
+                                                2.0 * half_depth_mm));
+        }
+    }
+    const auto flush_current = [&groups, &current, &current_started, &cavity_cross_section]() {
+        if (!current_started) {
+            return;
+        }
+        if (current.axis == 2 && !cavity_cross_section.isEmpty()) {
+            current.path = current.path.intersected(cavity_cross_section);
+        }
+        groups.push_back(current);
+        current_started = false;
+    };
+    const auto outline_path = [](const QPolygonF &outline) {
+        QPainterPath path;
+        path.addPolygon(outline);
+        path.closeSubpath();
+        return path;
+    };
+
+    for (int shape_index = 0; shape_index < shapes.size(); ++shape_index) {
+        const ShapeParameters &shape = shapes[shape_index];
         if (!shape.enabled) {
             continue;
         }
+        PlanarSolid solid;
+        const bool planar = toPlanarSolid(shape, &solid);
+        if (shape.operation == 0) {
+            if (!planar) {
+                flush_current();
+                standalone.push_back(shape_index);
+                continue;
+            }
+            const bool joins_current =
+                current_started && current.axis == solid.axis &&
+                std::abs(current.axial_min_mm - solid.axial_min_mm) < axial_tolerance_mm &&
+                std::abs(current.axial_max_mm - solid.axial_max_mm) < axial_tolerance_mm;
+            if (joins_current) {
+                current.path = current.path.united(outline_path(solid.outline));
+            } else {
+                flush_current();
+                current.axis = solid.axis;
+                current.axial_min_mm = solid.axial_min_mm;
+                current.axial_max_mm = solid.axial_max_mm;
+                current.path = outline_path(solid.outline);
+                current.holds_selection = false;
+                current_started = true;
+            }
+            current.holds_selection =
+                current.holds_selection || shape_index == selected_shape_index_;
+            continue;
+        }
+        // Вычитание и пересечение применимы, только если резак проходит толщину
+        // группы насквозь: иначе он срезал бы её лишь частично, а плоский контур
+        // этого не выразит.
+        const bool cuts_through =
+            planar && current_started && current.axis == solid.axis &&
+            solid.axial_min_mm <= current.axial_min_mm + axial_tolerance_mm &&
+            solid.axial_max_mm >= current.axial_max_mm - axial_tolerance_mm;
+        if (!cuts_through) {
+            standalone.push_back(shape_index);
+            continue;
+        }
+        current.path = shape.operation == 1
+                           ? current.path.subtracted(outline_path(solid.outline))
+                           : current.path.intersected(outline_path(solid.outline));
+        current.holds_selection = current.holds_selection || shape_index == selected_shape_index_;
+    }
+    flush_current();
+
+    for (const PlanarGroup &group : groups) {
+        QVector<QPolygonF> contours;
+        for (const QPolygonF &raw_contour : group.path.simplified().toSubpathPolygons()) {
+            const QPolygonF contour = cleanedContour(raw_contour);
+            if (contour.size() >= 3) {
+                contours.push_back(contour);
+            }
+        }
+        if (contours.isEmpty()) {
+            continue;
+        }
+        const int axis = group.axis;
+        const auto vertex = [axis](const QPointF &plane_point, double axial) {
+            switch (axis) {
+            case 0:
+                return QVector3D(static_cast<float>(axial),
+                                 static_cast<float>(plane_point.x()),
+                                 static_cast<float>(plane_point.y()));
+            case 1:
+                return QVector3D(static_cast<float>(plane_point.y()),
+                                 static_cast<float>(axial),
+                                 static_cast<float>(plane_point.x()));
+            default:
+                return QVector3D(static_cast<float>(plane_point.x()),
+                                 static_cast<float>(plane_point.y()),
+                                 static_cast<float>(axial));
+            }
+        };
+        // Вложенность контуров: контур внутри нечётного числа других — дырка,
+        // внутри чётного — самостоятельный кусок металла. Проверяется точка
+        // строго внутри контура: первая вершина после булевых операций часто
+        // лежит ровно на границе соседнего контура, и там чёт-нечет отвечает
+        // случайным образом.
+        QVector<QPointF> interior_points(contours.size());
+        for (int index = 0; index < contours.size(); ++index) {
+            interior_points[index] = polygonInteriorPoint(contours[index]);
+        }
+        QVector<int> depth(contours.size(), 0);
+        for (int index = 0; index < contours.size(); ++index) {
+            for (int other = 0; other < contours.size(); ++other) {
+                if (other != index &&
+                    contours[other].containsPoint(interior_points[index], Qt::OddEvenFill)) {
+                    ++depth[index];
+                }
+            }
+        }
+
+        const QColor body_color = group.holds_selection ? QColor(62, 151, 210)
+                                                        : QColor(145, 157, 168);
+        const QColor edge_color = group.holds_selection ? QColor(255, 210, 68)
+                                                        : QColor(225, 235, 242);
+        setColor(body_color, group.holds_selection ? 0.98 : 0.9);
+        for (int index = 0; index < contours.size(); ++index) {
+            if (depth[index] % 2 != 0 || contours[index].size() < 3) {
+                continue;
+            }
+            // Дырки этого куска — контуры на единицу глубже, лежащие внутри него.
+            QVector<QPolygonF> holes;
+            for (int other = 0; other < contours.size(); ++other) {
+                if (other != index && depth[other] == depth[index] + 1 &&
+                    contours[index].containsPoint(interior_points[other], Qt::OddEvenFill)) {
+                    holes.push_back(contours[other]);
+                }
+            }
+            const QVector<QPointF> contour = bridgeHoles(contours[index], holes);
+            const QVector<int> triangles = triangulateProfile(contour);
+            glBegin(GL_TRIANGLES);
+            for (const double axial : {group.axial_min_mm, group.axial_max_mm}) {
+                for (int corner = 0; corner < triangles.size(); ++corner) {
+                    const QVector3D position = vertex(contour[triangles[corner]], axial);
+                    glVertex3f(position.x(), position.y(), position.z());
+                }
+            }
+            glEnd();
+        }
+
+        // Боковые стенки строятся по всем контурам сразу: у дырки они и есть
+        // стенки выреза.
+        glBegin(GL_QUADS);
+        for (const QPolygonF &contour : contours) {
+            for (int index = 0; index < contour.size(); ++index) {
+                const QPointF &from = contour[index];
+                const QPointF &to = contour[(index + 1) % contour.size()];
+                const QVector3D a = vertex(from, group.axial_min_mm);
+                const QVector3D b = vertex(to, group.axial_min_mm);
+                const QVector3D c = vertex(to, group.axial_max_mm);
+                const QVector3D d = vertex(from, group.axial_max_mm);
+                glVertex3f(a.x(), a.y(), a.z());
+                glVertex3f(b.x(), b.y(), b.z());
+                glVertex3f(c.x(), c.y(), c.z());
+                glVertex3f(d.x(), d.y(), d.z());
+            }
+        }
+        glEnd();
+
+        ::glLineWidth(group.holds_selection ? 2.2f : 1.5f);
+        setColor(edge_color, 0.95);
+        for (const QPolygonF &contour : contours) {
+            for (const double axial : {group.axial_min_mm, group.axial_max_mm}) {
+                glBegin(GL_LINE_LOOP);
+                for (const QPointF &point : contour) {
+                    const QVector3D position = vertex(point, axial);
+                    glVertex3f(position.x(), position.y(), position.z());
+                }
+                glEnd();
+            }
+            glBegin(GL_LINES);
+            for (const QPointF &point : contour) {
+                const QVector3D bottom = vertex(point, group.axial_min_mm);
+                const QVector3D top = vertex(point, group.axial_max_mm);
+                glVertex3f(bottom.x(), bottom.y(), bottom.z());
+                glVertex3f(top.x(), top.y(), top.z());
+            }
+            glEnd();
+        }
+    }
+
+    // Тела, не уложившиеся в плоскую группу: повёрнутые, стоящие поперёк или
+    // режущие толщину лишь частично. Они рисуются как есть, а вычитаемые —
+    // каркасом: в кадре они означают полость, а не металл.
+    for (const int shape_index : standalone) {
+        const ShapeParameters &shape = shapes[shape_index];
         const bool selected = shape_index == selected_shape_index_;
-        // Вычитание и пересечение не добавляют металла, поэтому тело рисуется
-        // каркасом: сплошная заливка выглядела бы как деталь, которой в модели
-        // нет. Сама вырезанная полость видна на срезе поля после расчёта.
         const bool wireframe = shape.operation != 0;
         const QColor body_color = selected ? QColor(62, 151, 210)
                                            : (wireframe ? QColor(210, 130, 60)
@@ -947,10 +1576,19 @@ void WaveguideOpenGLWidget::drawShapePrism(const ShapeParameters &shape,
     };
 
     if (!wireframe) {
-        // Боковая поверхность: она одна показывает форму профиля, а торцы
-        // невыпуклого профиля треугольниками веером не закрыть — их заменяет
-        // обводка контура ниже.
         setColor(body_color, body_alpha);
+        // Торцы: без них тело выглядит полым — в кадре видна только обводка
+        // профиля, а сквозь неё просвечивает всё, что стоит за телом.
+        const QVector<int> triangles = triangulateProfile(shape.profile_mm);
+        glBegin(GL_TRIANGLES);
+        for (const double axial : {-1.0, 1.0}) {
+            for (int index = 0; index < triangles.size(); ++index) {
+                const QVector3D vertex = point(shape.profile_mm[triangles[index]], axial);
+                glVertex3f(vertex.x(), vertex.y(), vertex.z());
+            }
+        }
+        glEnd();
+        // Боковая поверхность.
         glBegin(GL_QUADS);
         for (int index = 0; index < count; ++index) {
             const QPointF &from = shape.profile_mm[index];
@@ -1583,18 +2221,85 @@ void WaveguideOpenGLWidget::drawPolylineWithArrow(const FieldGlyph &glyph,
 void WaveguideOpenGLWidget::drawAxes() const
 {
     const double axis_length = std::max(18.0, modelRadiusMm() * 0.72);
+    const QColor x_color(220, 76, 76);
+    const QColor y_color(86, 210, 120);
+    const QColor z_color(82, 150, 240);
 
     ::glLineWidth(1.5f);
     glBegin(GL_LINES);
-    setColor(QColor(220, 76, 76), 0.9);
+    setColor(x_color, 0.9);
     glVertex3d(0.0, 0.0, 0.0);
     glVertex3d(axis_length, 0.0, 0.0);
-    setColor(QColor(86, 210, 120), 0.9);
+    setColor(y_color, 0.9);
     glVertex3d(0.0, 0.0, 0.0);
     glVertex3d(0.0, axis_length, 0.0);
-    setColor(QColor(82, 150, 240), 0.9);
+    setColor(z_color, 0.9);
     glVertex3d(0.0, 0.0, 0.0);
     glVertex3d(0.0, 0.0, axis_length);
+    glEnd();
+
+    // Подписи у концов осей: без них по трём цветным отрезкам не сказать, где
+    // ширина, где высота, а где направление распространения.
+    const double label_size = std::max(1.5, 0.05 * axis_length);
+    const double label_offset = axis_length + 2.2 * label_size;
+    drawAxisLabel('X', QVector3D(static_cast<float>(label_offset), 0.0f, 0.0f), label_size,
+                  x_color);
+    drawAxisLabel('Y', QVector3D(0.0f, static_cast<float>(label_offset), 0.0f), label_size,
+                  y_color);
+    drawAxisLabel('Z', QVector3D(0.0f, 0.0f, static_cast<float>(label_offset)), label_size,
+                  z_color);
+}
+
+void WaveguideOpenGLWidget::drawAxisLabel(char letter,
+                                          const QVector3D &position,
+                                          double size,
+                                          const QColor &color) const
+{
+    // Оси экрана достаются из текущей матрицы вида, поэтому буква всегда
+    // повёрнута к наблюдателю, как бы он ни крутил модель.
+    GLdouble modelview[16] = {0.0};
+    glGetDoublev(GL_MODELVIEW_MATRIX, modelview);
+    const QVector3D right(static_cast<float>(modelview[0]),
+                          static_cast<float>(modelview[4]),
+                          static_cast<float>(modelview[8]));
+    const QVector3D up(static_cast<float>(modelview[1]),
+                       static_cast<float>(modelview[5]),
+                       static_cast<float>(modelview[9]));
+    if (right.lengthSquared() < 1.0e-8f || up.lengthSquared() < 1.0e-8f) {
+        return;
+    }
+
+    // Штрихи глифа в координатах (вправо, вверх), в долях половины высоты буквы.
+    struct Stroke { double from_u, from_v, to_u, to_v; };
+    static const Stroke x_strokes[] = {{-0.6, -1.0, 0.6, 1.0}, {-0.6, 1.0, 0.6, -1.0}};
+    static const Stroke y_strokes[] = {
+        {-0.6, 1.0, 0.0, 0.0}, {0.6, 1.0, 0.0, 0.0}, {0.0, 0.0, 0.0, -1.0}};
+    static const Stroke z_strokes[] = {
+        {-0.6, 1.0, 0.6, 1.0}, {0.6, 1.0, -0.6, -1.0}, {-0.6, -1.0, 0.6, -1.0}};
+    const Stroke *strokes = x_strokes;
+    int stroke_count = 2;
+    if (letter == 'Y') {
+        strokes = y_strokes;
+        stroke_count = 3;
+    } else if (letter == 'Z') {
+        strokes = z_strokes;
+        stroke_count = 3;
+    }
+
+    const QVector3D u_axis = right.normalized() * static_cast<float>(size);
+    const QVector3D v_axis = up.normalized() * static_cast<float>(size);
+    ::glLineWidth(2.0f);
+    setColor(color, 0.95);
+    glBegin(GL_LINES);
+    for (int index = 0; index < stroke_count; ++index) {
+        const Stroke &stroke = strokes[index];
+        const QVector3D from = position + u_axis * static_cast<float>(stroke.from_u) +
+                               v_axis * static_cast<float>(stroke.from_v);
+        const QVector3D to = position + u_axis * static_cast<float>(stroke.to_u) +
+                             v_axis * static_cast<float>(stroke.to_v);
+        glVertex3f(from.x(), from.y(), from.z());
+        glVertex3f(to.x(), to.y(), to.z());
+    }
     glEnd();
 }
 

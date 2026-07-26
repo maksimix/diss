@@ -54,6 +54,9 @@ public:
     void setModelPreview(const WaveguideParameters &parameters);
     void setSelectedPlateIndex(int plate_index);
     void setSelectedShapeIndex(int shape_index);
+    // Выбран сам волновод: в автоматическом режиме корпус тогда рисуется
+    // сплошным, как в CST при выделении внешнего объекта.
+    void setShellSelected(bool selected);
     void setFieldDisplayMode(FieldDisplayMode mode);
     void setViewPreset(WaveguideViewPreset preset);
     void setFieldFillMode(FieldFillMode mode);
@@ -99,8 +102,13 @@ private:
                            double z0,
                            double z1,
                            const QColor &metal_color,
-                           const QColor &edge_color) const;
+                           const QColor &edge_color,
+                           double body_alpha) const;
     void drawSlot() const;
+    // Непрозрачность стенок тракта по режиму отображения корпуса: в
+    // автоматическом режиме корпус светлеет, как только в дереве выбрано тело
+    // или пластина, — иначе вставку внутри тракта не разглядеть сбоку.
+    double shellAlpha() const;
     void drawPecPlates() const;
     // Свободные тела пользователя. Вычитаемые тела рисуются каркасом другого
     // цвета: в кадре они означают не металл, а вырезанную в нём полость.
@@ -159,6 +167,12 @@ private:
                                double arrow_spacing_mm,
                                float line_width) const;
     void drawAxes() const;
+    // Буква у конца оси, нарисованная отрезками и всегда развёрнутая к камере:
+    // текстовый рендер сюда тянуть незачем, а три глифа рисуются шестью линиями.
+    void drawAxisLabel(char letter,
+                       const QVector3D &position,
+                       double size,
+                       const QColor &color) const;
     void drawPropagationArrow() const;
     bool shouldDrawGlyph(FieldGlyphType type) const;
     double modelRadiusMm() const;
@@ -201,4 +215,5 @@ private:
     bool slot_rotating_ = false;
     int selected_plate_index_ = -1;
     int selected_shape_index_ = -1;
+    bool shell_selected_ = false;
 };
