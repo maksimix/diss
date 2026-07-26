@@ -214,6 +214,101 @@ void paintRibbonIcon(QPainter &painter, RibbonIcon icon)
         painter.setPen(Qt::NoPen);
         painter.drawRect(QRectF(14.5, 16, 3, 6.5));
         break;
+    case RibbonIcon::Brick: {
+        // Параллелепипед в лёгкой аксонометрии: передняя грань плюс два скоса.
+        painter.setPen(QPen(QColor(120, 130, 140), 1.2));
+        painter.setBrush(QColor(205, 216, 226));
+        painter.drawRect(QRectF(6, 11, 15, 15));
+        painter.setBrush(QColor(232, 239, 245));
+        painter.drawPolygon(QPolygonF({QPointF(6, 11), QPointF(12, 5), QPointF(27, 5),
+                                       QPointF(21, 11)}));
+        painter.setBrush(QColor(178, 192, 205));
+        painter.drawPolygon(QPolygonF({QPointF(21, 11), QPointF(27, 5), QPointF(27, 20),
+                                       QPointF(21, 26)}));
+        break;
+    }
+    case RibbonIcon::Cylinder: {
+        painter.setPen(QPen(QColor(120, 130, 140), 1.2));
+        painter.setBrush(QColor(205, 216, 226));
+        painter.drawRect(QRectF(9, 9, 14, 15));
+        painter.setBrush(QColor(232, 239, 245));
+        painter.drawEllipse(QPointF(16, 9), 7.0, 3.2);
+        painter.setBrush(QColor(186, 199, 211));
+        painter.drawEllipse(QPointF(16, 24), 7.0, 3.2);
+        break;
+    }
+    case RibbonIcon::Prism: {
+        // Профиль-уголок, вытянутый вглубь: так призма отличается от бруска.
+        painter.setPen(QPen(QColor(120, 130, 140), 1.2));
+        painter.setBrush(QColor(205, 216, 226));
+        painter.drawPolygon(QPolygonF({QPointF(7, 8), QPointF(19, 8), QPointF(19, 14),
+                                       QPointF(13, 14), QPointF(13, 25), QPointF(7, 25)}));
+        painter.setBrush(QColor(232, 239, 245));
+        painter.drawPolygon(QPolygonF({QPointF(7, 8), QPointF(12, 4), QPointF(24, 4),
+                                       QPointF(19, 8)}));
+        painter.setBrush(QColor(178, 192, 205));
+        painter.drawPolygon(QPolygonF({QPointF(19, 8), QPointF(24, 4), QPointF(24, 10),
+                                       QPointF(19, 14)}));
+        break;
+    }
+    case RibbonIcon::Boolean: {
+        // Два пересекающихся круга — общепринятый знак булевой операции.
+        painter.setPen(QPen(QColor(110, 125, 140), 1.4));
+        painter.setBrush(QColor(210, 224, 236, 190));
+        painter.drawEllipse(QPointF(13, 16), 8.0, 8.0);
+        painter.setBrush(QColor(240, 200, 150, 190));
+        painter.drawEllipse(QPointF(20, 16), 8.0, 8.0);
+        break;
+    }
+    case RibbonIcon::Septum: {
+        // Вид сверху: четыре встречные перегородки в тракте.
+        drawWaveguideBox(painter, QColor(235, 241, 246));
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(QColor(200, 130, 60));
+        painter.drawRect(QRectF(4, 11, 8, 2));
+        painter.drawRect(QRectF(20, 11, 8, 2));
+        painter.drawRect(QRectF(4, 19, 8, 2));
+        painter.drawRect(QRectF(20, 19, 8, 2));
+        break;
+    }
+    case RibbonIcon::CIris: {
+        painter.setPen(QPen(QColor(120, 130, 140), 1.2));
+        painter.setBrush(QColor(245, 248, 250));
+        painter.drawRect(QRectF(4, 6, 24, 20));
+        painter.setPen(QPen(QColor(150, 90, 40), 1.2));
+        painter.setBrush(QColor(225, 155, 70));
+        painter.drawPolygon(QPolygonF({QPointF(23, 14), QPointF(23, 10), QPointF(9, 10),
+                                       QPointF(9, 22), QPointF(23, 22), QPointF(23, 18),
+                                       QPointF(20, 18), QPointF(20, 19.5), QPointF(12, 19.5),
+                                       QPointF(12, 12.5), QPointF(20, 12.5), QPointF(20, 14)}));
+        break;
+    }
+    case RibbonIcon::CornerIris: {
+        painter.setPen(QPen(QColor(120, 130, 140), 1.2));
+        painter.setBrush(QColor(245, 248, 250));
+        painter.drawRect(QRectF(4, 6, 24, 20));
+        painter.setPen(QPen(QColor(150, 90, 40), 1.2));
+        painter.setBrush(QColor(225, 155, 70));
+        painter.drawPolygon(QPolygonF({QPointF(10, 6), QPointF(22, 6), QPointF(22, 10),
+                                       QPointF(14, 10), QPointF(14, 15), QPointF(10, 15)}));
+        painter.drawPolygon(QPolygonF({QPointF(22, 26), QPointF(10, 26), QPointF(10, 22),
+                                       QPointF(18, 22), QPointF(18, 17), QPointF(22, 17)}));
+        break;
+    }
+    case RibbonIcon::TStub: {
+        painter.setPen(QPen(QColor(120, 130, 140), 1.2));
+        painter.setBrush(QColor(245, 248, 250));
+        painter.drawEllipse(QPointF(16, 16), 12.0, 12.0);
+        painter.setPen(QPen(QColor(150, 90, 40), 1.2));
+        painter.setBrush(QColor(225, 155, 70));
+        painter.drawPolygon(QPolygonF({QPointF(4, 15), QPointF(10, 15), QPointF(10, 10),
+                                       QPointF(13, 10), QPointF(13, 22), QPointF(10, 22),
+                                       QPointF(10, 17), QPointF(4, 17)}));
+        painter.drawPolygon(QPolygonF({QPointF(28, 15), QPointF(22, 15), QPointF(22, 10),
+                                       QPointF(19, 10), QPointF(19, 22), QPointF(22, 22),
+                                       QPointF(22, 17), QPointF(28, 17)}));
+        break;
+    }
     case RibbonIcon::Profile:
         painter.setPen(QPen(QColor(70, 100, 130), 1.6));
         painter.setBrush(QColor(175, 205, 230));

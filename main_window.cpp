@@ -5,6 +5,7 @@
 #include "expression_spin_box.h"
 #include "model_serialization.h"
 #include "parameter_list_widget.h"
+#include "waveguide_calculator.h"
 #include "waveguide_opengl_widget.h"
 
 #include <QtCore/QCoreApplication>
@@ -45,6 +46,8 @@
 #include <QtWidgets/QStackedWidget>
 #include <QtWidgets/QStatusBar>
 #include <QtWidgets/QStyle>
+#include <QtWidgets/QTableWidget>
+#include <QtWidgets/QTableWidgetItem>
 #include <QtWidgets/QSplitter>
 #include <QtWidgets/QToolButton>
 #include <QtWidgets/QTreeWidget>
@@ -58,10 +61,334 @@ namespace
 {
 constexpr int object_type_role = Qt::UserRole + 1;
 constexpr int object_index_role = Qt::UserRole + 2;
+// Сколько шаблонов проекта знает окно: список имён, список описаний и обе
+// выпадающие подборки должны сходиться на одном числе.
+constexpr int preset_count = 7;
 
 QString number(double value, int precision = 3)
 {
     return QLocale::system().toString(value, 'f', precision);
+}
+
+// Отечественное обозначение моды: TE называют H, TM называют E. Решатель ведёт
+// счёт в нотации IEEE, а в окне мода подписывается обеими, чтобы H11 и TE11
+// читались как одно и то же.
+QString modeAlias(bool transverse_electric, int m, int n)
+{
+    return QStringLiteral("%1%2%3")
+        .arg(transverse_electric ? QStringLiteral("H") : QStringLiteral("E"))
+        .arg(m)
+        .arg(n);
+}
+
+QString modeTitle(const WaveguideMode &mode)
+{
+    return QStringLiteral("%1 (%2)").arg(modeAlias(mode.transverse_electric, mode.m, mode.n),
+                                         mode.name);
+}
+
+QString modeTitle(bool transverse_electric, int m, int n)
+{
+    return QStringLiteral("%1 (%2%3%4)")
+        .arg(modeAlias(transverse_electric, m, n),
+             transverse_electric ? QStringLiteral("TE") : QStringLiteral("TM"))
+        .arg(m)
+        .arg(n);
+}
+
+QString shapeKindName(int kind)
+{
+    switch (kind) {
+    case 1:
+        return QStringLiteral("цилиндр");
+    case 2:
+        return QStringLiteral("призма");
+    default:
+        return QStringLiteral("брусок");
+    }
+}
+
+// Знак операции в дереве: он читается быстрее слова и повторяет запись, к
+// которой привыкли в истории построения CAD.
+QString shapeOperationSign(int operation)
+{
+    switch (operation) {
+    case 1:
+        return QStringLiteral("-");
+    case 2:
+        return QStringLiteral("∩");
+    default:
+        return QStringLiteral("+");
+    }
+}
+
+QString shapeOperationName(int operation)
+{
+    switch (operation) {
+    case 1:
+        return QStringLiteral("вычесть из металла");
+    case 2:
+        return QStringLiteral("пересечь с металлом");
+    default:
+        return QStringLiteral("объединить с металлом");
+    }
+}
+
+QString shapeAxisName(int axis)
+{
+    switch (axis) {
+    case 0:
+        return QStringLiteral("X");
+    case 1:
+        return QStringLiteral("Y");
+    default:
+        return QStringLiteral("Z");
+    }
+}
+
+// Сдвигает профиль так, чтобы центр его габаритного прямоугольника попал в
+// начало координат: точки профиля отсчитываются от центра тела, и без этого
+// шаблон уезжал бы в сторону на половину своего размера.
+QVector<QPointF> centeredProfile(QVector<QPointF> profile)
+{
+    if (profile.isEmpty()) {
+        return profile;
+    }
+    double minimum_u = profile.first().x();
+    double maximum_u = minimum_u;
+    double minimum_v = profile.first().y();
+    double maximum_v = minimum_v;
+    for (const QPointF &point : profile) {
+        minimum_u = std::min(minimum_u, point.x());
+        maximum_u = std::max(maximum_u, point.x());
+        minimum_v = std::min(minimum_v, point.y());
+        maximum_v = std::max(maximum_v, point.y());
+    }
+    const QPointF shift(0.5 * (minimum_u + maximum_u), 0.5 * (minimum_v + maximum_v));
+    for (QPointF &point : profile) {
+        point -= shift;
+    }
+    return profile;
+}
+
+QVector<QPointF> rectangleProfile(double width_mm, double height_mm)
+{
+    const double half_u = 0.5 * std::abs(width_mm);
+    const double half_v = 0.5 * std::abs(height_mm);
+    return {QPointF(-half_u, -half_v), QPointF(half_u, -half_v), QPointF(half_u, half_v),
+            QPointF(-half_u, half_v)};
+}
+
+// Рамка с разрезом посередине правой стороны — буква C. thickness_mm — толщина
+// стенки рамки, gap_mm — высота разреза.
+QVector<QPointF> cProfile(double width_mm, double height_mm, double thickness_mm, double gap_mm)
+{
+    const double half_u = 0.5 * std::abs(width_mm);
+    const double half_v = 0.5 * std::abs(height_mm);
+    const double wall = std::clamp(std::abs(thickness_mm), 1.0e-3, 0.45 * std::abs(height_mm));
+    const double half_gap = std::clamp(0.5 * std::abs(gap_mm), 1.0e-3, half_v - wall);
+    return {QPointF(half_u, half_gap),          QPointF(half_u, half_v),
+            QPointF(-half_u, half_v),           QPointF(-half_u, -half_v),
+            QPointF(half_u, -half_v),           QPointF(half_u, -half_gap),
+            QPointF(half_u - wall, -half_gap),  QPointF(half_u - wall, -half_v + wall),
+            QPointF(-half_u + wall, -half_v + wall), QPointF(-half_u + wall, half_v - wall),
+            QPointF(half_u - wall, half_v - wall),   QPointF(half_u - wall, half_gap)};
+}
+
+// Уголок: полка вдоль u и ножка вдоль v одной толщины — буква Г.
+QVector<QPointF> lProfile(double arm_u_mm, double arm_v_mm, double thickness_mm)
+{
+    const double arm_u = std::abs(arm_u_mm);
+    const double arm_v = std::abs(arm_v_mm);
+    const double wall = std::clamp(std::abs(thickness_mm), 1.0e-3, std::min(arm_u, arm_v));
+    return centeredProfile({QPointF(0.0, 0.0), QPointF(arm_u, 0.0), QPointF(arm_u, -wall),
+                            QPointF(wall, -wall), QPointF(wall, -arm_v), QPointF(0.0, -arm_v)});
+}
+
+// Штырь с поперечной полкой на конце — буква T, лежащая на боку: ножка идёт от
+// стенки внутрь тракта вдоль u, полка стоит поперёк неё вдоль v.
+QVector<QPointF> tProfile(double stem_length_mm,
+                          double stem_width_mm,
+                          double flange_length_mm,
+                          double flange_width_mm)
+{
+    const double stem_length = std::abs(stem_length_mm);
+    const double stem_half = 0.5 * std::abs(stem_width_mm);
+    const double flange_half = std::max(0.5 * std::abs(flange_length_mm), stem_half);
+    const double flange_width = std::abs(flange_width_mm);
+    return centeredProfile({QPointF(0.0, -stem_half),
+                            QPointF(stem_length, -stem_half),
+                            QPointF(stem_length, -flange_half),
+                            QPointF(stem_length + flange_width, -flange_half),
+                            QPointF(stem_length + flange_width, flange_half),
+                            QPointF(stem_length, flange_half),
+                            QPointF(stem_length, stem_half),
+                            QPointF(0.0, stem_half)});
+}
+
+// Проверка одного тела теми же правилами, что применяет решатель: вырожденное
+// тело не даёт ни металла, ни отверстия, а в сеточном скрипте булева операция с
+// пустым телом обрывает построение целиком.
+// Готовые наборы тел, одинаковые для кнопки ленты и для шаблона нового
+// проекта. Размеры берутся от полости, поэтому набор одинаково садится и на
+// WR-90, и на круглый тракт: сеточный генератор обрежет тела по стенке.
+QVector<ShapeParameters> makeShapeTemplate(int shape_template,
+                                           const WaveguideParameters &parameters)
+{
+    QVector<ShapeParameters> shapes;
+    const bool circular = parameters.cross_section == 1;
+    const double half_width_mm =
+        circular ? parameters.radius_mm - parameters.wall_thickness_mm
+                 : 0.5 * (parameters.width_mm - 2.0 * parameters.wall_thickness_mm);
+    const double half_height_mm =
+        circular ? half_width_mm
+                 : 0.5 * (parameters.depth_mm - 2.0 * parameters.wall_thickness_mm);
+    if (!(half_width_mm > 0.0) || !(half_height_mm > 0.0) || !(parameters.length_mm > 0.0)) {
+        return shapes;
+    }
+    const double thickness_mm = std::max(0.2, 0.02 * parameters.length_mm);
+    const int first_number = parameters.shapes.size() + 1;
+    const auto name_for = [first_number, &shapes](const QString &stem) {
+        return QStringLiteral("%1_%2").arg(stem).arg(first_number + shapes.size());
+    };
+
+    switch (shape_template) {
+    case 0: {
+        // Индуктивные перегородки в плоскости H: две пары встречных пластин на
+        // всю высоту тракта — вид сверху даёт четыре отрезка от боковых стенок.
+        const double reach_mm = 0.35 * half_width_mm;
+        const double spacing_mm = 0.25 * parameters.length_mm;
+        for (const double center_z_mm : {-0.5 * spacing_mm, 0.5 * spacing_mm}) {
+            for (const double side : {-1.0, 1.0}) {
+                ShapeParameters septum;
+                septum.name = name_for(QStringLiteral("septum"));
+                septum.kind = 0;
+                septum.center_x_mm = side * (half_width_mm - 0.5 * reach_mm);
+                septum.center_z_mm = center_z_mm;
+                septum.size_x_mm = reach_mm;
+                septum.size_y_mm = 2.0 * half_height_mm;
+                septum.size_z_mm = thickness_mm;
+                shapes.push_back(septum);
+            }
+        }
+        break;
+    }
+    case 1: {
+        // Диафрагма с окном в форме буквы C: сплошная пластина во всё сечение,
+        // из которой вырезано C-образное окно. Резак длиннее пластины втрое,
+        // чтобы окно прошло насквозь и не оставило плёнки металла на гранях.
+        ShapeParameters plate;
+        plate.name = name_for(QStringLiteral("c_iris"));
+        plate.kind = 0;
+        plate.center_z_mm = 0.0;
+        plate.size_x_mm = 2.0 * half_width_mm;
+        plate.size_y_mm = 2.0 * half_height_mm;
+        plate.size_z_mm = thickness_mm;
+        shapes.push_back(plate);
+
+        ShapeParameters window;
+        window.name = name_for(QStringLiteral("c_window"));
+        window.kind = 2;
+        window.operation = 1;   // вычесть
+        window.axis = 2;
+        window.length_mm = 3.0 * thickness_mm;
+        window.profile_mm = cProfile(1.4 * half_width_mm, 1.4 * half_height_mm,
+                                     0.25 * half_height_mm, 0.5 * half_height_mm);
+        shapes.push_back(window);
+        break;
+    }
+    case 2: {
+        // Диафрагма из уголков: пластина во всё сечение с двумя Г-образными
+        // вырезами — верхний прижат к верхней стенке, нижний к нижней и
+        // повёрнут на 180 градусов. Металл остаётся ступенчатой перемычкой
+        // между ними.
+        ShapeParameters plate;
+        plate.name = name_for(QStringLiteral("corner_iris"));
+        plate.kind = 0;
+        plate.center_z_mm = 0.0;
+        plate.size_x_mm = 2.0 * half_width_mm;
+        plate.size_y_mm = 2.0 * half_height_mm;
+        plate.size_z_mm = thickness_mm;
+        shapes.push_back(plate);
+
+        const double cut_width_mm = 1.15 * half_width_mm;
+        const double cut_height_mm = 0.95 * half_height_mm;
+        const double cut_wall_mm = 0.42 * half_height_mm;
+        for (const double side : {1.0, -1.0}) {
+            ShapeParameters cut;
+            cut.name = name_for(QStringLiteral("corner_window"));
+            cut.kind = 2;
+            cut.operation = 1;   // вычесть
+            cut.axis = 2;
+            cut.length_mm = 3.0 * thickness_mm;
+            cut.profile_mm = lProfile(cut_width_mm, cut_height_mm, cut_wall_mm);
+            // Вырез выходит за край пластины на пару процентов своей высоты:
+            // ровное совпадение граней оставляло бы перемычку толщиной в
+            // погрешность построения.
+            cut.center_y_mm = side * (half_height_mm - 0.48 * cut_height_mm);
+            cut.center_x_mm = side * 0.2 * half_width_mm;
+            cut.rotation_z_deg = side > 0.0 ? 0.0 : 180.0;
+            shapes.push_back(cut);
+        }
+        break;
+    }
+    case 3: {
+        // Встречные T-образные вставки: ножка идёт от боковой стенки внутрь,
+        // полка стоит поперёк неё.
+        for (const double side : {-1.0, 1.0}) {
+            ShapeParameters stub;
+            stub.name = name_for(QStringLiteral("t_stub"));
+            stub.kind = 2;
+            stub.axis = 2;
+            stub.length_mm = thickness_mm;
+            stub.profile_mm = tProfile(0.55 * half_width_mm, 0.25 * half_height_mm,
+                                       0.9 * half_height_mm, 0.25 * half_width_mm);
+            stub.center_x_mm = side * 0.55 * half_width_mm;
+            stub.rotation_z_deg = side > 0.0 ? 180.0 : 0.0;
+            shapes.push_back(stub);
+        }
+        break;
+    }
+    case 4: {
+        // Цилиндрический штырь между широкими стенками — подстроечный элемент.
+        ShapeParameters post;
+        post.name = name_for(QStringLiteral("post"));
+        post.kind = 1;
+        post.axis = 1;
+        post.radius_mm = std::max(0.2, 0.12 * half_width_mm);
+        post.length_mm = 2.0 * half_height_mm;
+        shapes.push_back(post);
+        break;
+    }
+    default:
+        break;
+    }
+    return shapes;
+}
+
+QString shapeGeometryError(const ShapeParameters &shape)
+{
+    switch (shape.kind) {
+    case 1:
+        if (!(shape.radius_mm > 0.0) || !(shape.length_mm > 0.0)) {
+            return QStringLiteral("У цилиндра радиус и длина должны быть больше нуля.");
+        }
+        break;
+    case 2:
+        if (!(shape.length_mm > 0.0)) {
+            return QStringLiteral("У призмы длина вдоль оси должна быть больше нуля.");
+        }
+        if (shape.profile_mm.size() < 3) {
+            return QStringLiteral("Профиль призмы должен содержать хотя бы три точки.");
+        }
+        break;
+    default:
+        if (!(shape.size_x_mm > 0.0) || !(shape.size_y_mm > 0.0) || !(shape.size_z_mm > 0.0)) {
+            return QStringLiteral("У бруска все три размера должны быть больше нуля.");
+        }
+        break;
+    }
+    return {};
 }
 
 QString slotSurfaceName(int surface)
@@ -840,7 +1167,18 @@ void MainWindow::showResult(const WaveguideCalculationResult &result)
                                         result.vertical_slice.maximum_value));
     }
     if (result.has_propagating_mode) {
-        setStatus(QStringLiteral("Расчет готов: отображается мода %1.").arg(result.selected_mode.name), false);
+        setStatus(QStringLiteral("Расчет готов: отображается мода %1.")
+                      .arg(modeTitle(result.selected_mode)),
+                  false);
+    } else if (!result.parameters.mode_automatic && !result.selected_mode.name.isEmpty()) {
+        // Ручной выбор моды ниже отсечки — самая частая причина пустого поля,
+        // поэтому в строке состояния называются и мода, и её отсечка.
+        setStatus(QStringLiteral("Расчет готов: мода %1 на %2 ГГц затухает (fc = %3 ГГц), "
+                                 "поле не строится.")
+                      .arg(modeTitle(result.selected_mode),
+                           number(result.parameters.frequency_ghz, 4),
+                           number(result.selected_mode.cutoff_ghz, 4)),
+                  true);
     } else {
         setStatus(QStringLiteral("Расчет готов: на заданной частоте распространяющейся моды нет."), true);
     }
@@ -1525,6 +1863,28 @@ void MainWindow::rebuildObjectTree()
         }
     }
 
+    // Свободные тела идут отдельной веткой и в том порядке, в каком они
+    // применяются: у булевых операций порядок и есть модель, поэтому дерево
+    // показывает её как историю построения, а не как набор.
+    for (int shape_index = 0; shape_index < parameters_.shapes.size(); ++shape_index) {
+        const ShapeParameters &shape = parameters_.shapes[shape_index];
+        QTreeWidgetItem *shape_item = new QTreeWidgetItem(component_item);
+        shape_item->setText(0, QStringLiteral("%1 [%2 %3]")
+                                   .arg(shape.name,
+                                        shapeKindName(shape.kind),
+                                        shapeOperationSign(shape.operation)));
+        shape_item->setIcon(0, style()->standardIcon(QStyle::SP_FileDialogDetailedView));
+        shape_item->setData(0, object_type_role, QStringLiteral("shape"));
+        shape_item->setData(0, object_index_role, shape_index);
+        if (!shape.enabled) {
+            shape_item->setForeground(0, QColor(135, 135, 135));
+        }
+        if (shape_index == selected_shape_index_) {
+            shape_item->setSelected(true);
+            object_tree_widget_->setCurrentItem(shape_item);
+        }
+    }
+
     QTreeWidgetItem *waveguide_item = new QTreeWidgetItem(component_item);
     waveguide_item->setText(0, waveguide_name_);
     waveguide_item->setIcon(0, style()->standardIcon(QStyle::SP_DriveHDIcon));
@@ -1535,28 +1895,45 @@ void MainWindow::rebuildObjectTree()
     excitation_root_item->setIcon(0, ribbonIcon(RibbonIcon::SignalGroup));
 
     QTreeWidgetItem *excitation_item = new QTreeWidgetItem(excitation_root_item);
-    excitation_item->setText(0, excitation_name_);
+    excitation_item->setText(0,
+                             parameters_.mode_automatic
+                                 ? excitation_name_
+                                 : QStringLiteral("%1 — %2").arg(
+                                       excitation_name_,
+                                       modeAlias(parameters_.mode_family != 1,
+                                                 parameters_.mode_m,
+                                                 parameters_.mode_n)));
     excitation_item->setIcon(0, ribbonIcon(RibbonIcon::Signal));
     excitation_item->setData(0, object_type_role, QStringLiteral("excitation"));
 
     object_tree_widget_->expandAll();
-    open_gl_widget_->setSelectedPlateIndex(selected_plate_index_);
-    top_projection_widget_->setSelectedPlateIndex(selected_plate_index_);
-    side_projection_widget_->setSelectedPlateIndex(selected_plate_index_);
+    for (WaveguideOpenGLWidget *view :
+         {open_gl_widget_, top_projection_widget_, side_projection_widget_}) {
+        view->setSelectedPlateIndex(selected_plate_index_);
+        view->setSelectedShapeIndex(selected_shape_index_);
+    }
 }
 
 void MainWindow::handleObjectSelectionChanged()
 {
     selected_plate_index_ = -1;
+    selected_shape_index_ = -1;
     const QList<QTreeWidgetItem *> selected_items = object_tree_widget_->selectedItems();
-    if (!selected_items.isEmpty() &&
-        selected_items.constFirst()->data(0, object_type_role).toString() == QStringLiteral("pec_plate")) {
-        selected_plate_index_ = selected_items.constFirst()->data(0, object_index_role).toInt();
+    if (!selected_items.isEmpty()) {
+        const QString object_type =
+            selected_items.constFirst()->data(0, object_type_role).toString();
+        if (object_type == QStringLiteral("pec_plate")) {
+            selected_plate_index_ = selected_items.constFirst()->data(0, object_index_role).toInt();
+        } else if (object_type == QStringLiteral("shape")) {
+            selected_shape_index_ = selected_items.constFirst()->data(0, object_index_role).toInt();
+        }
     }
 
-    open_gl_widget_->setSelectedPlateIndex(selected_plate_index_);
-    top_projection_widget_->setSelectedPlateIndex(selected_plate_index_);
-    side_projection_widget_->setSelectedPlateIndex(selected_plate_index_);
+    for (WaveguideOpenGLWidget *view :
+         {open_gl_widget_, top_projection_widget_, side_projection_widget_}) {
+        view->setSelectedPlateIndex(selected_plate_index_);
+        view->setSelectedShapeIndex(selected_shape_index_);
+    }
 }
 
 void MainWindow::updateModelPreview()
@@ -1579,6 +1956,8 @@ void MainWindow::handleObjectDoubleClick(QTreeWidgetItem *item, int)
         showSlotDialog();
     } else if (object_type == QStringLiteral("pec_plate")) {
         showPlateDialog(item->data(0, object_index_role).toInt());
+    } else if (object_type == QStringLiteral("shape")) {
+        showShapeDialog(item->data(0, object_index_role).toInt());
     } else if (object_type == QStringLiteral("excitation")) {
         showExcitationDialog();
     }
@@ -1774,6 +2153,10 @@ void MainWindow::showWaveguideDialog()
                               ? QStringLiteral("wr-90")
                               : name_line_edit->text().trimmed();
         parameters_.cross_section = circular ? 1 : 0;
+        // Смена сечения может обессмыслить ручной выбор моды: H10 существует
+        // только в прямоугольном волноводе, поэтому индексы подгоняются под
+        // новое сечение вместо ошибки при запуске расчёта.
+        normalizeModeSelection(parameters_);
         parameters_.radius_mm = radius_spin_box->value();
         if (!circular) {
             parameters_.width_mm = x_max - x_min;
@@ -2279,6 +2662,380 @@ void MainWindow::showPlateDialog(int plate_index, bool iris_template, bool round
     dialog.exec();
 }
 
+void MainWindow::showShapeDialog(int shape_index, int new_kind)
+{
+    const bool creating = shape_index < 0 || shape_index >= parameters_.shapes.size();
+    ShapeParameters shape;
+    if (creating) {
+        shape.kind = std::clamp(new_kind, 0, 2);
+        shape.name = QStringLiteral("solid_%1").arg(parameters_.shapes.size() + 1);
+        // Новое тело появляется в середине тракта и с размерами, соразмерными
+        // сечению: пустая заготовка в нуле координат чаще всего невидима.
+        const bool circular = parameters_.cross_section == 1;
+        const double half_width_mm =
+            circular ? parameters_.radius_mm - parameters_.wall_thickness_mm
+                     : 0.5 * (parameters_.width_mm - 2.0 * parameters_.wall_thickness_mm);
+        const double half_height_mm =
+            circular ? half_width_mm
+                     : 0.5 * (parameters_.depth_mm - 2.0 * parameters_.wall_thickness_mm);
+        shape.size_x_mm = std::max(0.5, 0.4 * half_width_mm);
+        shape.size_y_mm = std::max(0.5, 2.0 * half_height_mm);
+        shape.size_z_mm = 1.0;
+        shape.radius_mm = std::max(0.2, 0.15 * half_width_mm);
+        shape.length_mm = shape.kind == 1 ? 2.0 * half_height_mm : 1.0;
+        shape.axis = shape.kind == 1 ? 1 : 2;
+        if (shape.kind == 2) {
+            shape.profile_mm = rectangleProfile(0.8 * half_width_mm, 0.8 * half_height_mm);
+        }
+    } else {
+        shape = parameters_.shapes[shape_index];
+    }
+
+    QDialog dialog(this);
+    dialog.setWindowTitle(QStringLiteral("Solid"));
+    dialog.setModal(true);
+    dialog.setMinimumWidth(520);
+    dialog.setStyleSheet(styleSheet());
+
+    QHBoxLayout *dialog_layout = new QHBoxLayout(&dialog);
+    QGridLayout *grid_layout = new QGridLayout();
+    grid_layout->setHorizontalSpacing(8);
+    grid_layout->setVerticalSpacing(6);
+
+    QLineEdit *name_line_edit = new QLineEdit(shape.name, &dialog);
+    QCheckBox *enabled_check_box = new QCheckBox(QStringLiteral("Включено в модель"), &dialog);
+    enabled_check_box->setChecked(shape.enabled);
+
+    QComboBox *kind_combo_box = new QComboBox(&dialog);
+    kind_combo_box->addItem(QStringLiteral("Брусок (Brick)"));
+    kind_combo_box->addItem(QStringLiteral("Цилиндр (Cylinder)"));
+    kind_combo_box->addItem(QStringLiteral("Призма по профилю (Extrude)"));
+    kind_combo_box->setCurrentIndex(std::clamp(shape.kind, 0, 2));
+
+    QComboBox *operation_combo_box = new QComboBox(&dialog);
+    operation_combo_box->addItem(QStringLiteral("Объединить (Add)"));
+    operation_combo_box->addItem(QStringLiteral("Вычесть (Subtract)"));
+    operation_combo_box->addItem(QStringLiteral("Пересечь (Intersect)"));
+    operation_combo_box->setCurrentIndex(std::clamp(shape.operation, 0, 2));
+
+    QComboBox *axis_combo_box = new QComboBox(&dialog);
+    axis_combo_box->addItem(QStringLiteral("X"));
+    axis_combo_box->addItem(QStringLiteral("Y"));
+    axis_combo_box->addItem(QStringLiteral("Z"));
+    axis_combo_box->setCurrentIndex(std::clamp(shape.axis, 0, 2));
+
+    const auto make_length_spin_box = [this, &dialog](double value) {
+        return createSpinBox(-10000.0, 10000.0, value, 0.1, 4, QStringLiteral(" mm"), &dialog);
+    };
+    QDoubleSpinBox *center_x_spin_box = make_length_spin_box(shape.center_x_mm);
+    QDoubleSpinBox *center_y_spin_box = make_length_spin_box(shape.center_y_mm);
+    QDoubleSpinBox *center_z_spin_box = make_length_spin_box(shape.center_z_mm);
+    QDoubleSpinBox *size_x_spin_box = make_length_spin_box(shape.size_x_mm);
+    QDoubleSpinBox *size_y_spin_box = make_length_spin_box(shape.size_y_mm);
+    QDoubleSpinBox *size_z_spin_box = make_length_spin_box(shape.size_z_mm);
+    QDoubleSpinBox *radius_spin_box = make_length_spin_box(shape.radius_mm);
+    QDoubleSpinBox *length_spin_box = make_length_spin_box(shape.length_mm);
+    QDoubleSpinBox *rotation_x_spin_box =
+        createSpinBox(-360.0, 360.0, shape.rotation_x_deg, 1.0, 3, QStringLiteral(" deg"), &dialog);
+    QDoubleSpinBox *rotation_y_spin_box =
+        createSpinBox(-360.0, 360.0, shape.rotation_y_deg, 1.0, 3, QStringLiteral(" deg"), &dialog);
+    QDoubleSpinBox *rotation_z_spin_box =
+        createSpinBox(-360.0, 360.0, shape.rotation_z_deg, 1.0, 3, QStringLiteral(" deg"), &dialog);
+
+    QTableWidget *profile_table = new QTableWidget(0, 2, &dialog);
+    profile_table->setHorizontalHeaderLabels({QStringLiteral("u, мм"), QStringLiteral("v, мм")});
+    profile_table->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
+    profile_table->verticalHeader()->setVisible(false);
+    profile_table->setMinimumHeight(150);
+    const auto fill_profile_table = [profile_table](const QVector<QPointF> &profile) {
+        profile_table->setRowCount(profile.size());
+        for (int row = 0; row < profile.size(); ++row) {
+            profile_table->setItem(row, 0,
+                                   new QTableWidgetItem(QString::number(profile[row].x(), 'f', 4)));
+            profile_table->setItem(row, 1,
+                                   new QTableWidgetItem(QString::number(profile[row].y(), 'f', 4)));
+        }
+    };
+    fill_profile_table(shape.profile_mm);
+
+    QComboBox *profile_template_combo_box = new QComboBox(&dialog);
+    profile_template_combo_box->addItem(QStringLiteral("Шаблон профиля..."));
+    profile_template_combo_box->addItem(QStringLiteral("Прямоугольник"));
+    profile_template_combo_box->addItem(QStringLiteral("Буква C (разрез справа)"));
+    profile_template_combo_box->addItem(QStringLiteral("Буква Г (уголок)"));
+    profile_template_combo_box->addItem(QStringLiteral("Буква T (штырь с полкой)"));
+    QPushButton *add_point_button = new QPushButton(QStringLiteral("Точка +"), &dialog);
+    QPushButton *remove_point_button = new QPushButton(QStringLiteral("Точка −"), &dialog);
+
+    QLabel *axis_label = new QLabel(QStringLiteral("Ось тела:"), &dialog);
+    QLabel *size_label = new QLabel(QStringLiteral("Размеры X / Y / Z:"), &dialog);
+    QLabel *radius_label = new QLabel(QStringLiteral("Радиус:"), &dialog);
+    QLabel *length_label = new QLabel(QStringLiteral("Длина вдоль оси:"), &dialog);
+    QLabel *profile_label =
+        new QLabel(QStringLiteral("Профиль (в плоскости, перпендикулярной оси):"), &dialog);
+
+    int row = 0;
+    grid_layout->addWidget(new QLabel(QStringLiteral("Name:"), &dialog), row, 0);
+    grid_layout->addWidget(name_line_edit, row++, 1, 1, 3);
+    grid_layout->addWidget(new QLabel(QStringLiteral("Тип тела:"), &dialog), row, 0);
+    grid_layout->addWidget(kind_combo_box, row, 1);
+    grid_layout->addWidget(new QLabel(QStringLiteral("Операция:"), &dialog), row, 2);
+    grid_layout->addWidget(operation_combo_box, row++, 3);
+    grid_layout->addWidget(axis_label, row, 0);
+    grid_layout->addWidget(axis_combo_box, row++, 1);
+    grid_layout->addWidget(new QLabel(QStringLiteral("Центр X / Y / Z:"), &dialog), row, 0);
+    grid_layout->addWidget(center_x_spin_box, row, 1);
+    grid_layout->addWidget(center_y_spin_box, row, 2);
+    grid_layout->addWidget(center_z_spin_box, row++, 3);
+    grid_layout->addWidget(size_label, row, 0);
+    grid_layout->addWidget(size_x_spin_box, row, 1);
+    grid_layout->addWidget(size_y_spin_box, row, 2);
+    grid_layout->addWidget(size_z_spin_box, row++, 3);
+    grid_layout->addWidget(radius_label, row, 0);
+    grid_layout->addWidget(radius_spin_box, row, 1);
+    grid_layout->addWidget(length_label, row, 2);
+    grid_layout->addWidget(length_spin_box, row++, 3);
+    grid_layout->addWidget(new QLabel(QStringLiteral("Поворот X / Y / Z:"), &dialog), row, 0);
+    grid_layout->addWidget(rotation_x_spin_box, row, 1);
+    grid_layout->addWidget(rotation_y_spin_box, row, 2);
+    grid_layout->addWidget(rotation_z_spin_box, row++, 3);
+    grid_layout->addWidget(profile_label, row, 0, 1, 2);
+    grid_layout->addWidget(profile_template_combo_box, row, 2);
+    QHBoxLayout *profile_buttons = new QHBoxLayout();
+    profile_buttons->addWidget(add_point_button);
+    profile_buttons->addWidget(remove_point_button);
+    grid_layout->addLayout(profile_buttons, row++, 3);
+    grid_layout->addWidget(profile_table, row++, 0, 1, 4);
+    grid_layout->addWidget(enabled_check_box, row++, 0, 1, 4);
+
+    QVBoxLayout *button_layout = new QVBoxLayout();
+    QPushButton *ok_button = new QPushButton(QStringLiteral("OK"), &dialog);
+    QPushButton *cancel_button = new QPushButton(QStringLiteral("Cancel"), &dialog);
+    QPushButton *preview_button = new QPushButton(QStringLiteral("Preview"), &dialog);
+    QPushButton *up_button = new QPushButton(QStringLiteral("Выше"), &dialog);
+    QPushButton *down_button = new QPushButton(QStringLiteral("Ниже"), &dialog);
+    QPushButton *delete_button = new QPushButton(QStringLiteral("Удалить"), &dialog);
+    QPushButton *help_button = new QPushButton(QStringLiteral("Help"), &dialog);
+    ok_button->setDefault(true);
+    up_button->setEnabled(!creating && shape_index > 0);
+    down_button->setEnabled(!creating && shape_index < parameters_.shapes.size() - 1);
+    delete_button->setEnabled(!creating);
+    for (QPushButton *button : {ok_button, cancel_button, preview_button, up_button, down_button,
+                                delete_button, help_button}) {
+        button_layout->addWidget(button);
+    }
+    button_layout->addStretch(1);
+
+    dialog_layout->addLayout(grid_layout, 1);
+    dialog_layout->addLayout(button_layout);
+
+    // Видно только то, что относится к выбранному типу: у бруска нет радиуса, у
+    // цилиндра — профиля, и пустые поля рядом с заполненными читаются как ошибка.
+    const auto update_visible_fields = [=]() {
+        const int kind = kind_combo_box->currentIndex();
+        const bool is_brick = kind == 0;
+        const bool is_cylinder = kind == 1;
+        const bool is_prism = kind == 2;
+        size_label->setVisible(is_brick);
+        size_x_spin_box->setVisible(is_brick);
+        size_y_spin_box->setVisible(is_brick);
+        size_z_spin_box->setVisible(is_brick);
+        radius_label->setVisible(is_cylinder);
+        radius_spin_box->setVisible(is_cylinder);
+        length_label->setVisible(!is_brick);
+        length_spin_box->setVisible(!is_brick);
+        axis_label->setVisible(!is_brick);
+        axis_combo_box->setVisible(!is_brick);
+        profile_label->setVisible(is_prism);
+        profile_table->setVisible(is_prism);
+        profile_template_combo_box->setVisible(is_prism);
+        add_point_button->setVisible(is_prism);
+        remove_point_button->setVisible(is_prism);
+    };
+    update_visible_fields();
+    connect(kind_combo_box, QOverload<int>::of(&QComboBox::currentIndexChanged), &dialog,
+            [update_visible_fields](int) { update_visible_fields(); });
+
+    connect(add_point_button, &QPushButton::clicked, &dialog, [profile_table]() {
+        const int row = profile_table->rowCount();
+        profile_table->insertRow(row);
+        profile_table->setItem(row, 0, new QTableWidgetItem(QStringLiteral("0.0000")));
+        profile_table->setItem(row, 1, new QTableWidgetItem(QStringLiteral("0.0000")));
+    });
+    connect(remove_point_button, &QPushButton::clicked, &dialog, [profile_table]() {
+        const int row = profile_table->currentRow() >= 0 ? profile_table->currentRow()
+                                                         : profile_table->rowCount() - 1;
+        if (row >= 0) {
+            profile_table->removeRow(row);
+        }
+    });
+    connect(profile_template_combo_box, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            &dialog, [=](int index) {
+                if (index <= 0) {
+                    return;
+                }
+                const bool circular = parameters_.cross_section == 1;
+                const double half_width_mm =
+                    circular ? parameters_.radius_mm - parameters_.wall_thickness_mm
+                             : 0.5 * (parameters_.width_mm - 2.0 * parameters_.wall_thickness_mm);
+                const double half_height_mm =
+                    circular ? half_width_mm
+                             : 0.5 * (parameters_.depth_mm - 2.0 * parameters_.wall_thickness_mm);
+                QVector<QPointF> profile;
+                switch (index) {
+                case 1:
+                    profile = rectangleProfile(1.2 * half_width_mm, 1.2 * half_height_mm);
+                    break;
+                case 2:
+                    profile = cProfile(1.4 * half_width_mm, 1.4 * half_height_mm,
+                                       0.25 * half_height_mm, 0.5 * half_height_mm);
+                    break;
+                case 3:
+                    profile = lProfile(half_width_mm, half_height_mm, 0.3 * half_height_mm);
+                    break;
+                case 4:
+                    profile = tProfile(0.7 * half_width_mm, 0.3 * half_height_mm,
+                                       half_height_mm, 0.3 * half_width_mm);
+                    break;
+                default:
+                    break;
+                }
+                fill_profile_table(profile);
+                profile_template_combo_box->setCurrentIndex(0);
+            });
+
+    const auto collect_shape = [&]() {
+        ShapeParameters edited = shape;
+        edited.name = name_line_edit->text().trimmed().isEmpty()
+                          ? QStringLiteral("solid_%1").arg(parameters_.shapes.size() + 1)
+                          : name_line_edit->text().trimmed();
+        edited.enabled = enabled_check_box->isChecked();
+        edited.kind = kind_combo_box->currentIndex();
+        edited.operation = operation_combo_box->currentIndex();
+        edited.axis = axis_combo_box->currentIndex();
+        edited.center_x_mm = center_x_spin_box->value();
+        edited.center_y_mm = center_y_spin_box->value();
+        edited.center_z_mm = center_z_spin_box->value();
+        edited.size_x_mm = size_x_spin_box->value();
+        edited.size_y_mm = size_y_spin_box->value();
+        edited.size_z_mm = size_z_spin_box->value();
+        edited.radius_mm = radius_spin_box->value();
+        edited.length_mm = length_spin_box->value();
+        edited.rotation_x_deg = rotation_x_spin_box->value();
+        edited.rotation_y_deg = rotation_y_spin_box->value();
+        edited.rotation_z_deg = rotation_z_spin_box->value();
+        edited.profile_mm.clear();
+        for (int table_row = 0; table_row < profile_table->rowCount(); ++table_row) {
+            const QTableWidgetItem *u_item = profile_table->item(table_row, 0);
+            const QTableWidgetItem *v_item = profile_table->item(table_row, 1);
+            if (u_item == nullptr || v_item == nullptr) {
+                continue;
+            }
+            edited.profile_mm.push_back(QPointF(u_item->text().toDouble(),
+                                                v_item->text().toDouble()));
+        }
+        return edited;
+    };
+
+    // Индекс тела в списке: при первом «Preview» новое тело добавляется, и
+    // дальнейшие нажатия правят его же, а не плодят копии.
+    int applied_index = creating ? -1 : shape_index;
+    const auto apply_values = [&]() {
+        const ShapeParameters edited = collect_shape();
+        const QString error = shapeGeometryError(edited);
+        if (!error.isEmpty()) {
+            QMessageBox::warning(&dialog, QStringLiteral("Solid"), error);
+            return false;
+        }
+        if (applied_index < 0) {
+            parameters_.shapes.push_back(edited);
+            applied_index = parameters_.shapes.size() - 1;
+        } else {
+            parameters_.shapes[applied_index] = edited;
+        }
+        selected_shape_index_ = applied_index;
+        rebuildObjectTree();
+        markModelChanged();
+        return true;
+    };
+
+    connect(ok_button, &QPushButton::clicked, &dialog, [&]() {
+        if (apply_values()) {
+            dialog.accept();
+        }
+    });
+    connect(cancel_button, &QPushButton::clicked, &dialog, &QDialog::reject);
+    connect(preview_button, &QPushButton::clicked, &dialog, apply_values);
+    connect(delete_button, &QPushButton::clicked, &dialog, [&]() {
+        if (applied_index >= 0 && applied_index < parameters_.shapes.size()) {
+            parameters_.shapes.removeAt(applied_index);
+            selected_shape_index_ = -1;
+            rebuildObjectTree();
+            markModelChanged();
+        }
+        dialog.accept();
+    });
+    // Порядок в списке — это порядок булевых операций, поэтому перестановка
+    // тела меняет модель так же, как правка его размеров.
+    const auto move_shape = [&](int offset) {
+        if (!apply_values()) {
+            return;
+        }
+        const int target = applied_index + offset;
+        if (target < 0 || target >= parameters_.shapes.size()) {
+            return;
+        }
+        parameters_.shapes.move(applied_index, target);
+        applied_index = target;
+        selected_shape_index_ = target;
+        rebuildObjectTree();
+        markModelChanged();
+        dialog.accept();
+    };
+    connect(up_button, &QPushButton::clicked, &dialog, [&move_shape]() { move_shape(-1); });
+    connect(down_button, &QPushButton::clicked, &dialog, [&move_shape]() { move_shape(1); });
+    connect(help_button, &QPushButton::clicked, &dialog, [&]() {
+        QMessageBox::information(
+            &dialog,
+            QStringLiteral("Solid"),
+            QStringLiteral(
+                "Тела строятся в том порядке, в каком они стоят в дереве: каждое следующее "
+                "объединяется с уже построенным металлом, вычитается из него или пересекается "
+                "с ним. Первое включённое тело всегда объединяется — вычитать до него не из "
+                "чего.\n\n"
+                "Брусок задаётся центром и размерами. Цилиндр — центром, радиусом, длиной и "
+                "осью: ось Y даёт штырь между широкими стенками, ось Z — диск поперёк тракта.\n\n"
+                "Призма — это профиль, вытянутый вдоль оси. Профиль задаётся точками (u, v) "
+                "относительно центра тела в плоскости, перпендикулярной оси: для оси Z это "
+                "(x, y), для оси Y — (z, x), для оси X — (y, z). Готовые профили C, Г и T "
+                "берутся из списка шаблонов.\n\n"
+                "Модель с телами считается методом конечных элементов: замкнутые формулы и "
+                "метод частичных областей произвольную форму не описывают."));
+    });
+
+    dialog.exec();
+}
+
+void MainWindow::insertShapeTemplate(int shape_template)
+{
+    const QVector<ShapeParameters> shapes = makeShapeTemplate(shape_template, parameters_);
+    if (shapes.isEmpty()) {
+        QMessageBox::warning(this,
+                             QStringLiteral("Формы"),
+                             QStringLiteral("Сначала задайте размеры волновода."));
+        return;
+    }
+
+    const int first_index = parameters_.shapes.size();
+    parameters_.shapes.append(shapes);
+    selected_shape_index_ = first_index;
+    rebuildObjectTree();
+    markModelChanged();
+    setStatus(QStringLiteral("Добавлено тел: %1. Модель считается методом конечных элементов.")
+                  .arg(shapes.size()),
+              false);
+}
+
 void MainWindow::showExcitationDialog()
 {
     QDialog dialog(this);
@@ -2301,8 +3058,16 @@ void MainWindow::showExcitationDialog()
                                                        QStringLiteral(" GHz"),
                                                        &dialog);
     QComboBox *mode_policy_combo_box = new QComboBox(&dialog);
-    mode_policy_combo_box->addItem(QStringLiteral("Auto: first propagating mode"));
-    mode_policy_combo_box->setEnabled(false);
+    mode_policy_combo_box->addItem(
+        QStringLiteral("Автоматически: низшая распространяющаяся мода"));
+    mode_policy_combo_box->addItem(QStringLiteral("Вручную: выбранная мода, в том числе высшая"));
+    mode_policy_combo_box->setCurrentIndex(parameters_.mode_automatic ? 0 : 1);
+
+    QComboBox *mode_combo_box = new QComboBox(&dialog);
+    mode_combo_box->setMaxVisibleItems(18);
+    QLabel *mode_hint_label = new QLabel(&dialog);
+    mode_hint_label->setWordWrap(true);
+    mode_hint_label->setStyleSheet(QStringLiteral("color: #4a5a66;"));
 
     grid_layout->addWidget(new QLabel(QStringLiteral("Name:"), &dialog), 0, 0, 1, 2);
     grid_layout->addWidget(name_line_edit, 1, 0, 1, 2);
@@ -2310,6 +3075,91 @@ void MainWindow::showExcitationDialog()
     grid_layout->addWidget(frequency_spin_box, 3, 0, 1, 2);
     grid_layout->addWidget(new QLabel(QStringLiteral("Mode selection:"), &dialog), 4, 0, 1, 2);
     grid_layout->addWidget(mode_policy_combo_box, 5, 0, 1, 2);
+    grid_layout->addWidget(new QLabel(QStringLiteral("Mode:"), &dialog), 6, 0, 1, 2);
+    grid_layout->addWidget(mode_combo_box, 7, 0, 1, 2);
+    grid_layout->addWidget(mode_hint_label, 8, 0, 1, 2);
+
+    // Список мод строится по текущим размерам и частоте: у каждой видно отсечку
+    // и то, проходит ли она. Пересобирается при каждой смене частоты, потому что
+    // от частоты зависит именно эта пометка.
+    const auto selected_indices = [mode_combo_box]() {
+        const QVariantList data = mode_combo_box->currentData().toList();
+        if (data.size() != 3) {
+            return QVariantList{true, 1, 0};
+        }
+        return data;
+    };
+    const auto refresh_modes = [&, mode_combo_box, frequency_spin_box]() {
+        WaveguideParameters probe = parameters_;
+        probe.frequency_ghz = frequency_spin_box->value();
+        const QVariantList wanted = mode_combo_box->count() > 0
+                                        ? selected_indices()
+                                        : QVariantList{parameters_.mode_family != 1,
+                                                       parameters_.mode_m,
+                                                       parameters_.mode_n};
+        const QSignalBlocker block(mode_combo_box);
+        mode_combo_box->clear();
+        int wanted_index = -1;
+        for (const WaveguideMode &mode : enumerateWaveguideModes(probe)) {
+            const QVariantList data{mode.transverse_electric, mode.m, mode.n};
+            mode_combo_box->addItem(QStringLiteral("%1 — fc %2 ГГц — %3")
+                                        .arg(modeTitle(mode),
+                                             number(mode.cutoff_ghz, 4),
+                                             mode.propagates
+                                                 ? QStringLiteral("распространяется")
+                                                 : QStringLiteral("ниже отсечки")),
+                                    data);
+            if (data == wanted) {
+                wanted_index = mode_combo_box->count() - 1;
+            }
+        }
+        if (wanted_index < 0 && wanted.size() == 3) {
+            // Мода из файла модели может лежать за пределами перечисленных
+            // индексов: её пункт добавляется отдельно, чтобы открытие диалога
+            // не подменяло выбор молча.
+            mode_combo_box->addItem(modeTitle(wanted.at(0).toBool(),
+                                              wanted.at(1).toInt(),
+                                              wanted.at(2).toInt()),
+                                    wanted);
+            wanted_index = mode_combo_box->count() - 1;
+        }
+        mode_combo_box->setCurrentIndex(std::max(0, wanted_index));
+    };
+
+    const auto refresh_hint = [&, mode_combo_box, mode_policy_combo_box, mode_hint_label]() {
+        const bool automatic = mode_policy_combo_box->currentIndex() == 0;
+        mode_combo_box->setEnabled(!automatic);
+        if (automatic) {
+            mode_hint_label->setText(QStringLiteral(
+                "Решатель сам возьмёт моду с наименьшей отсечкой из проходящих."));
+            return;
+        }
+        const QString text = mode_combo_box->currentText();
+        mode_hint_label->setText(
+            text.contains(QStringLiteral("ниже отсечки"))
+                ? QStringLiteral("Эта мода на заданной частоте затухает: поле не строится. "
+                                 "Поднимите частоту выше её fc.")
+                : QStringLiteral("Поле, S-параметры и потери будут посчитаны для этой моды."));
+    };
+
+    normalizeModeSelection(parameters_);
+    refresh_modes();
+    refresh_hint();
+    connect(frequency_spin_box,
+            QOverload<double>::of(&QDoubleSpinBox::valueChanged),
+            &dialog,
+            [&refresh_modes, &refresh_hint](double) {
+                refresh_modes();
+                refresh_hint();
+            });
+    connect(mode_policy_combo_box,
+            QOverload<int>::of(&QComboBox::currentIndexChanged),
+            &dialog,
+            [&refresh_hint](int) { refresh_hint(); });
+    connect(mode_combo_box,
+            QOverload<int>::of(&QComboBox::currentIndexChanged),
+            &dialog,
+            [&refresh_hint](int) { refresh_hint(); });
 
     QVBoxLayout *button_layout = new QVBoxLayout();
     QPushButton *ok_button = new QPushButton(QStringLiteral("OK"), &dialog);
@@ -2338,6 +3188,11 @@ void MainWindow::showExcitationDialog()
                                ? QStringLiteral("signal1")
                                : name_line_edit->text().trimmed();
         parameters_.frequency_ghz = frequency_spin_box->value();
+        parameters_.mode_automatic = mode_policy_combo_box->currentIndex() == 0;
+        const QVariantList indices = selected_indices();
+        parameters_.mode_family = indices.at(0).toBool() ? 0 : 1;
+        parameters_.mode_m = indices.at(1).toInt();
+        parameters_.mode_n = indices.at(2).toInt();
         rebuildObjectTree();
         markModelChanged();
         return true;
@@ -2351,9 +3206,16 @@ void MainWindow::showExcitationDialog()
     connect(cancel_button, &QPushButton::clicked, &dialog, &QDialog::reject);
     connect(preview_button, &QPushButton::clicked, &dialog, apply_values);
     connect(help_button, &QPushButton::clicked, &dialog, [&]() {
-        QMessageBox::information(&dialog,
-                                 QStringLiteral("Excitation Signal"),
-                                 QStringLiteral("Frequency controls cutoff check, guide wavelength, beta and selected propagating mode."));
+        QMessageBox::information(
+            &dialog,
+            QStringLiteral("Excitation Signal"),
+            QStringLiteral(
+                "Частота задаёт проверку отсечки, длину волны в волноводе и beta.\n\n"
+                "Мода возбуждения: автоматически берётся низшая проходящая (H10 в "
+                "прямоугольном волноводе, H11 в круглом). Ручной выбор возбуждает именно "
+                "указанную моду — так смотрят высшие: H11, E11, E12 и далее. Поле строится "
+                "только для моды выше её отсечки, поэтому частоту нужно задать больше fc, "
+                "показанной в списке."));
     });
 
     dialog.exec();
@@ -2637,6 +3499,65 @@ void MainWindow::createRibbon()
         showPlateDialog(-1, true, true);
     });
 
+    // Свободные формы: примитив создаётся кнопкой, булева операция задаётся в
+    // свойствах тела, а порядок тел в дереве и есть история построения.
+    QAction *add_brick_action =
+        make_action(QStringLiteral("Брусок"),
+                    QStringLiteral("Свободный параллелепипед: перегородка, ступень, вставка"));
+    connect(add_brick_action, &QAction::triggered, this, [this]() { showShapeDialog(-1, 0); });
+
+    QAction *add_cylinder_action =
+        make_action(QStringLiteral("Цилиндр"),
+                    QStringLiteral("Цилиндр вдоль выбранной оси: штырь, диск, круглая вставка"));
+    connect(add_cylinder_action, &QAction::triggered, this, [this]() { showShapeDialog(-1, 1); });
+
+    QAction *add_prism_action = make_action(
+        QStringLiteral("Призма\nпо профилю"),
+        QStringLiteral("Профиль произвольного очертания (C, Г, T), вытянутый вдоль оси"));
+    connect(add_prism_action, &QAction::triggered, this, [this]() { showShapeDialog(-1, 2); });
+
+    QAction *edit_shape_action =
+        make_action(QStringLiteral("Свойства\nтела"),
+                    QStringLiteral("Правка выбранного тела: размеры, операция, порядок"));
+    connect(edit_shape_action, &QAction::triggered, this, [this]() {
+        if (selected_shape_index_ >= 0 && selected_shape_index_ < parameters_.shapes.size()) {
+            showShapeDialog(selected_shape_index_);
+        } else {
+            QMessageBox::information(
+                this,
+                QStringLiteral("Формы"),
+                QStringLiteral("Выберите тело в дереве модели — тогда откроются его свойства."));
+        }
+    });
+
+    QAction *septum_template_action =
+        make_action(QStringLiteral("Перегородки\nH-плоскости"),
+                    QStringLiteral("Две пары встречных перегородок на всю высоту тракта"));
+    connect(septum_template_action, &QAction::triggered, this, [this]() { insertShapeTemplate(0); });
+
+    QAction *c_iris_template_action =
+        make_action(QStringLiteral("Диафрагма\nC-профиля"),
+                    QStringLiteral("Пластина во всё сечение с вырезанным C-образным окном"));
+    connect(c_iris_template_action, &QAction::triggered, this, [this]() { insertShapeTemplate(1); });
+
+    QAction *corner_iris_template_action =
+        make_action(QStringLiteral("Диафрагма\nиз уголков"),
+                    QStringLiteral("Пластина во всё сечение с двумя встречными Г-образными "
+                                   "вырезами"));
+    connect(corner_iris_template_action, &QAction::triggered, this,
+            [this]() { insertShapeTemplate(2); });
+
+    QAction *t_stub_template_action =
+        make_action(QStringLiteral("T-образные\nвставки"),
+                    QStringLiteral("Встречные штыри с поперечной полкой от боковых стенок"));
+    connect(t_stub_template_action, &QAction::triggered, this, [this]() { insertShapeTemplate(3); });
+
+    QAction *round_post_template_action =
+        make_action(QStringLiteral("Цилиндрический\nштырь"),
+                    QStringLiteral("Круглый штырь между широкими стенками тракта"));
+    connect(round_post_template_action, &QAction::triggered, this,
+            [this]() { insertShapeTemplate(4); });
+
     QAction *symmetric_profile_action =
         make_action(QStringLiteral("Симметричное\nсужение"),
                     QStringLiteral("Волновод сужается с обеих боковых стенок на участке по длине"));
@@ -2712,6 +3633,10 @@ void MainWindow::createRibbon()
     home_shapes_group->addIconButton(add_round_iris_action, RibbonIcon::RoundIris);
     home_shapes_group->addIconButton(slot_action, RibbonIcon::Slot);
 
+    home_shapes_group->addIconButton(add_brick_action, RibbonIcon::Brick);
+    home_shapes_group->addIconButton(add_cylinder_action, RibbonIcon::Cylinder);
+    home_shapes_group->addIconButton(add_prism_action, RibbonIcon::Prism);
+
     RibbonGroup *home_edit_group = home_tab->addGroup(QStringLiteral("Правка"));
     home_edit_group->addLargeButton(parameters_action, RibbonIcon::Parameters);
     home_edit_group->addSmallButton(waveguide_action, RibbonIcon::Waveguide);
@@ -2728,6 +3653,22 @@ void MainWindow::createRibbon()
     shapes_group->addIconButton(slot_action, RibbonIcon::Slot);
     shapes_group->addIconButton(waveguide_action, RibbonIcon::Waveguide);
     shapes_group->addIconButton(excitation_action, RibbonIcon::Excitation);
+
+    // Свободные формы вынесены в собственную группу: это отдельный способ
+    // строить модель, а не ещё один готовый объект.
+    RibbonGroup *solids_group = modeling_tab->addGroup(QStringLiteral("Формы"));
+    solids_group->addLargeButton(add_brick_action, RibbonIcon::Brick);
+    solids_group->addLargeButton(add_cylinder_action, RibbonIcon::Cylinder);
+    solids_group->addLargeButton(add_prism_action, RibbonIcon::Prism);
+    solids_group->addSmallButton(edit_shape_action, RibbonIcon::Boolean);
+
+    RibbonGroup *solid_templates_group =
+        modeling_tab->addGroup(QStringLiteral("Готовые вставки"));
+    solid_templates_group->addIconButton(septum_template_action, RibbonIcon::Septum);
+    solid_templates_group->addIconButton(c_iris_template_action, RibbonIcon::CIris);
+    solid_templates_group->addIconButton(corner_iris_template_action, RibbonIcon::CornerIris);
+    solid_templates_group->addIconButton(t_stub_template_action, RibbonIcon::TStub);
+    solid_templates_group->addIconButton(round_post_template_action, RibbonIcon::Cylinder);
 
     RibbonGroup *profile_group = modeling_tab->addGroup(QStringLiteral("Профиль волновода"));
     profile_group->addLargeButton(symmetric_profile_action, RibbonIcon::Profile);
@@ -2843,6 +3784,15 @@ void MainWindow::createRibbon()
                                add_plate_action,
                                add_iris_action,
                                add_round_iris_action,
+                               add_brick_action,
+                               add_cylinder_action,
+                               add_prism_action,
+                               edit_shape_action,
+                               septum_template_action,
+                               c_iris_template_action,
+                               corner_iris_template_action,
+                               t_stub_template_action,
+                               round_post_template_action,
                                symmetric_profile_action,
                                step_profile_action,
                                fields_action,
@@ -3345,6 +4295,9 @@ void MainWindow::applyActiveProject()
 
     applyLoadedParameters(project.parameters);
     selected_plate_index_ = project.selected_plate_index;
+    // Выделение тела к проекту не привязано: индекс от прежней модели указывал
+    // бы на чужое тело.
+    selected_shape_index_ = -1;
     rebuildObjectTree();
 
     last_result_ = project.result;
@@ -3425,6 +4378,10 @@ void MainWindow::openProjectPath(const QString &file_path)
         refreshStartPageRecents();
         return;
     }
+
+    // Чужой или правленый вручную файл может задавать моду, которой в его
+    // сечении нет: приводим выбор к сечению сразу при открытии.
+    normalizeModeSelection(params);
 
     OpenProject project;
     project.file_path = canonical;
@@ -3596,10 +4553,10 @@ void MainWindow::newProjectFromPreset(int preset)
     form->addRow(QStringLiteral("Расположение"), location_row);
 
     QComboBox *preset_combo = new QComboBox(&dialog);
-    for (int index = 0; index < 3; ++index) {
+    for (int index = 0; index < preset_count; ++index) {
         preset_combo->addItem(presetName(index));
     }
-    preset_combo->setCurrentIndex(std::clamp(preset, 0, 2));
+    preset_combo->setCurrentIndex(std::clamp(preset, 0, preset_count - 1));
     form->addRow(QStringLiteral("Шаблон"), preset_combo);
     layout->addLayout(form);
 
@@ -3738,6 +4695,22 @@ WaveguideParameters MainWindow::presetParameters(int preset)
         params.length_mm = 50.0;
         params.frequency_ghz = 12.0;
         break;
+    case 3:   // перегородки в плоскости H
+        params.shapes = makeShapeTemplate(0, params);
+        break;
+    case 4:   // диафрагма с C-образным окном
+        params.shapes = makeShapeTemplate(1, params);
+        break;
+    case 5:   // диафрагма из встречных уголков
+        params.shapes = makeShapeTemplate(2, params);
+        break;
+    case 6:   // круглый тракт с T-образными вставками
+        params.cross_section = 1;
+        params.radius_mm = 10.0;
+        params.length_mm = 50.0;
+        params.frequency_ghz = 12.0;
+        params.shapes = makeShapeTemplate(3, params);
+        break;
     case 2: {   // прямоугольный с диафрагмой
         const double inner_width = params.width_mm - 2.0 * params.wall_thickness_mm;
         const double inner_depth = params.depth_mm - 2.0 * params.wall_thickness_mm;
@@ -3769,8 +4742,12 @@ QString MainWindow::presetName(int preset)
         "Прямоугольный WR-90",
         "Круглый волновод",
         "Прямоугольный с диафрагмой",
+        "Перегородки H-плоскости",
+        "Диафрагма C-профиля",
+        "Диафрагма из уголков",
+        "Круглый с T-вставками",
     };
-    return QString::fromUtf8(names[std::clamp(preset, 0, 2)]);
+    return QString::fromUtf8(names[std::clamp(preset, 0, preset_count - 1)]);
 }
 
 QString MainWindow::presetDescription(int preset)
@@ -3781,8 +4758,15 @@ QString MainWindow::presetDescription(int preset)
         "Круглый волновод радиусом 10 мм, моды через функции Бесселя, 12 ГГц.",
         "Прямоугольный волновод с поперечной диафрагмой (прямоугольное окно) — "
         "готовый пример для FEM-расчёта S-параметров.",
+        "Две пары встречных перегородок на всю высоту тракта — индуктивная "
+        "неоднородность, вид сверху даёт четыре отрезка от боковых стенок.",
+        "Пластина во всё сечение волновода с вырезанным окном в форме буквы C.",
+        "Пластина во всё сечение волновода с двумя встречными Г-образными "
+        "вырезами: сверху и снизу, металл остаётся ступенчатой перемычкой.",
+        "Круглый волновод с двумя T-образными вставками от боковых стенок: "
+        "штырь с поперечной полкой на конце.",
     };
-    return QString::fromUtf8(hints[std::clamp(preset, 0, 2)]);
+    return QString::fromUtf8(hints[std::clamp(preset, 0, preset_count - 1)]);
 }
 
 QWidget *MainWindow::buildStartPage()
@@ -3855,13 +4839,20 @@ QWidget *MainWindow::buildStartPage()
 
     // QCommandLinkButton сам переносит описание по словам — иначе длинный текст
     // шаблона растянул бы страницу и вылез в горизонтальную прокрутку.
-    QHBoxLayout *cards = new QHBoxLayout();
+    // Карточек стало семь, и в одну строку они уже не помещаются: сетка по три
+    // в ряд оставляет каждой читаемую ширину.
+    QGridLayout *cards = new QGridLayout();
     cards->setSpacing(10);
-    for (int preset = 0; preset < 3; ++preset) {
+    for (int preset = 0; preset < preset_count; ++preset) {
         QCommandLinkButton *card =
             new QCommandLinkButton(presetName(preset), presetDescription(preset), content);
         card->setObjectName(QStringLiteral("cstPresetCard"));
-        const RibbonIcon icon = preset == 2 ? RibbonIcon::Iris : RibbonIcon::Waveguide;
+        const RibbonIcon icon = preset == 2   ? RibbonIcon::Iris
+                                : preset == 3 ? RibbonIcon::Septum
+                                : preset == 4 ? RibbonIcon::CIris
+                                : preset == 5 ? RibbonIcon::CornerIris
+                                : preset == 6 ? RibbonIcon::TStub
+                                              : RibbonIcon::Waveguide;
         card->setIcon(ribbonIcon(icon, 28));
         card->setIconSize(QSize(28, 28));
         card->setCursor(Qt::PointingHandCursor);
@@ -3869,7 +4860,10 @@ QWidget *MainWindow::buildStartPage()
         connect(card, &QCommandLinkButton::clicked, this, [this, preset]() {
             newProjectFromPreset(preset);
         });
-        cards->addWidget(card, 1);
+        cards->addWidget(card, preset / 3, preset % 3);
+    }
+    for (int column = 0; column < 3; ++column) {
+        cards->setColumnStretch(column, 1);
     }
     content_layout->addLayout(cards);
     content_layout->addSpacing(12);
@@ -4002,7 +4996,14 @@ QString MainWindow::buildResultText(const WaveguideCalculationResult &result) co
 
     QString text;
     text += QStringLiteral("Excitation\n");
-    text += QStringLiteral("  Frequency: %1 GHz\n\n").arg(number(result.parameters.frequency_ghz, 4));
+    text += QStringLiteral("  Frequency: %1 GHz\n").arg(number(result.parameters.frequency_ghz, 4));
+    text += QStringLiteral("  Мода возбуждения: %1\n\n")
+                .arg(result.parameters.mode_automatic
+                         ? QStringLiteral("автоматически (низшая распространяющаяся)")
+                         : QStringLiteral("задана вручную — %1")
+                               .arg(modeTitle(result.parameters.mode_family != 1,
+                                              result.parameters.mode_m,
+                                              result.parameters.mode_n)));
 
     text += QStringLiteral("Геометрия\n");
     text += QStringLiteral("  Внутренняя ширина: %1 мм\n").arg(number(result.inner_width_mm));
@@ -4025,6 +5026,45 @@ QString MainWindow::buildResultText(const WaveguideCalculationResult &result) co
         text += QStringLiteral("  Оценка возбуждения: k_slot = |J_perp| * |sinc(beta*l_slot/2)| = %1\n")
                     .arg(number(result.slot_normalized_coupling, 4));
         text += QStringLiteral("  Текущий backend не решает рассеяние щелью: ложное fringing-поле и токи в воздухе не синтезируются.\n\n");
+    }
+
+    if (!result.parameters.shapes.isEmpty()) {
+        // Тела перечисляются в порядке применения: он и есть модель, поэтому
+        // отчёт повторяет дерево, а не сортирует список по имени.
+        text += QStringLiteral("Свободные тела (порядок построения)\n");
+        for (const ShapeParameters &shape : result.parameters.shapes) {
+            text += QStringLiteral("  %1: %2, %3, %4\n")
+                        .arg(shape.name,
+                             shapeKindName(shape.kind),
+                             shapeOperationName(shape.operation),
+                             shape.enabled ? QStringLiteral("включено")
+                                           : QStringLiteral("отключено"));
+            text += QStringLiteral("    центр: (%1, %2, %3) мм\n")
+                        .arg(number(shape.center_x_mm))
+                        .arg(number(shape.center_y_mm))
+                        .arg(number(shape.center_z_mm));
+            switch (shape.kind) {
+            case 1:
+                text += QStringLiteral("    ось %1, радиус %2 мм, длина %3 мм\n")
+                            .arg(shapeAxisName(shape.axis),
+                                 number(shape.radius_mm),
+                                 number(shape.length_mm));
+                break;
+            case 2:
+                text += QStringLiteral("    ось %1, длина %2 мм, точек профиля: %3\n")
+                            .arg(shapeAxisName(shape.axis), number(shape.length_mm))
+                            .arg(shape.profile_mm.size());
+                break;
+            default:
+                text += QStringLiteral("    размеры: %1 x %2 x %3 мм\n")
+                            .arg(number(shape.size_x_mm))
+                            .arg(number(shape.size_y_mm))
+                            .arg(number(shape.size_z_mm));
+                break;
+            }
+        }
+        text += QStringLiteral("  Объём металла выше посчитан по стенкам и пластинам: тела "
+                               "в него не входят.\n\n");
     }
 
     if (!result.parameters.pec_plates.isEmpty()) {
@@ -4079,7 +5119,8 @@ QString MainWindow::buildResultText(const WaveguideCalculationResult &result) co
     text += QLatin1Char('\n');
 
     if (result.has_propagating_mode) {
-        text += QStringLiteral("Выбранная распространяющаяся мода: %1\n").arg(result.selected_mode.name);
+        text += QStringLiteral("Выбранная распространяющаяся мода: %1\n")
+                    .arg(modeTitle(result.selected_mode));
         text += QStringLiteral("  fc: %1 ГГц\n").arg(number(result.selected_mode.cutoff_ghz, 4));
         text += QStringLiteral("  lambda0: %1 мм\n").arg(number(result.wavelength0_mm));
         text += QStringLiteral("  lambda_g: %1 мм\n").arg(number(result.guide_wavelength_mm));
@@ -4117,7 +5158,15 @@ QString MainWindow::formatModeTable(const WaveguideCalculationResult &result) co
 {
     QString text;
     for (const WaveguideMode &mode : result.modes) {
-        text += QStringLiteral("  %1  fc=%2 ГГц  %3\n")
+        // Стрелка отмечает моду, которой ведётся возбуждение: в таблице из
+        // десятков строк иначе не видно, поле какой из них показано.
+        const bool selected = result.selected_mode.transverse_electric == mode.transverse_electric &&
+                              result.selected_mode.m == mode.m &&
+                              result.selected_mode.n == mode.n &&
+                              !result.selected_mode.name.isEmpty();
+        text += QStringLiteral("%1 %2 %3  fc=%4 ГГц  %5\n")
+                    .arg(selected ? QStringLiteral("->") : QStringLiteral("  "))
+                    .arg(modeAlias(mode.transverse_electric, mode.m, mode.n), -5)
                     .arg(mode.name, -5)
                     .arg(number(mode.cutoff_ghz, 4), 9)
                     .arg(mode.propagates ? QStringLiteral("распространяется")

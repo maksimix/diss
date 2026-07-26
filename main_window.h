@@ -117,6 +117,12 @@ private:
     void showPlateDialog(int plate_index = -1,
                          bool iris_template = false,
                          bool round_post_template = false);
+    // Диалог свободного тела: index < 0 — создание нового тела вида new_kind
+    // (0 — брусок, 1 — цилиндр, 2 — призма), иначе правка существующего.
+    void showShapeDialog(int shape_index = -1, int new_kind = 0);
+    // Готовые наборы тел: перегородки в плоскости H, диафрагма с C-окном,
+    // диафрагма со встречными Г-выступами, T-образные вставки круглого тракта.
+    void insertShapeTemplate(int shape_template);
     void showExcitationDialog();
     void showSolverSetupDialog();
     void showAboutDialog();
@@ -290,4 +296,5 @@ private:
     int volume_cache_plane_ = -1;
     QVector<FieldSlice> volume_cache_;
     int selected_plate_index_ = -1;
+    int selected_shape_index_ = -1;
 };
