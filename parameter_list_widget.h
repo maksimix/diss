@@ -3,6 +3,7 @@
 #include <QtWidgets/QWidget>
 
 class ParameterStore;
+class QLabel;
 class QPushButton;
 class QTableWidget;
 class QTableWidgetItem;
@@ -30,10 +31,13 @@ private:
     void handleItemChanged(QTableWidgetItem *item);
     void writeStoreFromTable();
     void refreshValueColumn();
+    // Пустая таблица заменяется пояснением, зачем нужны переменные.
+    void updateEmptyState();
 
     ParameterStore *store_ = nullptr;
     QTableWidget *table_ = nullptr;
     QPushButton *add_button_ = nullptr;
     QPushButton *delete_button_ = nullptr;
+    QLabel *empty_hint_ = nullptr;
     bool updating_ = false;
 };

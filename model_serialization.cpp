@@ -263,9 +263,15 @@ WaveguideParameters parametersFromJson(const QJsonObject &root)
     return parameters;
 }
 
+// Отпечаток модели для проверки кэша расчёта. Свойства отображения из него
+// исключены: смена вида корпуса не меняет ни одного уравнения, и кэш из-за неё
+// обесцениваться не должен — иначе после каждой смены прозрачности пришлось бы
+// считать заново.
 QByteArray modelBytes(const WaveguideParameters &parameters)
 {
-    return QJsonDocument(parametersToJson(parameters)).toJson(QJsonDocument::Compact);
+    WaveguideParameters physics = parameters;
+    physics.shell_display = 0;
+    return QJsonDocument(parametersToJson(physics)).toJson(QJsonDocument::Compact);
 }
 }
 

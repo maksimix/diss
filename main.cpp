@@ -37,5 +37,13 @@ int main(int argc, char *argv[])
     window.resize(1280, 760);
     window.show();
 
+    // Путь к проекту первым аргументом: так открывается двойной щелчок по
+    // .wgproj в проводнике. Показ окна идёт раньше, чтобы возможная ошибка
+    // чтения легла в строку состояния уже видимого окна.
+    const QStringList arguments = QApplication::arguments();
+    if (arguments.size() > 1) {
+        window.openProjectOnStartup(arguments.at(1));
+    }
+
     return app.exec();
 }

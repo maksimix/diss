@@ -41,6 +41,10 @@ public:
     explicit MainWindow(QWidget *parent = nullptr);
     ~MainWindow() override;
 
+    // Открытие проекта из командной строки: путь к .wgproj первым аргументом.
+    // Через это же работает двойной щелчок по файлу проекта в проводнике.
+    void openProjectOnStartup(const QString &file_path);
+
 signals:
     void requestCalculation(int request_id,
                             const WaveguideParameters &parameters,
@@ -98,6 +102,11 @@ private slots:
 
 private:
     QWidget *createParameterPanel();
+    // Управление отображением полей вынесено из левой панели в плавающее окно:
+    // дерево объектов занимает всю высоту, а окно полей висит поверх модели.
+    QWidget *createFieldDisplayWidget();
+    void createFieldDisplayWindow();
+    void toggleFieldDisplayWindow(bool visible);
     QWidget *createResultPanel();
     QWidget *createProjectionPanel();
     QDoubleSpinBox *createSpinBox(double minimum,
@@ -112,6 +121,9 @@ private:
     QString formatModeTable(const WaveguideCalculationResult &result) const;
     void applyInteractiveSlotParameters(const WaveguideParameters &parameters);
     void rebuildObjectTree();
+    // Разделы «2D/3D Results» и «1D Results» в дереве, как в CST: готовые поля
+    // расчёта, щелчок по которым переключает трёхмерный вид.
+    void appendResultBranches();
     void filterObjectTree(const QString &text);
     void handleObjectSelectionChanged();
     void updateModelPreview();
@@ -202,6 +214,11 @@ private:
     // геометрию, а стрелки, срезы и стопка объёма остались бы от чужого расчёта.
     void clearFieldDisplay();
     bool saveProjectSnapshot(const OpenProject &project, QString *error);
+    // Проект пишется на диск сам: модель — перед запуском решателя, готовый
+    // расчёт — сразу после него. Иначе .wgr появлялся бы только по Ctrl+S, а
+    // проект, перенесённый на другой ПК, снова просил бы пересчёт.
+    void autoSaveModelBeforeRun();
+    void persistCalculationResult();
     void updateProjectActionsEnabled();
     void setDocumentDirty(bool dirty);
     QString projectTabTitle(int project_index) const;
@@ -233,6 +250,9 @@ private:
     QComboBox *linear_solver_combo_box_ = nullptr;
     RibbonBar *ribbon_bar_ = nullptr;
     CstPanel *navigation_panel_ = nullptr;
+    QWidget *field_window_ = nullptr;
+    QAction *fields_action_ = nullptr;
+    bool field_window_placed_ = false;
     QStackedWidget *workspace_stack_ = nullptr;   // 0 — стартовая страница, 1 — работа
     QWidget *start_page_ = nullptr;
     QVBoxLayout *start_recent_layout_ = nullptr;

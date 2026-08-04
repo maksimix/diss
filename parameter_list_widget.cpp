@@ -6,9 +6,11 @@
 #include <QtCore/QSet>
 #include <QtGui/QBrush>
 #include <QtGui/QColor>
+#include <QtGui/QFontDatabase>
 #include <QtWidgets/QAbstractItemView>
 #include <QtWidgets/QHBoxLayout>
 #include <QtWidgets/QHeaderView>
+#include <QtWidgets/QLabel>
 #include <QtWidgets/QPushButton>
 #include <QtWidgets/QTableWidget>
 #include <QtWidgets/QTableWidgetItem>
@@ -30,38 +32,85 @@ ParameterListWidget::ParameterListWidget(ParameterStore *store, QWidget *parent)
     , store_(store)
 {
     QVBoxLayout *layout = new QVBoxLayout(this);
-    layout->setContentsMargins(4, 4, 4, 4);
-    layout->setSpacing(4);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(0);
+
+    // Панель инструментов над таблицей: команды рядом с данными, а не под ними,
+    // как в списке параметров CST. Справа — подсказка о синтаксисе выражений.
+    QWidget *toolbar = new QWidget(this);
+    toolbar->setObjectName(QStringLiteral("cstParameterToolbar"));
+    QHBoxLayout *buttons = new QHBoxLayout(toolbar);
+    buttons->setContentsMargins(6, 4, 8, 4);
+    buttons->setSpacing(6);
+    add_button_ = new QPushButton(QStringLiteral("Добавить"), toolbar);
+    add_button_->setObjectName(QStringLiteral("cstParameterButton"));
+    add_button_->setToolTip(QStringLiteral("Новая переменная модели"));
+    delete_button_ = new QPushButton(QStringLiteral("Удалить"), toolbar);
+    delete_button_->setObjectName(QStringLiteral("cstParameterButton"));
+    delete_button_->setToolTip(QStringLiteral("Удалить выделенные строки"));
+    delete_button_->setEnabled(false);
+    buttons->addWidget(add_button_);
+    buttons->addWidget(delete_button_);
+    buttons->addStretch(1);
+    QLabel *hint = new QLabel(
+        QStringLiteral("Выражения: + − × ÷ ^, скобки, sqrt, sin, cos, min, max, pi; "
+                       "имена других параметров подставляются по значению"),
+        toolbar);
+    hint->setObjectName(QStringLiteral("cstParameterHint"));
+    buttons->addWidget(hint, 0);
+    layout->addWidget(toolbar);
 
     table_ = new QTableWidget(0, 4, this);
+    table_->setObjectName(QStringLiteral("cstParameterTable"));
     table_->setHorizontalHeaderLabels({QStringLiteral("Имя"),
                                        QStringLiteral("Выражение"),
                                        QStringLiteral("Значение"),
                                        QStringLiteral("Описание")});
     table_->horizontalHeader()->setStretchLastSection(true);
     table_->horizontalHeader()->setSectionResizeMode(name_column, QHeaderView::Interactive);
-    table_->setColumnWidth(name_column, 120);
-    table_->setColumnWidth(expression_column, 160);
-    table_->setColumnWidth(value_column, 110);
+    table_->horizontalHeader()->setHighlightSections(false);
+    table_->horizontalHeader()->setDefaultAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+    table_->setColumnWidth(name_column, 150);
+    table_->setColumnWidth(expression_column, 220);
+    table_->setColumnWidth(value_column, 130);
     table_->verticalHeader()->setVisible(false);
+    table_->verticalHeader()->setDefaultSectionSize(22);
     table_->setAlternatingRowColors(true);
     table_->setSelectionBehavior(QAbstractItemView::SelectRows);
+    table_->setShowGrid(false);
+    table_->setFrameShape(QFrame::NoFrame);
+    // Правка начинается с первого щелчка по выделенной ячейке: список параметров
+    // существует ради быстрого перебора значений.
+    table_->setEditTriggers(QAbstractItemView::DoubleClicked | QAbstractItemView::SelectedClicked |
+                            QAbstractItemView::EditKeyPressed | QAbstractItemView::AnyKeyPressed);
     layout->addWidget(table_, 1);
 
-    QHBoxLayout *buttons = new QHBoxLayout();
-    buttons->setContentsMargins(0, 0, 0, 0);
-    add_button_ = new QPushButton(QStringLiteral("Новый параметр"), this);
-    delete_button_ = new QPushButton(QStringLiteral("Удалить"), this);
-    buttons->addWidget(add_button_);
-    buttons->addWidget(delete_button_);
-    buttons->addStretch(1);
-    layout->addLayout(buttons);
+    // Пока переменных нет, таблица пустая и непонятная: подсказка объясняет,
+    // зачем она нужна, и исчезает с первой строкой.
+    empty_hint_ = new QLabel(
+        QStringLiteral("Переменных пока нет. «Добавить» заводит именованное значение, которое\n"
+                       "можно вписать в любое поле размера вместо числа — например width/2."),
+        this);
+    empty_hint_->setObjectName(QStringLiteral("cstParameterEmpty"));
+    empty_hint_->setAlignment(Qt::AlignCenter);
+    layout->addWidget(empty_hint_, 1);
 
     connect(add_button_, &QPushButton::clicked, this, &ParameterListWidget::addParameterRow);
     connect(delete_button_, &QPushButton::clicked, this, &ParameterListWidget::deleteSelectedRows);
     connect(table_, &QTableWidget::itemChanged, this, &ParameterListWidget::handleItemChanged);
+    connect(table_, &QTableWidget::itemSelectionChanged, this, [this]() {
+        delete_button_->setEnabled(!table_->selectedItems().isEmpty());
+    });
 
     reload();
+}
+
+// Подсказка вместо пустой таблицы: показывается ровно одна из двух.
+void ParameterListWidget::updateEmptyState()
+{
+    const bool empty = table_->rowCount() == 0;
+    table_->setVisible(!empty);
+    empty_hint_->setVisible(empty);
 }
 
 void ParameterListWidget::reload()
@@ -71,15 +120,31 @@ void ParameterListWidget::reload()
     for (const ModelParameter &parameter : store_->entries()) {
         const int row = table_->rowCount();
         table_->insertRow(row);
-        table_->setItem(row, name_column, new QTableWidgetItem(parameter.name));
-        table_->setItem(row, expression_column, new QTableWidgetItem(parameter.expression));
+        QTableWidgetItem *name_item = new QTableWidgetItem(parameter.name);
+        // Имя — ключ, по которому на переменную ссылаются выражения, поэтому
+        // выделено начертанием.
+        QFont name_font = name_item->font();
+        name_font.setBold(true);
+        name_item->setFont(name_font);
+        table_->setItem(row, name_column, name_item);
+
+        QTableWidgetItem *expression_item = new QTableWidgetItem(parameter.expression);
+        expression_item->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
+        table_->setItem(row, expression_column, expression_item);
+
         QTableWidgetItem *value_item = new QTableWidgetItem();
         value_item->setFlags(value_item->flags() & ~Qt::ItemIsEditable);
+        value_item->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
+        value_item->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
         table_->setItem(row, value_column, value_item);
-        table_->setItem(row, description_column, new QTableWidgetItem(parameter.description));
+
+        QTableWidgetItem *description_item = new QTableWidgetItem(parameter.description);
+        description_item->setForeground(QColor(0x5a, 0x66, 0x70));
+        table_->setItem(row, description_column, description_item);
     }
     updating_ = false;
     refreshValueColumn();
+    updateEmptyState();
 }
 
 void ParameterListWidget::addParameterRow()
@@ -120,6 +185,7 @@ void ParameterListWidget::deleteSelectedRows()
     updating_ = false;
     writeStoreFromTable();
     refreshValueColumn();
+    updateEmptyState();
     emit parametersEdited();
 }
 
@@ -188,14 +254,25 @@ void ParameterListWidget::refreshValueColumn()
 
         double value = 0.0;
         QString error;
+        QTableWidgetItem *expression_item = table_->item(row, expression_column);
         if (store_->valueOf(name_item->text().trimmed(), &value, &error)) {
             value_item->setText(QLocale::system().toString(value, 'g', 8));
-            value_item->setToolTip(QString());
-            value_item->setForeground(QBrush());
+            value_item->setToolTip(QStringLiteral("Значение подставляется всюду, где имя "
+                                                  "вписано в поле размера"));
+            value_item->setForeground(QColor(0x1c, 0x5f, 0x3a));
+            if (expression_item != nullptr) {
+                expression_item->setBackground(QBrush());
+                expression_item->setToolTip(QString());
+            }
         } else {
-            value_item->setText(QStringLiteral("ошибка"));
+            // Ошибку показываем на самом выражении: чинить нужно именно его.
+            value_item->setText(QStringLiteral("— ошибка —"));
             value_item->setToolTip(error);
-            value_item->setForeground(QColor(180, 40, 40));
+            value_item->setForeground(QColor(0xb0, 0x20, 0x20));
+            if (expression_item != nullptr) {
+                expression_item->setBackground(QColor(0xff, 0xe6, 0xe6));
+                expression_item->setToolTip(error);
+            }
         }
     }
     updating_ = false;

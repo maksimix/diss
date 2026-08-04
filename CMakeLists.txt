@@ -177,6 +177,17 @@ if(EMWS_BUILD_GUI)
     target_link_libraries(parameter_expression_tests PRIVATE Qt6::Core)
     add_test(NAME parameter_expression_tests COMMAND parameter_expression_tests)
 
+    # Перенос проекта на другой ПК: папка с моделью и Result должна открываться
+    # с готовым расчётом. Окно не поднимается, нужны только QtCore и QtGui
+    # (QColor и QVector3D лежат в структурах результата).
+    add_executable(project_storage_tests
+        model_parameters.cpp
+        model_serialization.cpp
+        tests/project_storage_tests.cpp)
+    target_include_directories(project_storage_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(project_storage_tests PRIVATE krutiev_em_core Qt6::Core Qt6::Gui)
+    add_test(NAME project_storage_tests COMMAND project_storage_tests)
+
     qt_add_executable(EMWaveguideStudio
         calculation_worker.cpp
         cst_ribbon.cpp

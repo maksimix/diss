@@ -5,6 +5,7 @@
 #include "expression_spin_box.h"
 #include "model_serialization.h"
 #include "parameter_list_widget.h"
+#include "project_preview_widget.h"
 #include "waveguide_calculator.h"
 #include "waveguide_opengl_widget.h"
 
@@ -30,6 +31,7 @@
 #include <QtWidgets/QDockWidget>
 #include <QtWidgets/QDoubleSpinBox>
 #include <QtWidgets/QFormLayout>
+#include <QtWidgets/QFrame>
 #include <QtWidgets/QGridLayout>
 #include <QtWidgets/QGroupBox>
 #include <QtWidgets/QHBoxLayout>
@@ -475,6 +477,44 @@ bool applyTreeFilter(QTreeWidgetItem *item, const QString &needle)
     return matched;
 }
 
+// Однострочный состав модели для карточки проекта: сечение, длина, частота и
+// что внутри. По ней проект узнаётся, не открывая его.
+QString projectSummary(const WaveguideParameters &parameters)
+{
+    QString text = parameters.cross_section == 1
+                       ? QStringLiteral("круглый ⌀%1").arg(number(2.0 * parameters.radius_mm, 1))
+                       : QStringLiteral("%1 × %2")
+                             .arg(number(parameters.width_mm, 2), number(parameters.depth_mm, 2));
+    text += QStringLiteral(" × %1 мм   ·   %2 ГГц")
+                .arg(number(parameters.length_mm, 1), number(parameters.frequency_ghz, 2));
+
+    QStringList inside;
+    int irises = 0;
+    int plates = 0;
+    for (const PecPlateParameters &plate : parameters.pec_plates) {
+        if (!plate.enabled) {
+            continue;
+        }
+        (plate.aperture_enabled ? irises : plates)++;
+    }
+    if (irises > 0) {
+        inside << QStringLiteral("диафрагм: %1").arg(irises);
+    }
+    if (plates > 0) {
+        inside << QStringLiteral("пластин: %1").arg(plates);
+    }
+    if (!parameters.shapes.isEmpty()) {
+        inside << QStringLiteral("тел: %1").arg(parameters.shapes.size());
+    }
+    if (parameters.slot_enabled) {
+        inside << QStringLiteral("щель");
+    }
+    if (!inside.isEmpty()) {
+        text += QStringLiteral("   ·   ") + inside.join(QStringLiteral(", "));
+    }
+    return text;
+}
+
 QString formattedDuration(qint64 milliseconds)
 {
     const qint64 total_seconds = std::max<qint64>(0, milliseconds / 1000);
@@ -681,16 +721,42 @@ QCommandLinkButton#cstPresetCard:hover {
     border-color: #1b5b96;
     background: #f5faff;
 }
-QCommandLinkButton#cstRecentItem {
+/* Карточка недавнего проекта: подсветка рамки под курсором задаётся свойством
+   hovered, потому что у QFrame нет псевдосостояния :hover в Qt Style Sheets. */
+QFrame#cstRecentCard {
     background: #ffffff;
     border: 1px solid #d8dde2;
-    border-radius: 4px;
-    text-align: left;
-    padding: 6px 8px;
+    border-radius: 5px;
 }
-QCommandLinkButton#cstRecentItem:hover {
-    border-color: #1b5b96;
-    background: #f5faff;
+QFrame#cstRecentCard[hovered="true"] {
+    border: 1px solid #1b5b96;
+    background: #f6fbff;
+}
+QFrame#cstRecentCard QLabel {
+    background: transparent;
+}
+QLabel#cstRecentTitle {
+    color: #10528a;
+    font-size: 10.5pt;
+    font-weight: 600;
+}
+QLabel#cstRecentSummary {
+    color: #40525f;
+}
+QLabel#cstRecentPath {
+    color: #8b939b;
+    font-size: 8pt;
+}
+QLabel#cstRecentBadge {
+    color: #7a7a7a;
+    background: #eeeeee;
+    border-radius: 7px;
+    padding: 1px 8px;
+    font-size: 8pt;
+}
+QLabel#cstRecentBadge[ready="true"] {
+    color: #1c6b34;
+    background: #dff2e3;
 }
 
 /* ------------------------------------------------ панели рабочей зоны --- */
@@ -809,6 +875,46 @@ QHeaderView::section {
     border: 1px solid #c4c4c4;
     padding: 2px 6px;
 }
+
+/* ------------------------------------------------- список параметров ---- */
+QWidget#cstParameterToolbar {
+    background: #f7f7f7;
+    border-bottom: 1px solid #d6d6d6;
+}
+QPushButton#cstParameterButton {
+    min-height: 20px;
+    padding: 1px 12px;
+}
+QLabel#cstParameterHint {
+    color: #8b939b;
+    font-size: 8pt;
+}
+QLabel#cstParameterEmpty {
+    color: #8b939b;
+    background: #ffffff;
+    border: 1px dashed #cfd6dc;
+    padding: 16px;
+}
+QTableWidget#cstParameterTable {
+    background: #ffffff;
+    border: none;
+    alternate-background-color: #f7f9fb;
+    selection-background-color: #cce4f7;
+    selection-color: #10528a;
+}
+QTableWidget#cstParameterTable::item {
+    padding: 2px 6px;
+    border-bottom: 1px solid #eef1f4;
+}
+QTableWidget#cstParameterTable QHeaderView::section {
+    background: #eef2f6;
+    border: none;
+    border-right: 1px solid #dde3e9;
+    border-bottom: 1px solid #cfd6dc;
+    padding: 4px 6px;
+    color: #40525f;
+    font-weight: 600;
+}
 QMenu {
     background: #ffffff;
     border: 1px solid #c4c4c4;
@@ -894,6 +1000,90 @@ private:
     double maximum_value_ = 0.0;
 };
 
+// Карточка недавнего проекта на стартовой странице: вращающийся предпросмотр
+// модели слева, имя и состав справа. Собственный класс нужен ради щелчка по
+// всей плитке и подсветки под курсором — у QCommandLinkButton внутрь виджет не
+// положишь, а предпросмотр обязан быть настоящим виджетом.
+// Сигнала у карточки нет намеренно: класс объявлен в .cpp, куда moc не
+// заглядывает, поэтому щелчок отдаётся обычным колбэком.
+class RecentProjectCard : public QFrame
+{
+public:
+    explicit RecentProjectCard(QWidget *parent = nullptr)
+        : QFrame(parent)
+    {
+        setObjectName(QStringLiteral("cstRecentCard"));
+        setAttribute(Qt::WA_StyledBackground, true);
+        setCursor(Qt::PointingHandCursor);
+        setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+
+        QHBoxLayout *layout = new QHBoxLayout(this);
+        layout->setContentsMargins(10, 8, 12, 8);
+        layout->setSpacing(12);
+
+        preview = new ProjectPreviewWidget(this);
+        preview->setFixedSize(118, 78);
+        layout->addWidget(preview, 0, Qt::AlignVCenter);
+
+        QVBoxLayout *text_layout = new QVBoxLayout();
+        text_layout->setContentsMargins(0, 0, 0, 0);
+        text_layout->setSpacing(2);
+
+        QHBoxLayout *title_row = new QHBoxLayout();
+        title_row->setContentsMargins(0, 0, 0, 0);
+        title_row->setSpacing(8);
+        title = new QLabel(this);
+        title->setObjectName(QStringLiteral("cstRecentTitle"));
+        badge = new QLabel(this);
+        badge->setObjectName(QStringLiteral("cstRecentBadge"));
+        title_row->addWidget(title, 0);
+        title_row->addWidget(badge, 0);
+        title_row->addStretch(1);
+        text_layout->addLayout(title_row);
+
+        summary = new QLabel(this);
+        summary->setObjectName(QStringLiteral("cstRecentSummary"));
+        location = new QLabel(this);
+        location->setObjectName(QStringLiteral("cstRecentPath"));
+        text_layout->addWidget(summary);
+        text_layout->addWidget(location);
+        text_layout->addStretch(1);
+        layout->addLayout(text_layout, 1);
+    }
+
+    ProjectPreviewWidget *preview = nullptr;
+    QLabel *title = nullptr;
+    QLabel *summary = nullptr;
+    QLabel *location = nullptr;
+    QLabel *badge = nullptr;
+    std::function<void()> on_activated;
+
+protected:
+    void mouseReleaseEvent(QMouseEvent *event) override
+    {
+        if (event->button() == Qt::LeftButton && rect().contains(event->pos()) && on_activated) {
+            on_activated();
+        }
+        QFrame::mouseReleaseEvent(event);
+    }
+
+    void enterEvent(QEnterEvent *event) override
+    {
+        setProperty("hovered", true);
+        style()->unpolish(this);
+        style()->polish(this);
+        QFrame::enterEvent(event);
+    }
+
+    void leaveEvent(QEvent *event) override
+    {
+        setProperty("hovered", false);
+        style()->unpolish(this);
+        style()->polish(this);
+        QFrame::leaveEvent(event);
+    }
+};
+
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
 {
@@ -918,6 +1108,7 @@ MainWindow::MainWindow(QWidget *parent)
     result_text_edit_->setMaximumBlockCount(1000);
 
     QWidget *parameter_panel = createParameterPanel();
+    createFieldDisplayWindow();
     QWidget *projection_panel = createProjectionPanel();
     QWidget *result_panel = createResultPanel();
     createRibbon();
@@ -1155,6 +1346,8 @@ void MainWindow::runCalculation()
         return;
     }
 
+    autoSaveModelBeforeRun();
+
     const int request_id = next_request_id_++;
     latest_request_id_ = request_id;
     worker_->setLatestRequestId(request_id);
@@ -1208,6 +1401,49 @@ void MainWindow::handleCalculationResult(int request_id, const WaveguideCalculat
     }
 
     showResult(result);
+    persistCalculationResult();
+}
+
+// Модель уходит на диск до начала счёта: файл проекта должен описывать ровно ту
+// геометрию, для которой сейчас считается поле, иначе записанный следом кэш к
+// нему не подойдёт.
+void MainWindow::autoSaveModelBeforeRun()
+{
+    if (active_project_ < 0 || current_model_path_.isEmpty() || !document_dirty_) {
+        return;
+    }
+    QString error;
+    if (!model_io::ensureProjectLayout(current_model_path_, &error) ||
+        !model_io::saveModel(current_model_path_, parameters_, &parameter_store_, &error)) {
+        // Не мешаем расчёту: он пойдёт, просто результат останется только в
+        // памяти, и об этом честно говорит строка состояния.
+        setStatus(QStringLiteral("Не удалось сохранить модель перед расчётом: %1").arg(error), true);
+        return;
+    }
+    setDocumentDirty(false);
+}
+
+void MainWindow::persistCalculationResult()
+{
+    if (active_project_ < 0 || current_model_path_.isEmpty() || !last_result_.valid) {
+        return;
+    }
+
+    // Снимок проекта держит результат в памяти даже при переключении вкладок.
+    projects_[active_project_].result = last_result_;
+    projects_[active_project_].model_changed_since_run = false;
+
+    QString error;
+    const QString results_path = model_io::projectResultsPathFor(current_model_path_);
+    if (!model_io::ensureProjectLayout(current_model_path_, &error) ||
+        !model_io::saveResults(results_path, parameters_, last_result_, &error)) {
+        setStatus(QStringLiteral("Расчёт готов, но кэш не сохранён: %1").arg(error), true);
+        return;
+    }
+    setStatus(QStringLiteral("%1  Результат сохранён в Result\\%2 — проект можно переносить "
+                             "на другой ПК.")
+                  .arg(status_label_->text(), QFileInfo(results_path).fileName()),
+              false);
 }
 
 void MainWindow::showResult(const WaveguideCalculationResult &result)
@@ -1227,6 +1463,9 @@ void MainWindow::showResult(const WaveguideCalculationResult &result)
     volume_cache_plane_ = -1;
     volume_cache_.clear();
     result_text_edit_->setPlainText(buildResultText(result));
+    // Ветка «2D/3D Results» показывает готовые поля, поэтому дерево обновляется
+    // и при удачном расчёте, и при неудачном (тогда пункты снова пустые).
+    rebuildObjectTree();
 
     if (!result.valid) {
         updateModelPreview();
@@ -1600,12 +1839,36 @@ QWidget *MainWindow::createParameterPanel()
     navigation_panel_->setContent(tree_content);
     panel_layout->addWidget(navigation_panel_, 1);
 
-    // Кнопки построения и настройки расчёта переехали на ленту; под деревом
-    // остаётся управление отображением полей — отдельная панель CST.
-    CstPanel *display_panel = new CstPanel(QStringLiteral("Отображение полей"), panel);
-    QWidget *view_group = new QWidget(display_panel);
+    connect(filter_line_edit, &QLineEdit::textChanged, this, &MainWindow::filterObjectTree);
+    connect(slot_enabled_check_box_,
+            &QCheckBox::toggled,
+            this,
+            [this](bool checked) {
+                parameters_.slot_enabled = checked;
+                rebuildObjectTree();
+                markModelChanged();
+            });
+    connect(object_tree_widget_,
+            &QTreeWidget::itemDoubleClicked,
+            this,
+            &MainWindow::handleObjectDoubleClick);
+    connect(object_tree_widget_,
+            &QTreeWidget::itemSelectionChanged,
+            this,
+            &MainWindow::handleObjectSelectionChanged);
+
+    rebuildObjectTree();
+    return panel;
+}
+
+// Управление отображением полей живёт в плавающем окне поверх рабочей области:
+// дерево объектов получает всю высоту левой панели, а окно полей не закрывается
+// при щелчке по модели и его видно рядом с ней.
+QWidget *MainWindow::createFieldDisplayWidget()
+{
+    QWidget *view_group = new QWidget();
     QFormLayout *view_layout = new QFormLayout(view_group);
-    view_layout->setContentsMargins(6, 6, 6, 6);
+    view_layout->setContentsMargins(8, 8, 8, 8);
     field_mode_combo_box_ = new QComboBox(view_group);
     field_mode_combo_box_->addItem(QStringLiteral("E + H"));
     field_mode_combo_box_->addItem(QStringLiteral("E + H + J"));
@@ -1684,26 +1947,7 @@ QWidget *MainWindow::createParameterPanel()
     // Пока заливка выключена, выбор плоскости и положения ни на что не влияет.
     slice_plane_combo_box_->setEnabled(false);
     slice_position_slider_->setEnabled(false);
-    display_panel->setContent(view_group);
-    panel_layout->addWidget(display_panel);
 
-    connect(filter_line_edit, &QLineEdit::textChanged, this, &MainWindow::filterObjectTree);
-    connect(slot_enabled_check_box_,
-            &QCheckBox::toggled,
-            this,
-            [this](bool checked) {
-                parameters_.slot_enabled = checked;
-                rebuildObjectTree();
-                markModelChanged();
-            });
-    connect(object_tree_widget_,
-            &QTreeWidget::itemDoubleClicked,
-            this,
-            &MainWindow::handleObjectDoubleClick);
-    connect(object_tree_widget_,
-            &QTreeWidget::itemSelectionChanged,
-            this,
-            &MainWindow::handleObjectSelectionChanged);
     connect(field_mode_combo_box_,
             qOverload<int>(&QComboBox::currentIndexChanged),
             this,
@@ -1753,8 +1997,43 @@ QWidget *MainWindow::createParameterPanel()
     });
     connect(reset_view_button, &QPushButton::clicked, open_gl_widget_, &WaveguideOpenGLWidget::resetView);
 
-    rebuildObjectTree();
-    return panel;
+    return view_group;
+}
+
+// Плавающее окно полей: Qt::Tool держит его поверх главного окна и не отбирает
+// у него ввод — щелчок по модели окно не закрывает.
+void MainWindow::createFieldDisplayWindow()
+{
+    field_window_ = new QWidget(this, Qt::Tool);
+    field_window_->setWindowTitle(QStringLiteral("Отображение полей"));
+    field_window_->setObjectName(QStringLiteral("cstFieldWindow"));
+
+    QVBoxLayout *layout = new QVBoxLayout(field_window_);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->addWidget(createFieldDisplayWidget());
+    field_window_->resize(300, field_window_->sizeHint().height());
+}
+
+void MainWindow::toggleFieldDisplayWindow(bool visible)
+{
+    if (field_window_ == nullptr) {
+        return;
+    }
+    if (!visible) {
+        field_window_->hide();
+        return;
+    }
+    // Первый показ — у правого верхнего угла трёхмерного вида, дальше окно
+    // остаётся там, куда его передвинули.
+    if (!field_window_placed_) {
+        const QPoint anchor = open_gl_widget_ != nullptr
+                                  ? open_gl_widget_->mapToGlobal(QPoint(open_gl_widget_->width(), 0))
+                                  : frameGeometry().topRight();
+        field_window_->move(anchor.x() - field_window_->width() - 16, anchor.y() + 12);
+        field_window_placed_ = true;
+    }
+    field_window_->show();
+    field_window_->raise();
 }
 
 // H-plane profile templates. A step machined into the side wall is
@@ -1981,6 +2260,8 @@ void MainWindow::rebuildObjectTree()
     excitation_item->setIcon(0, ribbonIcon(RibbonIcon::Signal));
     excitation_item->setData(0, object_type_role, QStringLiteral("excitation"));
 
+    appendResultBranches();
+
     object_tree_widget_->expandAll();
     for (WaveguideOpenGLWidget *view :
          {open_gl_widget_, top_projection_widget_, side_projection_widget_}) {
@@ -1992,6 +2273,71 @@ void MainWindow::rebuildObjectTree()
     }
 }
 
+// Разделы «2D/3D Results» и «1D Results» — то же место в дереве, что и в CST:
+// после расчёта здесь лежат готовые поля, и щелчок по пункту переключает
+// трёхмерный вид на нужную величину, не открывая окна настроек.
+void MainWindow::appendResultBranches()
+{
+    QTreeWidgetItem *results_item = new QTreeWidgetItem(object_tree_widget_);
+    results_item->setText(0, QStringLiteral("2D/3D Results"));
+    results_item->setIcon(0, ribbonIcon(RibbonIcon::Fields));
+
+    if (!last_result_.valid) {
+        // Ветка видна всегда: так понятно, где появятся поля, когда расчёт
+        // пройдёт. Пустой пункт не выбирается и не путается с готовым полем.
+        QTreeWidgetItem *empty = new QTreeWidgetItem(results_item);
+        empty->setText(0, QStringLiteral("расчёт не выполнен"));
+        empty->setForeground(0, QColor(135, 135, 135));
+        empty->setFlags(empty->flags() & ~Qt::ItemIsSelectable);
+        return;
+    }
+
+    // Каждому пункту соответствует режим показа полей: индекс совпадает с
+    // позицией в списке «Поля» окна отображения.
+    struct ResultEntry
+    {
+        const char *title;
+        int field_mode_index;
+        RibbonIcon icon;
+    };
+    static const ResultEntry entries[] = {
+        {"E-Field (электрическое поле)", 2, RibbonIcon::Fields},
+        {"H-Field (магнитное поле)", 3, RibbonIcon::Fields},
+        {"Surface Current (токи в стенках)", 4, RibbonIcon::Excitation},
+        {"Power Flow (поток мощности)", 5, RibbonIcon::Report},
+        {"E + H (оба поля)", 0, RibbonIcon::Fields},
+    };
+    for (const ResultEntry &entry : entries) {
+        QTreeWidgetItem *item = new QTreeWidgetItem(results_item);
+        item->setText(0, QString::fromUtf8(entry.title));
+        item->setIcon(0, ribbonIcon(entry.icon));
+        item->setData(0, object_type_role, QStringLiteral("result_field"));
+        item->setData(0, object_index_role, entry.field_mode_index);
+        item->setToolTip(0, QStringLiteral("Показать эту величину в трёхмерном виде"));
+    }
+
+    QTreeWidgetItem *one_d_item = new QTreeWidgetItem(object_tree_widget_);
+    one_d_item->setText(0, QStringLiteral("1D Results"));
+    one_d_item->setIcon(0, ribbonIcon(RibbonIcon::Report));
+
+    QTreeWidgetItem *s_item = new QTreeWidgetItem(one_d_item);
+    s_item->setText(0,
+                    QStringLiteral("S-Parameters   |S11| = %1   |S21| = %2")
+                        .arg(number(last_result_.s11_magnitude, 3),
+                             number(last_result_.s21_magnitude, 3)));
+    s_item->setIcon(0, ribbonIcon(RibbonIcon::Report));
+    s_item->setData(0, object_type_role, QStringLiteral("result_report"));
+    s_item->setToolTip(0, QStringLiteral("Перейти к текстовому отчёту расчёта"));
+
+    QTreeWidgetItem *mode_item = new QTreeWidgetItem(one_d_item);
+    mode_item->setText(0,
+                       last_result_.has_propagating_mode
+                           ? QStringLiteral("Рабочая мода: %1").arg(last_result_.selected_mode.name)
+                           : QStringLiteral("Распространяющейся моды нет"));
+    mode_item->setIcon(0, ribbonIcon(RibbonIcon::Signal));
+    mode_item->setData(0, object_type_role, QStringLiteral("result_report"));
+}
+
 void MainWindow::handleObjectSelectionChanged()
 {
     selected_plate_index_ = -1;
@@ -2001,7 +2347,20 @@ void MainWindow::handleObjectSelectionChanged()
     if (!selected_items.isEmpty()) {
         const QString object_type =
             selected_items.constFirst()->data(0, object_type_role).toString();
-        if (object_type == QStringLiteral("pec_plate")) {
+        if (object_type == QStringLiteral("result_field")) {
+            // Выбор поля в дереве переключает вид и синхронизирует список
+            // «Поля» в плавающем окне, чтобы оба показывали одно и то же.
+            const int mode_index = selected_items.constFirst()->data(0, object_index_role).toInt();
+            if (field_mode_combo_box_ != nullptr) {
+                field_mode_combo_box_->setCurrentIndex(mode_index);
+            } else {
+                changeFieldDisplayMode(mode_index);
+            }
+        } else if (object_type == QStringLiteral("result_report")) {
+            if (result_text_edit_ != nullptr) {
+                result_text_edit_->setFocus();
+            }
+        } else if (object_type == QStringLiteral("pec_plate")) {
             selected_plate_index_ = selected_items.constFirst()->data(0, object_index_role).toInt();
         } else if (object_type == QStringLiteral("shape")) {
             selected_shape_index_ = selected_items.constFirst()->data(0, object_index_role).toInt();
@@ -3687,14 +4046,13 @@ void MainWindow::createRibbon()
         insertProfileTemplate(false);
     });
 
-    QAction *fields_action =
-        make_action(QStringLiteral("Отображение\nполей"),
-                    QStringLiteral("Панель управления отображением полей слева"));
-    connect(fields_action, &QAction::triggered, this, [this]() {
-        if (field_mode_combo_box_ != nullptr) {
-            field_mode_combo_box_->setFocus();
-        }
-    });
+    QAction *fields_action = make_action(
+        QStringLiteral("Отображение\nполей"),
+        QStringLiteral("Плавающее окно управления полями поверх модели. Оно не закрывается "
+                       "при щелчке по сцене — крутите модель с открытыми настройками."));
+    fields_action->setCheckable(true);
+    fields_action_ = fields_action;
+    connect(fields_action, &QAction::toggled, this, &MainWindow::toggleFieldDisplayWindow);
 
     QAction *reset_view_action = make_action(QStringLiteral("Сбросить\nвид"),
                                              QStringLiteral("Вернуть камеру в исходное положение"));
@@ -4370,6 +4728,13 @@ void MainWindow::updateProjectActionsEnabled()
             action->setEnabled(on_workspace);
         }
     }
+    // Окно полей относится к открытой модели: на стартовой странице ему нечего
+    // показывать, но отметку кнопки не снимаем — вернувшись в проект, окно
+    // всплывает там же, где его оставили.
+    if (field_window_ != nullptr) {
+        const bool wanted = fields_action_ != nullptr && fields_action_->isChecked();
+        field_window_->setVisible(on_workspace && wanted);
+    }
     // Кнопку запуска решателя ведёт отдельная логика (идёт ли расчёт).
     if (on_workspace) {
         updateSimulationActionState();
@@ -4498,6 +4863,20 @@ void MainWindow::showStartPage()
     updateProjectActionsEnabled();
     setStatus(QStringLiteral("Стартовая страница. Создайте новый проект или откройте существующий."),
               false);
+}
+
+void MainWindow::openProjectOnStartup(const QString &file_path)
+{
+    if (file_path.isEmpty()) {
+        return;
+    }
+    if (!QFileInfo::exists(file_path)) {
+        setStatus(QStringLiteral("Файл проекта не найден: %1")
+                      .arg(QDir::toNativeSeparators(file_path)),
+                  true);
+        return;
+    }
+    openProjectPath(file_path);
 }
 
 void MainWindow::openProject()
@@ -5063,21 +5442,35 @@ void MainWindow::refreshStartPageRecents()
         if (!info.exists()) {
             continue;   // проект переместили или удалили
         }
-        QCommandLinkButton *row = new QCommandLinkButton(
-            info.completeBaseName(),
+
+        // Карточка проекта: слева вращающийся предпросмотр модели, справа имя,
+        // краткий состав, путь и дата. Модель читается прямо из файла — это
+        // небольшой JSON, чтение десятка таких карточек незаметно.
+        RecentProjectCard *card = new RecentProjectCard();
+        WaveguideParameters preview_model;
+        QString load_error;
+        if (model_io::loadModel(info.absoluteFilePath(), &preview_model, nullptr, &load_error)) {
+            card->preview->setModel(preview_model);
+            card->summary->setText(projectSummary(preview_model));
+        } else {
+            card->summary->setText(QStringLiteral("файл модели не читается"));
+        }
+        card->title->setText(info.completeBaseName());
+        card->location->setText(
             QStringLiteral("%1   ·   изменён %2")
                 .arg(QDir::toNativeSeparators(info.absolutePath()),
                      info.lastModified().toString(QStringLiteral("dd.MM.yyyy HH:mm"))));
-        row->setObjectName(QStringLiteral("cstRecentItem"));
-        row->setIcon(ribbonIcon(RibbonIcon::Project, 22));
-        row->setIconSize(QSize(22, 22));
-        row->setCursor(Qt::PointingHandCursor);
-        row->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+        // Готовый расчёт в Result — сразу видно, что проект откроется без счёта.
+        const bool has_results = QFileInfo::exists(
+            model_io::projectResultsPathFor(info.absoluteFilePath()));
+        card->badge->setText(has_results ? QStringLiteral("расчёт готов")
+                                         : QStringLiteral("без расчёта"));
+        card->badge->setProperty("ready", has_results);
+        card->setToolTip(QDir::toNativeSeparators(info.absoluteFilePath()));
+
         const QString path_copy = info.absoluteFilePath();
-        connect(row, &QCommandLinkButton::clicked, this, [this, path_copy]() {
-            openProjectPath(path_copy);
-        });
-        start_recent_layout_->addWidget(row);
+        card->on_activated = [this, path_copy]() { openProjectPath(path_copy); };
+        start_recent_layout_->addWidget(card);
         ++shown;
     }
     if (start_recent_empty_ != nullptr) {

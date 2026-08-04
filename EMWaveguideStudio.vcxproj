@@ -117,6 +117,7 @@
     <ClCompile Include="expression_spin_box.cpp" />
     <ClCompile Include="model_parameters.cpp" />
     <ClCompile Include="parameter_list_widget.cpp" />
+    <ClCompile Include="project_preview_widget.cpp" />
     <ClCompile Include="em\circular_mode_field.cpp" />
     <ClCompile Include="em\cylindrical_bessel.cpp" />
     <ClCompile Include="em\em_solver_dispatcher.cpp" />
@@ -142,6 +143,7 @@
     <QtMoc Include="expression_spin_box.h" />
     <QtMoc Include="main_window.h" />
     <QtMoc Include="parameter_list_widget.h" />
+    <QtMoc Include="project_preview_widget.h" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="em\derived_fields.h" />
