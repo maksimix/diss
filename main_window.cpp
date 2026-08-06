@@ -17,8 +17,10 @@
 #include <QtCore/QSettings>
 #include <QtCore/QSignalBlocker>
 #include <QtCore/QStandardPaths>
+#include <QtCore/QUrl>
 #include <QtGui/QAction>
 #include <QtGui/QCloseEvent>
+#include <QtGui/QDesktopServices>
 #include <QtGui/QCloseEvent>
 #include <QtGui/QPainter>
 #include <QtWidgets/QAbstractItemView>
@@ -44,6 +46,7 @@
 #include <QtWidgets/QProgressBar>
 #include <QtWidgets/QPushButton>
 #include <QtWidgets/QScrollArea>
+#include <QtWidgets/QScrollBar>
 #include <QtWidgets/QSlider>
 #include <QtWidgets/QStackedWidget>
 #include <QtWidgets/QStatusBar>
@@ -259,9 +262,22 @@ QVector<QPointF> wallMountedTProfile(double wall_reach_mm,
     profile.push_back(QPointF(stem_end, stem_half));
     profile.push_back(QPointF(wall_x(stem_half), stem_half));
     if (circular) {
-        // Дуга вдоль стенки, сверху вниз: столько отрезков, чтобы стрелка
-        // прогиба осталась заметно меньше толщины ножки.
-        constexpr int arc_segments = 10;
+        // Дуга вдоль стенки, сверху вниз. Число отрезков берётся по стрелке
+        // прогиба, а не фиксированным: каждая вершина профиля становится узлом
+        // сетки, и лишние точки заставляют сеточник разрешать доли миллиметра
+        // в объёме размером в десятки. Прежние 10 отрезков давали на штыре
+        // шириной 2.2 мм хорды по 0.22 мм при стрелке 0.0006 мм — точность,
+        // которой геометрия тела (толщина 1 мм) всё равно не несёт, а расчёт
+        // из-за неё считался в разы дольше.
+        //
+        // Стрелка при n отрезках: s ≈ (h/n)^2 / (2R), отсюда
+        // n ≈ h / sqrt(2 R s_max). Допуск — 2% ширины ножки, но не грубее
+        // сотой доли миллиметра.
+        const double sagitta_tolerance_mm = std::max(0.01, 0.02 * 2.0 * stem_half);
+        const int arc_segments = std::clamp(
+            static_cast<int>(std::ceil(stem_half / std::sqrt(2.0 * outer * sagitta_tolerance_mm))),
+            1,
+            6);
         for (int segment = 1; segment < arc_segments; ++segment) {
             const double y = stem_half - 2.0 * stem_half * segment / arc_segments;
             profile.push_back(QPointF(wall_x(y), y));
@@ -513,6 +529,18 @@ QString projectSummary(const WaveguideParameters &parameters)
         text += QStringLiteral("   ·   ") + inside.join(QStringLiteral(", "));
     }
     return text;
+}
+
+// Название уровня качества сетки. Раньше этот список лежал в трёх местах —
+// в отчёте, в диагностике ошибки и в журнале хода расчёта.
+QString accuracyLevelName(int level)
+{
+    static const char *const names[] = {
+        "быстро (грубая сетка)",
+        "обычное",
+        "высокое (мелкая сетка)",
+    };
+    return QString::fromUtf8(names[std::clamp(level, 0, 2)]);
 }
 
 QString formattedDuration(qint64 milliseconds)
@@ -874,6 +902,23 @@ QHeaderView::section {
     background: #f0f0f0;
     border: 1px solid #c4c4c4;
     padding: 2px 6px;
+}
+
+/* -------------------------------------------------- ход расчёта -------- */
+QLabel#cstSolverStage {
+    color: #10528a;
+    font-weight: 600;
+}
+QLabel#cstSolverTiming {
+    color: #6b7680;
+    font-size: 8pt;
+}
+QPlainTextEdit#cstSolverLog {
+    background: #fbfcfd;
+    border: 1px solid #dde3e9;
+    color: #40525f;
+    font-family: "Consolas", "Courier New", monospace;
+    font-size: 8pt;
 }
 
 /* ------------------------------------------------- список параметров ---- */
@@ -1319,6 +1364,10 @@ void MainWindow::stopCalculation()
         return;
     }
     cancelRunningCalculation();
+    appendSolverStage(QStringLiteral("Остановлено пользователем"));
+    if (solver_stage_label_ != nullptr) {
+        solver_stage_label_->setText(QStringLiteral("Расчёт остановлен"));
+    }
     // Отмена кооперативная: флаг проверяется между шагами решателя, поэтому
     // сетка gmsh или разложение матрицы могут дорабатывать в фоне. Их результат
     // будет отброшен по номеру запроса; новый расчёт можно запускать сразу — он
@@ -1367,6 +1416,30 @@ void MainWindow::runCalculation()
     calculation_progress_bar_->setValue(0);
     calculation_progress_bar_->setVisible(true);
     calculation_time_label_->setVisible(true);
+
+    // Новый прогон — новый журнал: этапы прошлого расчёта к нему отношения не
+    // имеют, а заголовок называет метод и качество, с которыми он запущен.
+    // Отчёт внизу остаётся от прошлого прогона до прихода нового результата, и
+    // рядом с идущим расчётом он читался как его собственный вывод. Пометка
+    // сверху говорит, к чему относится текст.
+    if (result_text_edit_ != nullptr && !result_text_edit_->toPlainText().isEmpty()) {
+        const QString previous = result_text_edit_->toPlainText();
+        const QString marker =
+            QStringLiteral("── Ниже отчёт предыдущего расчёта. Идёт новый — следите за ним "
+                           "в панели «Ход расчёта» справа. ──\n\n");
+        result_text_edit_->setPlainText(previous.startsWith(QStringLiteral("──"))
+                                            ? previous
+                                            : marker + previous);
+    }
+
+    solver_stage_log_->clear();
+    solver_progress_bar_->setValue(0);
+    solver_stage_label_->setText(calculation_stage_);
+    appendSolverStage(QStringLiteral("Запуск: %1, качество «%2»")
+                          .arg(solverMethodName(parameters_.solver_method),
+                               accuracyLevelName(parameters_.accuracy_level)));
+    appendSolverStage(calculation_stage_);
+
     progress_timer_.start();
     updateCalculationProgress();
     updateSimulationActionState();
@@ -1394,6 +1467,26 @@ void MainWindow::handleCalculationResult(int request_id, const WaveguideCalculat
     calculation_progress_bar_->setValue(100);
     calculation_time_label_->setText(
         QStringLiteral("Завершено за %1").arg(formattedDuration(elapsed_ms)));
+
+    // Итог прогона в журнале: сколько заняло, чем считалось и на какой сетке.
+    solver_progress_bar_->setValue(100);
+    appendSolverStage(result.valid
+                          ? QStringLiteral("Готово за %1").arg(formattedDuration(elapsed_ms))
+                          : QStringLiteral("Расчёт не удался: %1").arg(result.error_message));
+    if (result.valid && result.fem_unknown_count > 0) {
+        appendSolverStage(QStringLiteral("Сетка: %1 тетраэдров, %2 неизвестных")
+                              .arg(result.mesh_tetrahedron_count)
+                              .arg(result.fem_unknown_count));
+    }
+    for (const QString &warning : result.solver_warnings) {
+        appendSolverStage(QStringLiteral("Предупреждение: %1").arg(warning));
+    }
+    solver_stage_label_->setText(result.valid
+                                     ? QStringLiteral("Расчёт завершён за %1")
+                                           .arg(formattedDuration(elapsed_ms))
+                                     : QStringLiteral("Расчёт не удался"));
+    solver_timing_label_->setText(
+        result.valid ? QStringLiteral("Решатель: %1").arg(result.solver_backend) : QString());
     if (active_calculation_is_fem_ && elapsed_ms > 0) {
         measured_fem_duration_ms_ = measured_fem_duration_ms_ > 0
                                         ? (2 * measured_fem_duration_ms_ + elapsed_ms) / 3
@@ -1514,21 +1607,26 @@ void MainWindow::updateCalculationProgress()
                                                          estimated_duration_ms_))
                              : 0;
     calculation_progress_bar_->setValue(progress);
-    QString text =
+    solver_progress_bar_->setValue(progress);
+
+    // Строка состояния держит только сводку: подробности этапа целиком видны в
+    // панели «Ход расчёта» справа и там не обрезаются.
+    calculation_time_label_->setText(
         elapsed_ms < estimated_duration_ms_
-            ? QStringLiteral("Прошло: %1   |   Примерно осталось: %2   |   %3%")
-                  .arg(formattedDuration(elapsed_ms))
-                  .arg(formattedDuration(estimated_duration_ms_ - elapsed_ms))
+            ? QStringLiteral("Прошло: %1   |   осталось ~%2")
+                  .arg(formattedDuration(elapsed_ms),
+                       formattedDuration(estimated_duration_ms_ - elapsed_ms))
+            : QStringLiteral("Прошло: %1   |   оценка превышена")
+                  .arg(formattedDuration(elapsed_ms)));
+
+    solver_timing_label_->setText(
+        elapsed_ms < estimated_duration_ms_
+            ? QStringLiteral("Прошло %1   ·   осталось примерно %2   ·   %3%")
+                  .arg(formattedDuration(elapsed_ms),
+                       formattedDuration(estimated_duration_ms_ - elapsed_ms))
                   .arg(progress)
-            : QStringLiteral(
-                  "Прошло: %1   |   Завершение расчета, первоначальная оценка превышена   |   95%+")
-                  .arg(formattedDuration(elapsed_ms));
-    if (!calculation_stage_.isEmpty()) {
-        // В строке состояния место только на одну строку, поэтому этап идёт
-        // тем же разделителем, что и остальные поля.
-        text += QStringLiteral("   |   Этап: %1").arg(calculation_stage_);
-    }
-    calculation_time_label_->setText(text);
+            : QStringLiteral("Прошло %1   ·   первоначальная оценка превышена   ·   95%+")
+                  .arg(formattedDuration(elapsed_ms)));
 }
 
 void MainWindow::handleCalculationProgress(int request_id, const QString &stage)
@@ -1538,6 +1636,10 @@ void MainWindow::handleCalculationProgress(int request_id, const QString &stage)
     }
 
     calculation_stage_ = stage;
+    if (solver_stage_label_ != nullptr) {
+        solver_stage_label_->setText(stage);
+    }
+    appendSolverStage(stage);
     updateCalculationProgress();
 }
 
@@ -2096,12 +2198,73 @@ QWidget *MainWindow::createProjectionPanel()
 
     projection_splitter->addWidget(top_group);
     projection_splitter->addWidget(side_group);
+    projection_splitter->addWidget(createSolverProgressPanel());
     projection_splitter->setStretchFactor(0, 1);
     projection_splitter->setStretchFactor(1, 1);
-    projection_splitter->setSizes({260, 260});
+    projection_splitter->setStretchFactor(2, 0);
+    projection_splitter->setSizes({240, 240, 220});
 
     layout->addWidget(projection_splitter);
     return panel;
+}
+
+// Ход расчёта — отдельная панель под проекциями, как вкладка Progress в CST.
+// В строке состояния помещается одна строка, и длинные этапы решателя
+// («Sparse LU: factorizing 60576 unknowns…») там обрезались на полуслове.
+QWidget *MainWindow::createSolverProgressPanel()
+{
+    CstPanel *progress_panel = new CstPanel(QStringLiteral("Ход расчёта"));
+
+    QWidget *content = new QWidget(progress_panel);
+    QVBoxLayout *layout = new QVBoxLayout(content);
+    layout->setContentsMargins(8, 6, 8, 8);
+    layout->setSpacing(5);
+
+    solver_stage_label_ = new QLabel(QStringLiteral("Решатель не запускался"), content);
+    solver_stage_label_->setObjectName(QStringLiteral("cstSolverStage"));
+    solver_stage_label_->setWordWrap(true);
+    layout->addWidget(solver_stage_label_);
+
+    solver_progress_bar_ = new QProgressBar(content);
+    solver_progress_bar_->setRange(0, 100);
+    solver_progress_bar_->setValue(0);
+    solver_progress_bar_->setTextVisible(true);
+    solver_progress_bar_->setFixedHeight(16);
+    layout->addWidget(solver_progress_bar_);
+
+    solver_timing_label_ = new QLabel(content);
+    solver_timing_label_->setObjectName(QStringLiteral("cstSolverTiming"));
+    layout->addWidget(solver_timing_label_);
+
+    // Журнал этапов: каждый приходит от решателя с отметкой времени, поэтому
+    // видно, где именно расчёт стоит дольше всего.
+    solver_stage_log_ = new QPlainTextEdit(content);
+    solver_stage_log_->setObjectName(QStringLiteral("cstSolverLog"));
+    solver_stage_log_->setReadOnly(true);
+    solver_stage_log_->setMaximumBlockCount(500);
+    solver_stage_log_->setLineWrapMode(QPlainTextEdit::NoWrap);
+    solver_stage_log_->setPlaceholderText(
+        QStringLiteral("Этапы решателя появятся здесь после запуска расчёта"));
+    layout->addWidget(solver_stage_log_, 1);
+
+    progress_panel->setContent(content);
+    return progress_panel;
+}
+
+// Одна строка журнала: время от начала расчёта и текст этапа.
+void MainWindow::appendSolverStage(const QString &stage)
+{
+    if (solver_stage_log_ == nullptr || stage.isEmpty()) {
+        return;
+    }
+    const qint64 elapsed_ms = calculation_elapsed_timer_.isValid()
+                                  ? calculation_elapsed_timer_.elapsed()
+                                  : 0;
+    solver_stage_log_->appendPlainText(
+        QStringLiteral("%1   %2").arg(formattedDuration(elapsed_ms), -8).arg(stage));
+    // Прокрутка к последней строке: интересен всегда текущий этап.
+    solver_stage_log_->verticalScrollBar()->setValue(
+        solver_stage_log_->verticalScrollBar()->maximum());
 }
 
 
@@ -3691,6 +3854,61 @@ void MainWindow::applyCstStyle()
     setStyleSheet(cstStyleSheet());
 }
 
+// Веб-страница с математикой расчёта. Ищется рядом с приложением, затем вверх
+// по дереву каталогов — так один и тот же путь работает и для собранной
+// поставки (docs рядом с exe), и для запуска из дерева исходников
+// (x64/Debug/exe → ../../docs).
+QString MainWindow::mathDocumentationPath() const
+{
+    static const char *const names[] = {
+        "Математика_расчёта.html",   // веб-страница: то, что открывается обычно
+        "Математика_расчёта.pdf",    // запасной вариант, если страницу не собрали
+    };
+
+    QDir directory(QCoreApplication::applicationDirPath());
+    for (int level = 0; level < 5; ++level) {
+        for (const char *const name : names) {
+            const QString candidate =
+                directory.filePath(QStringLiteral("docs/%1").arg(QString::fromUtf8(name)));
+            if (QFileInfo::exists(candidate)) {
+                return QFileInfo(candidate).absoluteFilePath();
+            }
+        }
+        if (!directory.cdUp()) {
+            break;
+        }
+    }
+    return QString();
+}
+
+void MainWindow::showMathDocumentation()
+{
+    const QString path = mathDocumentationPath();
+    if (path.isEmpty()) {
+        QMessageBox::information(
+            this,
+            QStringLiteral("Математика расчёта"),
+            QStringLiteral("Документ с формулами не найден.\n\nОн собирается из "
+                           "docs/Методы_и_формулы.md командой\n"
+                           "    python docs/make_math_page.py\n"
+                           "и должен лежать в папке docs рядом с программой."));
+        return;
+    }
+
+    if (!QDesktopServices::openUrl(QUrl::fromLocalFile(path))) {
+        // Браузер не открылся — показываем путь, чтобы файл можно было открыть
+        // вручную, а не оставляем пользователя ни с чем.
+        QMessageBox::warning(this,
+                             QStringLiteral("Математика расчёта"),
+                             QStringLiteral("Не удалось открыть документ в браузере.\nФайл: %1")
+                                 .arg(QDir::toNativeSeparators(path)));
+        return;
+    }
+    setStatus(QStringLiteral("Открыт документ с математикой расчёта: %1")
+                  .arg(QDir::toNativeSeparators(path)),
+              false);
+}
+
 // Официальная подпись ПО: название, версия, состав расчётного ядра и горячие
 // клавиши. Название и версия берутся из метаданных приложения (main.cpp).
 void MainWindow::showAboutDialog()
@@ -3746,9 +3964,16 @@ void MainWindow::showAboutDialog()
     QGroupBox *keys_group = new QGroupBox(QStringLiteral("Горячие клавиши"), &dialog);
     QVBoxLayout *keys_layout = new QVBoxLayout(keys_group);
     QLabel *keys = new QLabel(
-        QStringLiteral("Ctrl+N — новый проект        Ctrl+O — открыть проект\n"
-                       "Ctrl+S — сохранить          Ctrl+W — закрыть проект\n"
-                       "F5 — запустить расчёт       Alt+Q — поиск команд ленты\n\n"
+        QStringLiteral("Проект и расчёт\n"
+                       "  Ctrl+N — новый проект            Ctrl+O — открыть проект\n"
+                       "  Ctrl+S — сохранить               Ctrl+W — закрыть проект\n"
+                       "  F5 — запустить расчёт            F1 — математика расчёта\n"
+                       "  Alt+Q — поиск команд ленты\n\n"
+                       "Трёхмерная сцена (когда фокус в ней)\n"
+                       "  Пробел — вписать модель в окно   0 или Home — изометрия\n"
+                       "  X, Y, Z — взгляд вдоль оси       Shift+X/Y/Z — с обратной стороны\n"
+                       "  G — координатная сетка           B — светлый или тёмный фон\n"
+                       "  Колесо — приближение             Перетаскивание — поворот\n\n"
                        "Проект хранится папкой: файл модели .wgproj и подпапка Result с "
                        "кэшем расчёта. Папку можно целиком перенести на другой ПК."),
         keys_group);
@@ -3757,6 +3982,11 @@ void MainWindow::showAboutDialog()
     layout->addWidget(keys_group);
 
     QDialogButtonBox *buttons = new QDialogButtonBox(QDialogButtonBox::Ok, &dialog);
+    QPushButton *math_button =
+        buttons->addButton(QStringLiteral("Математика расчёта…"), QDialogButtonBox::HelpRole);
+    math_button->setIcon(ribbonIcon(RibbonIcon::MathHelp, 16));
+    math_button->setToolTip(QStringLiteral("Открыть в браузере страницу с формулами (F1)"));
+    connect(math_button, &QPushButton::clicked, this, &MainWindow::showMathDocumentation);
     connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
     layout->addWidget(buttons);
 
@@ -3795,7 +4025,9 @@ QString MainWindow::linearSolverMethodName(int method) const
 QString MainWindow::accuracyLevelHint(int level) const
 {
     static const char *const hints[] = {
-        "Порядок 1, одна ячейка на самую мелкую деталь.\n"
+        "Порядок 1, одна ячейка на самую мелкую деталь, измельчение не мельче\n"
+        "половины глобальной ячейки — сетка получается самой однородной, и\n"
+        "задача чаще решается итерационно, без многогигабайтного разложения.\n"
         "Замер: 20 тыс. неизвестных, 0.5 ГБ, около 25 с. Дефект унитарности 4e-3.",
         "Порядок 2 при вдвое более крупной сетке: та же цена, но баланс мощности\n"
         "сходится в двести раз точнее.\n"
@@ -3884,6 +4116,13 @@ void MainWindow::createRibbon()
                     QStringLiteral("Название и версия ПО, состав расчётного ядра, горячие клавиши"));
     connect(about_action, &QAction::triggered, this, &MainWindow::showAboutDialog);
     connect(ribbon_bar_, &RibbonBar::helpRequested, this, &MainWindow::showAboutDialog);
+
+    QAction *math_help_action = make_action(
+        QStringLiteral("Математика\nрасчёта"),
+        QStringLiteral("Открыть в браузере страницу с формулами: постановка задачи, метод "
+                       "Фурье, конечные элементы, извлечение S-параметров (F1)"));
+    math_help_action->setShortcut(QKeySequence::HelpContents);   // F1
+    connect(math_help_action, &QAction::triggered, this, &MainWindow::showMathDocumentation);
 
     start_simulation_action_ = make_action(
         QStringLiteral("Начать\nрасчёт"),
@@ -4054,9 +4293,38 @@ void MainWindow::createRibbon()
     fields_action_ = fields_action;
     connect(fields_action, &QAction::toggled, this, &MainWindow::toggleFieldDisplayWindow);
 
-    QAction *reset_view_action = make_action(QStringLiteral("Сбросить\nвид"),
-                                             QStringLiteral("Вернуть камеру в исходное положение"));
+    QAction *reset_view_action = make_action(
+        QStringLiteral("Сбросить\nвид"),
+        QStringLiteral("Вернуть камеру в исходное положение (пробел в окне сцены)"));
     connect(reset_view_action, &QAction::triggered, open_gl_widget_, &WaveguideOpenGLWidget::resetView);
+
+    grid_action_ = make_action(
+        QStringLiteral("Сетка"),
+        QStringLiteral("Координатная сетка под моделью с подписью шага (клавиша G в сцене)"));
+    grid_action_->setCheckable(true);
+    connect(grid_action_, &QAction::toggled, this, [this](bool visible) {
+        for (WaveguideOpenGLWidget *view :
+             {open_gl_widget_, top_projection_widget_, side_projection_widget_}) {
+            view->setGridVisible(visible);
+        }
+    });
+
+    light_background_action_ = make_action(
+        QStringLiteral("Светлый\nфон"),
+        QStringLiteral("Белый фон сцены вместо чёрного — для снимков в отчёт и печати "
+                       "(клавиша B в сцене)"));
+    light_background_action_->setCheckable(true);
+    connect(light_background_action_, &QAction::toggled, this, [this](bool light) {
+        const ViewBackground background = light ? ViewBackground::Light : ViewBackground::Dark;
+        for (WaveguideOpenGLWidget *view :
+             {open_gl_widget_, top_projection_widget_, side_projection_widget_}) {
+            view->setBackground(background);
+        }
+    });
+
+    // Клавиши в сцене меняют те же настройки, поэтому отметки кнопок нужно
+    // приводить к тому, что показано, иначе они разойдутся.
+    open_gl_widget_->setViewSettingsChangedCallback([this]() { syncViewSettingsActions(); });
 
     // Стрелка под кнопкой запуска, как у split-кнопок CST: то же меню, что и
     // «Настройка решателя», плюс переход к отчёту.
@@ -4081,7 +4349,8 @@ void MainWindow::createRibbon()
     RibbonGroup *file_start_group = file_tab->addGroup(QStringLiteral("Старт"));
     file_start_group->addLargeButton(start_page_action, RibbonIcon::Home);
 
-    RibbonGroup *info_group = file_tab->addGroup(QStringLiteral("Сведения"));
+    RibbonGroup *info_group = file_tab->addGroup(QStringLiteral("Справка"));
+    info_group->addLargeButton(math_help_action, RibbonIcon::MathHelp);
     info_group->addLargeButton(about_action, RibbonIcon::Help);
 
     RibbonGroup *exit_group = file_tab->addGroup(QStringLiteral("Выход"));
@@ -4230,6 +4499,9 @@ void MainWindow::createRibbon()
     RibbonGroup *simulation_edit_group = simulation_tab->addGroup(QStringLiteral("Возбуждение"));
     simulation_edit_group->addLargeButton(excitation_action, RibbonIcon::Excitation);
 
+    RibbonGroup *simulation_help_group = simulation_tab->addGroup(QStringLiteral("Справка"));
+    simulation_help_group->addLargeButton(math_help_action, RibbonIcon::MathHelp);
+
     // --------------------------------------------------- Post-Processing ---
     RibbonTab *post_tab = ribbon_bar_->addRibbonTab(QStringLiteral("Post-Processing"));
     RibbonGroup *field_group = post_tab->addGroup(QStringLiteral("Поля"));
@@ -4238,11 +4510,20 @@ void MainWindow::createRibbon()
     RibbonGroup *report_group = post_tab->addGroup(QStringLiteral("Отчёт"));
     report_group->addLargeButton(report_action, RibbonIcon::Report);
 
+    // Формулы нужны именно там, где смотрят числа: рядом с итогами расчёта и с
+    // настройкой решателя.
+    RibbonGroup *post_help_group = post_tab->addGroup(QStringLiteral("Справка"));
+    post_help_group->addLargeButton(math_help_action, RibbonIcon::MathHelp);
+
     // ------------------------------------------------------------- View ----
     RibbonTab *view_tab = ribbon_bar_->addRibbonTab(QStringLiteral("View"));
     RibbonGroup *view_group = view_tab->addGroup(QStringLiteral("Вид"));
     view_group->addLargeButton(reset_view_action, RibbonIcon::ResetView);
     view_group->addLargeButton(fields_action, RibbonIcon::Fields);
+
+    RibbonGroup *scene_group = view_tab->addGroup(QStringLiteral("Сцена"));
+    scene_group->addLargeButton(grid_action_, RibbonIcon::Grid);
+    scene_group->addLargeButton(light_background_action_, RibbonIcon::Background);
 
     // Тот же переключатель, что в свойствах волновода: он нужен прямо во время
     // осмотра модели, а не через диалог.
@@ -4314,6 +4595,9 @@ void MainWindow::createRibbon()
     });
 
     ribbon_bar_->setCurrentTabIndex(1);
+    // Отметки «Сетка» и «Светлый фон» должны совпадать с тем, с чем сцена
+    // стартует, иначе первое нажатие кнопки ничего не изменит.
+    syncViewSettingsActions();
 }
 
 void MainWindow::createParameterDock()
@@ -4765,6 +5049,32 @@ void MainWindow::harvestActiveProject()
     project.model_changed_since_run = model_changed_since_run_;
 }
 
+// Клавиши G и B в сцене меняют сетку и фон мимо кнопок ленты; здесь отметки
+// кнопок приводятся к тому, что показано на экране.
+void MainWindow::syncViewSettingsActions()
+{
+    if (open_gl_widget_ == nullptr) {
+        return;
+    }
+    if (grid_action_ != nullptr) {
+        const QSignalBlocker blocker(grid_action_);
+        grid_action_->setChecked(open_gl_widget_->isGridVisible());
+    }
+    if (light_background_action_ != nullptr) {
+        const QSignalBlocker blocker(light_background_action_);
+        light_background_action_->setChecked(open_gl_widget_->background() ==
+                                             ViewBackground::Light);
+    }
+    // Проекции держат те же настройки, что и главный вид: разный фон у трёх
+    // окон рядом смотрелся бы поломкой.
+    for (WaveguideOpenGLWidget *view : {top_projection_widget_, side_projection_widget_}) {
+        if (view != nullptr) {
+            view->setGridVisible(open_gl_widget_->isGridVisible());
+            view->setBackground(open_gl_widget_->background());
+        }
+    }
+}
+
 void MainWindow::clearFieldDisplay()
 {
     const WaveguideCalculationResult empty;
@@ -4877,6 +5187,14 @@ void MainWindow::openProjectOnStartup(const QString &file_path)
         return;
     }
     openProjectPath(file_path);
+}
+
+void MainWindow::startCalculationOnStartup()
+{
+    if (active_project_ < 0) {
+        return;   // проект не открылся, считать нечего
+    }
+    runCalculation();
 }
 
 void MainWindow::openProject()
@@ -5488,11 +5806,8 @@ QString MainWindow::buildResultText(const WaveguideCalculationResult &result) co
         if (!result.solver_backend.isEmpty()) {
             text += QStringLiteral("  Решатель: %1\n").arg(result.solver_backend);
         }
-        static const char *const accuracy_names[] = {
-            "быстро (грубая сетка)", "обычное", "высокое (мелкая сетка)"};
         text += QStringLiteral("  Качество: %1\n")
-                    .arg(QString::fromUtf8(
-                        accuracy_names[std::clamp(result.parameters.accuracy_level, 0, 2)]));
+                    .arg(accuracyLevelName(result.parameters.accuracy_level));
         text += QStringLiteral("  Частота: %1 ГГц\n")
                     .arg(number(result.parameters.frequency_ghz, 4));
         // У круглого тракта ширина и глубина — чужие поля: печатать 22.86 x
@@ -5645,16 +5960,8 @@ QString MainWindow::buildResultText(const WaveguideCalculationResult &result) co
 
     text += QStringLiteral("Решатель\n");
     text += QStringLiteral("  Backend: %1\n").arg(result.solver_backend);
-    {
-        static const char *const accuracy_names[] = {
-            "быстро (грубая сетка)",
-            "обычное",
-            "высокое (мелкая сетка)",
-        };
-        const int level = std::clamp(result.parameters.accuracy_level, 0, 2);
-        text += QStringLiteral("  Качество расчёта: %1\n")
-                    .arg(QString::fromUtf8(accuracy_names[level]));
-    }
+    text += QStringLiteral("  Качество расчёта: %1\n")
+                .arg(accuracyLevelName(result.parameters.accuracy_level));
     text += QStringLiteral("  Падающая мощность: %1 W\n")
                 .arg(number(result.incident_power_w, 8));
     text += QStringLiteral("  Отраженная мощность: %1 W\n")

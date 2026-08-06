@@ -36,6 +36,14 @@ enum class FieldFillMode
     Volume
 };
 
+// Фон сцены. Тёмный удобен для полей, светлый — для печати и снимков в отчёт,
+// как переключение фона в CST.
+enum class ViewBackground
+{
+    Dark,
+    Light
+};
+
 class WaveguideOpenGLWidget : public QOpenGLWidget, protected QOpenGLFunctions
 {
 public:
@@ -64,6 +72,15 @@ public:
     void setAnimationEnabled(bool enabled);
     void setSlotEditedCallback(std::function<void(const WaveguideParameters &)> callback);
     void resetView();
+
+    // Фон сцены и координатная сетка. Переключаются и кнопками ленты, и
+    // клавишами в самом виде, поэтому окно узнаёт о смене через колбэк — иначе
+    // отметка на кнопке разошлась бы с тем, что на экране.
+    void setBackground(ViewBackground background);
+    ViewBackground background() const { return background_; }
+    void setGridVisible(bool visible);
+    bool isGridVisible() const { return grid_visible_; }
+    void setViewSettingsChangedCallback(std::function<void()> callback);
 
 protected:
     void initializeGL() override;
@@ -167,6 +184,17 @@ private:
                                double arrow_spacing_mm,
                                float line_width) const;
     void drawAxes() const;
+    // Маленький триэдр ориентации в правом нижнем углу вида.
+    void drawOrientationGizmo() const;
+    // Цвет очистки экрана по выбранному фону; требует активного контекста.
+    void applyClearColor();
+    // Координатная сетка на «полу» сцены: даёт масштаб и ощущение глубины.
+    void drawGrid() const;
+    // Шаг сетки, выбранный по размеру модели из ряда 1-2-5 мм.
+    double gridStepMm() const;
+    // Цвет светлой линии, пригодный для текущего фона: на белом почти белые
+    // рёбра корпуса были бы не видны.
+    QColor themedLineColor(const QColor &color_for_dark) const;
     // Буква у конца оси, нарисованная отрезками и всегда развёрнутая к камере:
     // текстовый рендер сюда тянуть незачем, а три глифа рисуются шестью линиями.
     void drawAxisLabel(char letter,
@@ -201,6 +229,9 @@ private:
     std::function<void(const WaveguideParameters &)> slot_edited_callback_;
     FieldDisplayMode field_display_mode_ = FieldDisplayMode::Fields;
     WaveguideViewPreset view_preset_ = WaveguideViewPreset::Free3D;
+    ViewBackground background_ = ViewBackground::Dark;
+    bool grid_visible_ = true;
+    std::function<void()> view_settings_changed_callback_;
     FieldSlicePlane slice_plane_ = FieldSlicePlane::HorizontalXZ;
     FieldFillMode fill_mode_ = FieldFillMode::None;
     bool animation_enabled_ = false;

@@ -40,9 +40,25 @@ int main(int argc, char *argv[])
     // Путь к проекту первым аргументом: так открывается двойной щелчок по
     // .wgproj в проводнике. Показ окна идёт раньше, чтобы возможная ошибка
     // чтения легла в строку состояния уже видимого окна.
+    //
+    // Ключ --run вдобавок сразу запускает решатель: пакетный прогон нескольких
+    // проектов подряд и проверка расчёта без нажатия F5 вручную.
     const QStringList arguments = QApplication::arguments();
-    if (arguments.size() > 1) {
-        window.openProjectOnStartup(arguments.at(1));
+    QString project_path;
+    bool run_after_open = false;
+    for (int index = 1; index < arguments.size(); ++index) {
+        const QString argument = arguments.at(index);
+        if (argument == QStringLiteral("--run")) {
+            run_after_open = true;
+        } else if (project_path.isEmpty()) {
+            project_path = argument;
+        }
+    }
+    if (!project_path.isEmpty()) {
+        window.openProjectOnStartup(project_path);
+        if (run_after_open) {
+            window.startCalculationOnStartup();
+        }
     }
 
     return app.exec();

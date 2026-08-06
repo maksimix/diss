@@ -1,8 +1,10 @@
 #include "waveguide_opengl_widget.h"
 
+#include <QtCore/QLocale>
 #include <QtCore/QRect>
 #include <QtGui/QKeyEvent>
 #include <QtGui/QMouseEvent>
+#include <QtGui/QPainter>
 #include <QtGui/QPainterPath>
 #include <QtGui/QPolygonF>
 #include <QtGui/QWheelEvent>
@@ -554,10 +556,121 @@ void WaveguideOpenGLWidget::resetView()
     setViewPreset(view_preset_);
 }
 
+void WaveguideOpenGLWidget::setBackground(ViewBackground background)
+{
+    if (background_ == background) {
+        return;
+    }
+    background_ = background;
+    if (context() != nullptr) {
+        // Цвет очистки живёт в контексте OpenGL, поэтому задаётся при активном
+        // контексте, а не в любой момент.
+        makeCurrent();
+        applyClearColor();
+        doneCurrent();
+    }
+    update();
+    if (view_settings_changed_callback_) {
+        view_settings_changed_callback_();
+    }
+}
+
+void WaveguideOpenGLWidget::setGridVisible(bool visible)
+{
+    if (grid_visible_ == visible) {
+        return;
+    }
+    grid_visible_ = visible;
+    update();
+    if (view_settings_changed_callback_) {
+        view_settings_changed_callback_();
+    }
+}
+
+void WaveguideOpenGLWidget::setViewSettingsChangedCallback(std::function<void()> callback)
+{
+    view_settings_changed_callback_ = std::move(callback);
+}
+
+void WaveguideOpenGLWidget::applyClearColor()
+{
+    if (background_ == ViewBackground::Light) {
+        glClearColor(0.965f, 0.970f, 0.975f, 1.0f);
+    } else {
+        glClearColor(0.055f, 0.065f, 0.075f, 1.0f);
+    }
+}
+
+// На светлом фоне почти белые линии сливаются с ним. Оттенок сохраняется,
+// светлота переворачивается — красная ось остаётся красной, но тёмной.
+QColor WaveguideOpenGLWidget::themedLineColor(const QColor &color_for_dark) const
+{
+    if (background_ == ViewBackground::Dark) {
+        return color_for_dark;
+    }
+    const int hue = color_for_dark.hslHue();
+    const int saturation = color_for_dark.hslSaturation();
+    const int lightness = std::clamp(235 - color_for_dark.lightness(), 40, 150);
+    QColor result;
+    result.setHsl(hue, saturation, lightness);
+    return result;
+}
+
+// Шаг сетки из ряда 1-2-5: на модель приходится десяток-другой клеток, и число
+// остаётся круглым при любом размере тракта.
+double WaveguideOpenGLWidget::gridStepMm() const
+{
+    const double extent = std::max(4.0, 2.0 * modelRadiusMm());
+    const double raw = extent / 16.0;
+    const double decade = std::pow(10.0, std::floor(std::log10(std::max(1.0e-6, raw))));
+    const double mantissa = raw / decade;
+    const double nice = mantissa < 1.5 ? 1.0 : (mantissa < 3.5 ? 2.0 : (mantissa < 7.5 ? 5.0 : 10.0));
+    return nice * decade;
+}
+
+void WaveguideOpenGLWidget::drawGrid() const
+{
+    const double step = gridStepMm();
+    if (!(step > 0.0)) {
+        return;
+    }
+
+    // Сетка лежит под моделью и накрывает её с запасом: так она читается как
+    // пол сцены и даёт глубину, не перечёркивая сам волновод.
+    const double half_extent = std::ceil(1.35 * modelRadiusMm() / step) * step;
+    const bool circular = result_.parameters.cross_section == 1;
+    const double half_height = result_.valid
+                                   ? 0.5 * (circular ? 2.0 * result_.parameters.radius_mm
+                                                     : result_.parameters.depth_mm)
+                                   : 10.0;
+    const double floor_y = -1.06 * half_height;
+    const int lines = static_cast<int>(std::lround(half_extent / step));
+
+    const QColor minor = background_ == ViewBackground::Light ? QColor(206, 213, 220)
+                                                              : QColor(58, 68, 80);
+    const QColor major = background_ == ViewBackground::Light ? QColor(168, 179, 190)
+                                                              : QColor(84, 98, 114);
+
+    ::glLineWidth(1.0f);
+    glBegin(GL_LINES);
+    for (int index = -lines; index <= lines; ++index) {
+        // Каждая пятая линия ярче: считать клетки по ней проще, чем по сплошной
+        // однородной сетке.
+        const bool is_major = index % 5 == 0;
+        setColor(is_major ? major : minor, is_major ? 0.85 : 0.55);
+        const double offset = index * step;
+        glVertex3d(offset, floor_y, -half_extent);
+        glVertex3d(offset, floor_y, half_extent);
+        glVertex3d(-half_extent, floor_y, offset);
+        glVertex3d(half_extent, floor_y, offset);
+    }
+    glEnd();
+}
+
 void WaveguideOpenGLWidget::initializeGL()
 {
     initializeOpenGLFunctions();
-    glClearColor(0.055f, 0.065f, 0.075f, 1.0f);
+    applyClearColor();
     glEnable(GL_DEPTH_TEST);
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
@@ -576,7 +689,9 @@ void WaveguideOpenGLWidget::paintGL()
     setupProjection();
     setupModelView();
 
-    drawAxes();
+    if (grid_visible_) {
+        drawGrid();
+    }
     if (result_.valid) {
         drawWaveguide();
         if (fill_mode_ == FieldFillMode::Slice) {
@@ -588,6 +703,26 @@ void WaveguideOpenGLWidget::paintGL()
         drawUserShapes();
         drawFields();
         drawPropagationArrow();
+    }
+
+    // Ориентация показывается последней: указатель должен лежать поверх сцены.
+    drawOrientationGizmo();
+
+    // Сетка без масштаба бесполезна: подпись говорит цену клетки. Рисуется
+    // поверх сцены обычным QPainter — он идёт последним, чтобы не сбить
+    // состояние OpenGL до конца кадра.
+    if (grid_visible_) {
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::Antialiasing, true);
+        painter.setPen(background_ == ViewBackground::Light ? QColor(0x5a, 0x66, 0x70)
+                                                            : QColor(0xa8, 0xb4, 0xc0));
+        QFont font = painter.font();
+        font.setPointSizeF(8.5);
+        painter.setFont(font);
+        painter.drawText(rect().adjusted(8, 0, -8, -6),
+                         Qt::AlignLeft | Qt::AlignBottom,
+                         QStringLiteral("сетка %1 мм")
+                             .arg(QLocale::system().toString(gridStepMm(), 'g', 3)));
     }
 }
 
@@ -697,6 +832,61 @@ void WaveguideOpenGLWidget::mouseReleaseEvent(QMouseEvent *event)
 
 void WaveguideOpenGLWidget::keyPressEvent(QKeyEvent *event)
 {
+    // Клавиши вида работают, пока фокус в самой сцене, — как в CST. Делать их
+    // командами окна нельзя: одиночные буквы перехватывали бы ввод в поле
+    // фильтра и в списке параметров.
+    const bool shift = event->modifiers().testFlag(Qt::ShiftModifier);
+    switch (event->key()) {
+    case Qt::Key_Space:
+        resetView();
+        event->accept();
+        return;
+    case Qt::Key_G:
+        setGridVisible(!grid_visible_);
+        event->accept();
+        return;
+    case Qt::Key_B:
+        setBackground(background_ == ViewBackground::Dark ? ViewBackground::Light
+                                                          : ViewBackground::Dark);
+        event->accept();
+        return;
+    default:
+        break;
+    }
+
+    // Направления взгляда доступны только в свободном виде: у проекций своя
+    // жёстко заданная камера, и вертеть её нечем.
+    if (view_preset_ == WaveguideViewPreset::Free3D) {
+        bool handled = true;
+        switch (event->key()) {
+        case Qt::Key_X:   // взгляд вдоль X — сечение волновода
+            rotation_x_ = 0.0;
+            rotation_y_ = shift ? 90.0 : -90.0;
+            break;
+        case Qt::Key_Y:   // взгляд сверху вдоль Y
+            rotation_x_ = shift ? -90.0 : 90.0;
+            rotation_y_ = 0.0;
+            break;
+        case Qt::Key_Z:   // взгляд навстречу распространению
+            rotation_x_ = 0.0;
+            rotation_y_ = shift ? 180.0 : 0.0;
+            break;
+        case Qt::Key_0:
+        case Qt::Key_Home:   // изометрия
+            rotation_x_ = -24.0;
+            rotation_y_ = 34.0;
+            break;
+        default:
+            handled = false;
+            break;
+        }
+        if (handled) {
+            update();
+            event->accept();
+            return;
+        }
+    }
+
     if (view_preset_ != WaveguideViewPreset::Free3D) {
         QOpenGLWidget::keyPressEvent(event);
         return;
@@ -1111,7 +1301,7 @@ double WaveguideOpenGLWidget::shellAlpha() const
 void WaveguideOpenGLWidget::drawWaveguide() const
 {
     const QColor shell_metal_color(116, 132, 148);
-    const QColor shell_edge_color(212, 226, 240);
+    const QColor shell_edge_color = themedLineColor(QColor(212, 226, 240));
     const double body_alpha = shellAlpha();
     if (result_.parameters.cross_section == 1) {
         const double outer_radius = result_.parameters.radius_mm;
@@ -1157,7 +1347,7 @@ void WaveguideOpenGLWidget::drawWaveguide() const
     const double z0 = -0.5 * length;
     const double z1 = 0.5 * length;
     const QColor metal_color(116, 132, 148);
-    const QColor edge_color(212, 226, 240);
+    const QColor edge_color = themedLineColor(QColor(212, 226, 240));
 
     if (body_alpha > 0.0) {
         drawBox(outer_x0, outer_x1, inner_y1, outer_y1, z0, z1, metal_color, body_alpha);
@@ -2216,6 +2406,66 @@ void WaveguideOpenGLWidget::drawPolylineWithArrow(const FieldGlyph &glyph,
         drawArrowHead(points[index], direction, side_hint, glyph.color, arrow_size,
                       animated ? 0.30 + 0.66 * intensity : 0.96);
     }
+}
+
+// Указатель ориентации в правом нижнем углу: маленький трёхцветный триэдр,
+// который поворачивается вместе с камерой, но не зависит ни от масштаба, ни от
+// размеров модели. Так угол показывает, куда смотрит вид, и не перечёркивает
+// саму модель длинными осями через всю сцену.
+void WaveguideOpenGLWidget::drawOrientationGizmo() const
+{
+    const double ratio = devicePixelRatioF();
+    const int side = static_cast<int>(std::lround(std::min(96.0, 0.22 * std::min(width(), height())) * ratio));
+    if (side < 24) {
+        return;   // в крошечной панели триэдр только мешал бы
+    }
+    const int margin = static_cast<int>(std::lround(8.0 * ratio));
+    const int device_width = static_cast<int>(std::lround(width() * ratio));
+
+    // Свой прямоугольник вида в углу и своя ортогональная проекция: триэдр
+    // рисуется в собственных координатах, не участвуя в перспективе сцены.
+    ::glViewport(device_width - side - margin, margin, side, side);
+    glMatrixMode(GL_PROJECTION);
+    glPushMatrix();
+    glLoadIdentity();
+    glOrtho(-1.45, 1.45, -1.45, 1.45, -10.0, 10.0);
+    glMatrixMode(GL_MODELVIEW);
+    glPushMatrix();
+    glLoadIdentity();
+    // Только повороты камеры: сдвиг и приближение к указателю не относятся.
+    glRotated(rotation_x_, 1.0, 0.0, 0.0);
+    glRotated(rotation_y_, 0.0, 1.0, 0.0);
+    // Углу нужен свой чистый буфер глубины, иначе модель заслонит указатель.
+    ::glClear(GL_DEPTH_BUFFER_BIT);
+
+    const QColor x_color(220, 76, 76);
+    const QColor y_color(86, 210, 120);
+    const QColor z_color(82, 150, 240);
+
+    ::glLineWidth(2.0f);
+    glBegin(GL_LINES);
+    setColor(x_color, 0.95);
+    glVertex3d(0.0, 0.0, 0.0);
+    glVertex3d(1.0, 0.0, 0.0);
+    setColor(y_color, 0.95);
+    glVertex3d(0.0, 0.0, 0.0);
+    glVertex3d(0.0, 1.0, 0.0);
+    setColor(z_color, 0.95);
+    glVertex3d(0.0, 0.0, 0.0);
+    glVertex3d(0.0, 0.0, 1.0);
+    glEnd();
+
+    const double label_size = 0.2;
+    drawAxisLabel('X', QVector3D(1.28f, 0.0f, 0.0f), label_size, x_color);
+    drawAxisLabel('Y', QVector3D(0.0f, 1.28f, 0.0f), label_size, y_color);
+    drawAxisLabel('Z', QVector3D(0.0f, 0.0f, 1.28f), label_size, z_color);
+
+    glMatrixMode(GL_PROJECTION);
+    glPopMatrix();
+    glMatrixMode(GL_MODELVIEW);
+    glPopMatrix();
+    ::glViewport(0, 0, static_cast<int>(std::lround(width() * ratio)),
+               std::max(1, static_cast<int>(std::lround(height() * ratio))));
 }
 
 void WaveguideOpenGLWidget::drawAxes() const

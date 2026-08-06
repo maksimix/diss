@@ -484,6 +484,66 @@ void paintRibbonIcon(QPainter &painter, RibbonIcon icon)
         painter.drawPolyline(
             QPolygonF({QPointF(11, 20), QPointF(16, 15), QPointF(21, 20)}));
         break;
+    case RibbonIcon::Grid: {
+        // Сетка в перспективе: клетки сходятся к горизонту, как пол сцены.
+        painter.setPen(QPen(QColor(120, 140, 160), 1.1));
+        for (int index = 0; index <= 4; ++index) {
+            const double t = index / 4.0;
+            const double y = 10.0 + 17.0 * t * t;             // сгущение к дальнему краю
+            const double inset = 13.0 * (1.0 - t);            // сужение вдаль
+            painter.drawLine(QPointF(3 + inset, y), QPointF(29 - inset, y));
+            const double x_top = 16.0 + (index - 2) * 3.2;
+            const double x_bottom = 16.0 + (index - 2) * 13.0 / 2.0;
+            painter.drawLine(QPointF(x_top, 10), QPointF(x_bottom, 27));
+        }
+        break;
+    }
+    case RibbonIcon::Background: {
+        // Половина светлая, половина тёмная — переключение фона сцены.
+        painter.setPen(QPen(QColor(120, 130, 140), 1.2));
+        painter.setBrush(QColor(250, 250, 252));
+        painter.drawRect(QRectF(4, 7, 24, 18));
+        painter.setBrush(QColor(0x1a, 0x1f, 0x26));
+        painter.drawRect(QRectF(16, 7, 12, 18));
+        painter.setPen(QPen(QColor(0x4c, 0x6a, 0x86), 1.2));
+        painter.setBrush(Qt::NoBrush);
+        painter.drawEllipse(QPointF(16, 16), 5.0, 5.0);
+        break;
+    }
+    case RibbonIcon::MathHelp: {
+        // Лист с формулой и синим знаком вопроса: справка именно по математике,
+        // а не общая справка о программе (та — круглый «?» в шапке ленты).
+        painter.setPen(QPen(QColor(120, 130, 140), 1.3));
+        painter.setBrush(QColor(252, 252, 252));
+        painter.drawPolygon(QPolygonF({QPointF(5, 3),
+                                       QPointF(17, 3),
+                                       QPointF(23, 9),
+                                       QPointF(23, 27),
+                                       QPointF(5, 27)}));
+        // Условный «интеграл» и дробная черта — намёк на формулы внутри.
+        painter.setPen(QPen(QColor(90, 110, 130), 1.3));
+        painter.drawLine(QPointF(9, 9), QPointF(19, 9));
+        painter.drawLine(QPointF(9, 13), QPointF(15, 13));
+        painter.setPen(QPen(QColor(0x1b, 0x5b, 0x96), 1.6));
+        QFont formula_font = painter.font();
+        formula_font.setPointSizeF(9.0);
+        formula_font.setItalic(true);
+        painter.setFont(formula_font);
+        painter.drawText(QRectF(7, 15, 14, 10), Qt::AlignLeft | Qt::AlignVCenter,
+                         QStringLiteral("∫f"));
+
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(QColor(0x1b, 0x5b, 0x96));
+        painter.drawEllipse(QRectF(17, 17, 14, 14));
+        painter.setPen(header_text);
+        QFont mark_font = painter.font();
+        mark_font.setPointSizeF(9.0);
+        mark_font.setBold(true);
+        mark_font.setItalic(false);
+        painter.setFont(mark_font);
+        painter.drawText(QRectF(17, 17, 14, 14), Qt::AlignCenter, QStringLiteral("?"));
+        break;
+    }
     case RibbonIcon::CloseProject:
         // Лист документа с красным крестиком.
         painter.setPen(QPen(QColor(120, 130, 140), 1.3));

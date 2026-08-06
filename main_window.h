@@ -44,6 +44,8 @@ public:
     // Открытие проекта из командной строки: путь к .wgproj первым аргументом.
     // Через это же работает двойной щелчок по файлу проекта в проводнике.
     void openProjectOnStartup(const QString &file_path);
+    // Ключ --run: запускает решатель сразу после открытия проекта.
+    void startCalculationOnStartup();
 
 signals:
     void requestCalculation(int request_id,
@@ -109,6 +111,10 @@ private:
     void toggleFieldDisplayWindow(bool visible);
     QWidget *createResultPanel();
     QWidget *createProjectionPanel();
+    // Панель хода расчёта справа: текущий этап, полоса, время и журнал этапов
+    // решателя — в строке состояния длинные этапы обрезались.
+    QWidget *createSolverProgressPanel();
+    void appendSolverStage(const QString &stage);
     QDoubleSpinBox *createSpinBox(double minimum,
                                   double maximum,
                                   double value,
@@ -143,6 +149,9 @@ private:
     void showExcitationDialog();
     void showSolverSetupDialog();
     void showAboutDialog();
+    // Веб-страница с формулами расчёта: открывается в браузере по умолчанию.
+    void showMathDocumentation();
+    QString mathDocumentationPath() const;
     void applyCstStyle();
     void setStatus(const QString &message, bool error);
     void createRibbon();
@@ -213,6 +222,9 @@ private:
     // Убирает с видов поле прежнего проекта: setModelPreview обновляет только
     // геометрию, а стрелки, срезы и стопка объёма остались бы от чужого расчёта.
     void clearFieldDisplay();
+    // Приводит отметки кнопок «Сетка» и «Светлый фон» к состоянию сцены после
+    // переключения клавишами G и B.
+    void syncViewSettingsActions();
     bool saveProjectSnapshot(const OpenProject &project, QString *error);
     // Проект пишется на диск сам: модель — перед запуском решателя, готовый
     // расчёт — сразу после него. Иначе .wgr появлялся бы только по Ctrl+S, а
@@ -266,6 +278,8 @@ private:
     QAction *save_action_ = nullptr;
     QAction *save_as_action_ = nullptr;
     QAction *parameters_action_ = nullptr;
+    QAction *grid_action_ = nullptr;
+    QAction *light_background_action_ = nullptr;
     // Команды, которым нужен открытый проект: на стартовой странице они
     // выключены, чтобы кнопка не правила несуществующую модель.
     QVector<QAction *> project_scoped_actions_;
@@ -277,6 +291,10 @@ private:
     QLabel *status_label_ = nullptr;
     QLabel *calculation_time_label_ = nullptr;
     QProgressBar *calculation_progress_bar_ = nullptr;
+    QLabel *solver_stage_label_ = nullptr;
+    QLabel *solver_timing_label_ = nullptr;
+    QProgressBar *solver_progress_bar_ = nullptr;
+    QPlainTextEdit *solver_stage_log_ = nullptr;
     WaveguideParameters parameters_;
     WaveguideCalculationResult last_result_;
     QString current_model_path_;
