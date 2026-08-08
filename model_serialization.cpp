@@ -153,12 +153,26 @@ QJsonObject parametersToJson(const WaveguideParameters &parameters)
     waveguide[QStringLiteral("wall_conductivity_s_per_m")] = parameters.wall_conductivity_s_per_m;
     waveguide[QStringLiteral("shell_display")] = parameters.shell_display;
 
+    QJsonObject ridge;
+    ridge[QStringLiteral("enabled")] = parameters.ridge.enabled;
+    ridge[QStringLiteral("partition_radius_mm")] = parameters.ridge.partition_radius_mm;
+    ridge[QStringLiteral("sector_deg")] = parameters.ridge.sector_deg;
+    ridge[QStringLiteral("ridge_deg")] = parameters.ridge.ridge_deg;
+    ridge[QStringLiteral("aperture_deg")] = parameters.ridge.aperture_deg;
+    ridge[QStringLiteral("core_permittivity")] = parameters.ridge.core_permittivity;
+    ridge[QStringLiteral("series_terms")] = parameters.ridge.series_terms;
+    ridge[QStringLiteral("edge_terms")] = parameters.ridge.edge_terms;
+    waveguide[QStringLiteral("ridge")] = ridge;
+
     QJsonObject excitation;
     excitation[QStringLiteral("frequency_ghz")] = parameters.frequency_ghz;
     excitation[QStringLiteral("mode_automatic")] = parameters.mode_automatic;
     excitation[QStringLiteral("mode_family")] = parameters.mode_family;
     excitation[QStringLiteral("mode_m")] = parameters.mode_m;
     excitation[QStringLiteral("mode_n")] = parameters.mode_n;
+    excitation[QStringLiteral("mode_g1")] = parameters.mode_g1;
+    excitation[QStringLiteral("mode_g2")] = parameters.mode_g2;
+    excitation[QStringLiteral("mode_q")] = parameters.mode_q;
 
     QJsonObject slot;
     slot[QStringLiteral("enabled")] = parameters.slot_enabled;
@@ -212,6 +226,27 @@ WaveguideParameters parametersFromJson(const QJsonObject &root)
             .toDouble(parameters.wall_conductivity_s_per_m);
     parameters.shell_display =
         waveguide.value(QStringLiteral("shell_display")).toInt(parameters.shell_display);
+    // Модели, записанные до появления гребней, этого узла не имеют: значения по
+    // умолчанию оставляют сечение гладким круглым волноводом.
+    const QJsonObject ridge = waveguide.value(QStringLiteral("ridge")).toObject();
+    parameters.ridge.enabled =
+        ridge.value(QStringLiteral("enabled")).toBool(parameters.ridge.enabled);
+    parameters.ridge.partition_radius_mm =
+        ridge.value(QStringLiteral("partition_radius_mm"))
+            .toDouble(parameters.ridge.partition_radius_mm);
+    parameters.ridge.sector_deg =
+        ridge.value(QStringLiteral("sector_deg")).toDouble(parameters.ridge.sector_deg);
+    parameters.ridge.ridge_deg =
+        ridge.value(QStringLiteral("ridge_deg")).toDouble(parameters.ridge.ridge_deg);
+    parameters.ridge.aperture_deg =
+        ridge.value(QStringLiteral("aperture_deg")).toDouble(parameters.ridge.aperture_deg);
+    parameters.ridge.core_permittivity =
+        ridge.value(QStringLiteral("core_permittivity"))
+            .toDouble(parameters.ridge.core_permittivity);
+    parameters.ridge.series_terms =
+        ridge.value(QStringLiteral("series_terms")).toInt(parameters.ridge.series_terms);
+    parameters.ridge.edge_terms =
+        ridge.value(QStringLiteral("edge_terms")).toInt(parameters.ridge.edge_terms);
 
     const QJsonObject excitation = root.value(QStringLiteral("excitation")).toObject();
     parameters.frequency_ghz =
@@ -224,6 +259,9 @@ WaveguideParameters parametersFromJson(const QJsonObject &root)
         excitation.value(QStringLiteral("mode_family")).toInt(parameters.mode_family);
     parameters.mode_m = excitation.value(QStringLiteral("mode_m")).toInt(parameters.mode_m);
     parameters.mode_n = excitation.value(QStringLiteral("mode_n")).toInt(parameters.mode_n);
+    parameters.mode_g1 = excitation.value(QStringLiteral("mode_g1")).toInt(parameters.mode_g1);
+    parameters.mode_g2 = excitation.value(QStringLiteral("mode_g2")).toInt(parameters.mode_g2);
+    parameters.mode_q = excitation.value(QStringLiteral("mode_q")).toInt(parameters.mode_q);
 
     const QJsonObject slot = root.value(QStringLiteral("slot")).toObject();
     parameters.slot_enabled = slot.value(QStringLiteral("enabled")).toBool(parameters.slot_enabled);

@@ -30,6 +30,19 @@ QVector3D safeNormal(const QVector3D &vector, const QVector3D &fallback)
     return vector.normalized();
 }
 
+// Поворот локальной системы тела относительно осей модели. Порядок тот же, что
+// у glRotated на отрисовке и у сеточного генератора: Z, затем Y, затем X. Нужен
+// затенению металла: тела рисуются внутри своего поворота, и нормали их граней
+// заданы в местных осях.
+QMatrix4x4 bodyRotation(double rotation_x_deg, double rotation_y_deg, double rotation_z_deg)
+{
+    QMatrix4x4 rotation;
+    rotation.rotate(static_cast<float>(rotation_z_deg), 0.0f, 0.0f, 1.0f);
+    rotation.rotate(static_cast<float>(rotation_y_deg), 0.0f, 1.0f, 0.0f);
+    rotation.rotate(static_cast<float>(rotation_x_deg), 1.0f, 0.0f, 0.0f);
+    return rotation;
+}
+
 // Разбиение простого многоугольника на треугольники отсечением ушей. Торец
 // призмы бывает невыпуклым — буквы C, Г, T именно такие, — и веером из одной
 // точки он закрывается неверно: часть треугольников ложится поверх выреза, и
@@ -1224,14 +1237,24 @@ void WaveguideOpenGLWidget::drawCircularShell(double inner_radius,
                                               const QColor &edge_color,
                                               double body_alpha) const
 {
-    constexpr int segment_count = 64;
+    // Цилиндр склеен из плоских кусков, и пока все они были одного цвета,
+    // огранки не было видно. С бликом она вылезает наружу дважды: гранью, у
+    // которой свой цвет на всю ширину, и силуэтом из шестидесяти четырёх хорд.
+    // Поэтому кусков вдвое больше, а цвет считается в вершинах — между ними
+    // OpenGL растягивает его сам, и поверхность читается гладкой, как и должна
+    // читаться тонкая металлическая обечайка.
+    constexpr int segment_count = 128;
     const auto angle_at = [](int index) {
         return 2.0 * pi * index / segment_count;
+    };
+    const auto radial_at = [](double angle) {
+        return QVector3D(static_cast<float>(std::cos(angle)),
+                         static_cast<float>(std::sin(angle)),
+                         0.0f);
     };
 
     // В режиме каркаса поверхности не рисуются вовсе: полностью прозрачная
     // грань всё равно пишет глубину и заслоняет то, что стоит за ней.
-    setColor(metal_color, body_alpha);
     glBegin(GL_QUADS);
     for (int index = 0; body_alpha > 0.0 && index < segment_count; ++index) {
         const double a0 = angle_at(index);
@@ -1240,21 +1263,41 @@ void WaveguideOpenGLWidget::drawCircularShell(double inner_radius,
         const double s0 = std::sin(a0);
         const double c1 = std::cos(a1);
         const double s1 = std::sin(a1);
+        const QVector3D radial0 = radial_at(a0);
+        const QVector3D radial1 = radial_at(a1);
 
         // Внешняя боковая поверхность.
+        setMetalColor(metal_color, radial0, body_alpha);
         glVertex3d(outer_radius * c0, outer_radius * s0, z0);
+        setMetalColor(metal_color, radial1, body_alpha);
         glVertex3d(outer_radius * c1, outer_radius * s1, z0);
         glVertex3d(outer_radius * c1, outer_radius * s1, z1);
+        setMetalColor(metal_color, radial0, body_alpha);
         glVertex3d(outer_radius * c0, outer_radius * s0, z1);
 
         // Внутренняя боковая поверхность (стенка канала).
+        setMetalColor(metal_color, -radial0, body_alpha);
         glVertex3d(inner_radius * c0, inner_radius * s0, z0);
+        setMetalColor(metal_color, -radial1, body_alpha);
         glVertex3d(inner_radius * c1, inner_radius * s1, z0);
         glVertex3d(inner_radius * c1, inner_radius * s1, z1);
+        setMetalColor(metal_color, -radial0, body_alpha);
         glVertex3d(inner_radius * c0, inner_radius * s0, z1);
 
-        // Торцевые кольца.
+        // Торцевые кольца плоские: у них нормаль одна на всё кольцо, и цвет
+        // тоже один — интерполировать нечего.
+        //
+        // Кольцо кроется заметно плотнее боковых поверхностей. Это срез металла,
+        // и на разрезе его положено показывать сплошным: пока он был такой же
+        // прозрачный, как стенки, тракт читался не одной стенкой с толщиной, а
+        // двумя отдельными оболочками — внутренней и наружной. Заодно это
+        // убирает гребёнку на кромке: под скользящим углом полупрозрачные
+        // сектора кольца перекрывают друг друга и складываются в частокол.
+        const double edge_alpha = std::clamp(0.45 + 0.8 * body_alpha, 0.0, 0.95);
         for (const double z : {z0, z1}) {
+            setMetalColor(metal_color,
+                          QVector3D(0.0f, 0.0f, z < 0.0 ? -1.0f : 1.0f),
+                          edge_alpha);
             glVertex3d(inner_radius * c0, inner_radius * s0, z);
             glVertex3d(outer_radius * c0, outer_radius * s0, z);
             glVertex3d(outer_radius * c1, outer_radius * s1, z);
@@ -1298,6 +1341,119 @@ double WaveguideOpenGLWidget::shellAlpha() const
     return shell_selected_ ? 0.82 : 0.22;
 }
 
+void WaveguideOpenGLWidget::drawCircularRidges(double inner_radius, double half_length) const
+{
+    const CircularRidgeParameters &ridge = result_.parameters.ridge;
+    if (!ridge.enabled || !(ridge.partition_radius_mm > 0.0) ||
+        ridge.partition_radius_mm >= inner_radius || !(ridge.sector_deg > 0.0)) {
+        return;
+    }
+    const double partition = ridge.partition_radius_mm;
+    const double sector = ridge.sector_deg * pi / 180.0;
+    const double ridge_angle = std::min(ridge.ridge_deg, ridge.sector_deg) * pi / 180.0;
+    const double aperture = std::min(ridge.aperture_deg, ridge.ridge_deg) * pi / 180.0;
+    // Сектор отражается сам в себя, поэтому весь набор граней получается
+    // обходом секторов: чётный идёт как есть, нечётный — зеркально.
+    const int sector_count = std::max(1, static_cast<int>(std::lround(2.0 * pi / sector)));
+
+    const auto folded_angle = [sector](int index, double angle) {
+        return index % 2 == 0 ? index * sector + angle : (index + 1) * sector - angle;
+    };
+
+    // Диэлектрическая сердцевина r < r1: полупрозрачный цилиндр, чтобы граница
+    // раздела частичных областей была видна, но не закрывала поле.
+    if (std::abs(ridge.core_permittivity - 1.0) > 1.0e-9) {
+        constexpr int segment_count = 48;
+        setColor(QColor(96, 176, 128), 0.18);
+        glBegin(GL_QUADS);
+        for (int index = 0; index < segment_count; ++index) {
+            const double a0 = 2.0 * pi * index / segment_count;
+            const double a1 = 2.0 * pi * (index + 1) / segment_count;
+            glVertex3d(partition * std::cos(a0), partition * std::sin(a0), -half_length);
+            glVertex3d(partition * std::cos(a1), partition * std::sin(a1), -half_length);
+            glVertex3d(partition * std::cos(a1), partition * std::sin(a1), half_length);
+            glVertex3d(partition * std::cos(a0), partition * std::sin(a0), half_length);
+        }
+        glEnd();
+    }
+
+    // Грань гребня: радиальная пластина от r1 до стенки под углом phi2. Металл
+    // здесь бесконечно тонкий, поэтому и объёма у него нет — узнать его в кадре
+    // можно только по блику.
+    const QColor ridge_color(168, 178, 192);
+    glBegin(GL_QUADS);
+    for (int index = 0; index < sector_count; ++index) {
+        const double angle = folded_angle(index, ridge_angle);
+        const double c = std::cos(angle);
+        const double s = std::sin(angle);
+        // Нормаль пластины — азимутальное направление: сама пластина лежит в
+        // плоскости, натянутой на радиус и ось.
+        setMetalColor(ridge_color,
+                      QVector3D(static_cast<float>(-s), static_cast<float>(c), 0.0f),
+                      0.92);
+        glVertex3d(partition * c, partition * s, -half_length);
+        glVertex3d(inner_radius * c, inner_radius * s, -half_length);
+        glVertex3d(inner_radius * c, inner_radius * s, half_length);
+        glVertex3d(partition * c, partition * s, half_length);
+    }
+    glEnd();
+
+    // Кольцевой сегмент: бесконечно тонкая металлическая дуга на r = r1 от
+    // окна связи phi3 до грани гребня phi2.
+    if (aperture < ridge_angle - 1.0e-9) {
+        constexpr int arc_segments = 24;
+        glBegin(GL_QUADS);
+        for (int index = 0; index < sector_count; ++index) {
+            for (int step = 0; step < arc_segments; ++step) {
+                const double t0 = aperture + (ridge_angle - aperture) * step / arc_segments;
+                const double t1 =
+                    aperture + (ridge_angle - aperture) * (step + 1) / arc_segments;
+                const double a0 = folded_angle(index, t0);
+                const double a1 = folded_angle(index, t1);
+                // Дуга тоже гнутая, поэтому цвет считается в вершинах: иначе на
+                // ней проступила бы та же огранка, что и на обечайке.
+                const auto arc_normal = [](double angle) {
+                    return QVector3D(static_cast<float>(std::cos(angle)),
+                                     static_cast<float>(std::sin(angle)),
+                                     0.0f);
+                };
+                setMetalColor(ridge_color, arc_normal(a0), 0.94);
+                glVertex3d(partition * std::cos(a0), partition * std::sin(a0), -half_length);
+                setMetalColor(ridge_color, arc_normal(a1), 0.94);
+                glVertex3d(partition * std::cos(a1), partition * std::sin(a1), -half_length);
+                glVertex3d(partition * std::cos(a1), partition * std::sin(a1), half_length);
+                setMetalColor(ridge_color, arc_normal(a0), 0.94);
+                glVertex3d(partition * std::cos(a0), partition * std::sin(a0), half_length);
+            }
+        }
+        glEnd();
+    }
+
+    // Кромки: по ним читается, где кончается металл и начинается окно связи.
+    ::glLineWidth(2.0f);
+    setColor(themedLineColor(QColor(226, 236, 248)), 0.8);
+    glBegin(GL_LINES);
+    for (int index = 0; index < sector_count; ++index) {
+        for (const double z : {-half_length, half_length}) {
+            const double ridge_edge = folded_angle(index, ridge_angle);
+            glVertex3d(partition * std::cos(ridge_edge), partition * std::sin(ridge_edge), z);
+            glVertex3d(inner_radius * std::cos(ridge_edge),
+                       inner_radius * std::sin(ridge_edge),
+                       z);
+            if (aperture < ridge_angle - 1.0e-9) {
+                const double window_edge = folded_angle(index, aperture);
+                glVertex3d(partition * std::cos(window_edge),
+                           partition * std::sin(window_edge),
+                           z);
+                glVertex3d(partition * std::cos(ridge_edge),
+                           partition * std::sin(ridge_edge),
+                           z);
+            }
+        }
+    }
+    glEnd();
+}
+
 void WaveguideOpenGLWidget::drawWaveguide() const
 {
     const QColor shell_metal_color(116, 132, 148);
@@ -1314,6 +1470,8 @@ void WaveguideOpenGLWidget::drawWaveguide() const
                           shell_metal_color,
                           shell_edge_color,
                           body_alpha);
+
+        drawCircularRidges(inner_radius, half_length);
 
         // Подсветка входного и выходного отверстий, как у прямоугольного тракта.
         ::glLineWidth(2.0f);
@@ -1548,7 +1706,11 @@ void WaveguideOpenGLWidget::drawUserShapes() const
                                                         : QColor(145, 157, 168);
         const QColor edge_color = group.holds_selection ? QColor(255, 210, 68)
                                                         : QColor(225, 235, 242);
-        setColor(body_color, group.holds_selection ? 0.98 : 0.9);
+        // Тела этой группы лежат в плоскости и вытянуты вдоль оси, поэтому у
+        // торцов нормаль — сама ось, а у боковой стенки — перпендикуляр к
+        // ребру профиля в той же плоскости.
+        const double group_alpha = group.holds_selection ? 0.98 : 0.9;
+        const QVector3D axial_normal = vertex(QPointF(0.0, 0.0), 1.0);
         for (int index = 0; index < contours.size(); ++index) {
             if (depth[index] % 2 != 0 || contours[index].size() < 3) {
                 continue;
@@ -1565,6 +1727,9 @@ void WaveguideOpenGLWidget::drawUserShapes() const
             const QVector<int> triangles = triangulateProfile(contour);
             glBegin(GL_TRIANGLES);
             for (const double axial : {group.axial_min_mm, group.axial_max_mm}) {
+                setMetalColor(body_color,
+                              axial <= group.axial_min_mm ? -axial_normal : axial_normal,
+                              group_alpha);
                 for (int corner = 0; corner < triangles.size(); ++corner) {
                     const QVector3D position = vertex(contour[triangles[corner]], axial);
                     glVertex3f(position.x(), position.y(), position.z());
@@ -1584,6 +1749,9 @@ void WaveguideOpenGLWidget::drawUserShapes() const
                 const QVector3D b = vertex(to, group.axial_min_mm);
                 const QVector3D c = vertex(to, group.axial_max_mm);
                 const QVector3D d = vertex(from, group.axial_max_mm);
+                setMetalColor(body_color,
+                              vertex(QPointF(to.y() - from.y(), from.x() - to.x()), 0.0),
+                              group_alpha);
                 glVertex3f(a.x(), a.y(), a.z());
                 glVertex3f(b.x(), b.y(), b.z());
                 glVertex3f(c.x(), c.y(), c.z());
@@ -1648,7 +1816,10 @@ void WaveguideOpenGLWidget::drawUserShapes() const
             const double half_z = 0.5 * shape.size_z_mm;
             if (!wireframe) {
                 drawBox(-half_x, half_x, -half_y, half_y, -half_z, half_z, body_color,
-                        body_alpha);
+                        body_alpha,
+                        bodyRotation(shape.rotation_x_deg,
+                                     shape.rotation_y_deg,
+                                     shape.rotation_z_deg));
             }
             ::glLineWidth(selected ? 2.2f : 1.5f);
             drawBoxEdges(-half_x, half_x, -half_y, half_y, -half_z, half_z, edge_color);
@@ -1689,19 +1860,34 @@ void WaveguideOpenGLWidget::drawShapeCylinder(const ShapeParameters &shape,
         }
     };
 
+    // Нормаль боковой поверхности — тот же радиус-вектор обода, только без
+    // осевой части; торцы смотрят вдоль оси тела.
+    const auto side_normal = [&point](double angle) {
+        return safeNormal(point(angle, 0.0), QVector3D(1.0f, 0.0f, 0.0f));
+    };
+    const auto axis_normal = [&shape](double axial) {
+        return QVector3D(shape.axis == 0 ? static_cast<float>(axial) : 0.0f,
+                         shape.axis == 1 ? static_cast<float>(axial) : 0.0f,
+                         shape.axis == 2 ? static_cast<float>(axial) : 0.0f);
+    };
+    const QMatrix4x4 frame = bodyRotation(shape.rotation_x_deg,
+                                          shape.rotation_y_deg,
+                                          shape.rotation_z_deg);
+
     if (!wireframe) {
-        setColor(body_color, body_alpha);
         glBegin(GL_QUAD_STRIP);
         for (int segment = 0; segment <= segments; ++segment) {
             const double angle = 2.0 * pi * segment / segments;
             const QVector3D bottom = point(angle, -1.0);
             const QVector3D top = point(angle, 1.0);
+            setMetalColor(body_color, side_normal(angle), body_alpha, frame);
             glVertex3f(bottom.x(), bottom.y(), bottom.z());
             glVertex3f(top.x(), top.y(), top.z());
         }
         glEnd();
         for (const double axial : {-1.0, 1.0}) {
             // Торец — веер от точки на оси тела к ободу.
+            setMetalColor(body_color, axis_normal(axial), body_alpha, frame);
             glBegin(GL_TRIANGLE_FAN);
             glVertex3f(shape.axis == 0 ? static_cast<float>(axial * half_length) : 0.0f,
                        shape.axis == 1 ? static_cast<float>(axial * half_length) : 0.0f,
@@ -1765,13 +1951,23 @@ void WaveguideOpenGLWidget::drawShapePrism(const ShapeParameters &shape,
         }
     };
 
+    const QMatrix4x4 frame = bodyRotation(shape.rotation_x_deg,
+                                          shape.rotation_y_deg,
+                                          shape.rotation_z_deg);
+    // Нормаль торца — ось вытягивания, нормаль боковой стенки — перпендикуляр к
+    // ребру профиля в плоскости профиля.
+    const QVector3D axial_normal = point(QPointF(0.0, 0.0), 1.0 / std::max(1.0e-9, half_length));
+
     if (!wireframe) {
-        setColor(body_color, body_alpha);
         // Торцы: без них тело выглядит полым — в кадре видна только обводка
         // профиля, а сквозь неё просвечивает всё, что стоит за телом.
         const QVector<int> triangles = triangulateProfile(shape.profile_mm);
         glBegin(GL_TRIANGLES);
         for (const double axial : {-1.0, 1.0}) {
+            setMetalColor(body_color,
+                          axial < 0.0 ? -axial_normal : axial_normal,
+                          body_alpha,
+                          frame);
             for (int index = 0; index < triangles.size(); ++index) {
                 const QVector3D vertex = point(shape.profile_mm[triangles[index]], axial);
                 glVertex3f(vertex.x(), vertex.y(), vertex.z());
@@ -1787,6 +1983,10 @@ void WaveguideOpenGLWidget::drawShapePrism(const ShapeParameters &shape,
             const QVector3D b = point(to, -1.0);
             const QVector3D c = point(to, 1.0);
             const QVector3D d = point(from, 1.0);
+            setMetalColor(body_color,
+                          point(QPointF(to.y() - from.y(), from.x() - to.x()), 0.0),
+                          body_alpha,
+                          frame);
             glVertex3f(a.x(), a.y(), a.z());
             glVertex3f(b.x(), b.y(), b.z());
             glVertex3f(c.x(), c.y(), c.z());
@@ -1843,6 +2043,9 @@ void WaveguideOpenGLWidget::drawPecPlates() const
         glRotated(plate.rotation_z_deg, 0.0, 0.0, 1.0);
         glRotated(plate.rotation_y_deg, 0.0, 1.0, 0.0);
         glRotated(plate.rotation_x_deg, 1.0, 0.0, 0.0);
+        const QMatrix4x4 plate_frame = bodyRotation(plate.rotation_x_deg,
+                                                   plate.rotation_y_deg,
+                                                   plate.rotation_z_deg);
         const bool circular_window = has_window && plate.aperture_shape == 1;
         if (circular_window) {
             // Plate with a round hole: a radial fan from the circle out to the
@@ -1929,15 +2132,16 @@ void WaveguideOpenGLWidget::drawPecPlates() const
                     continue;
                 }
                 drawBox(segment[0], segment[1], segment[2], segment[3],
-                        -half_z, half_z, body_color, body_alpha);
+                        -half_z, half_z, body_color, body_alpha, plate_frame);
                 ::glLineWidth(selected ? 3.2f : 2.0f);
                 drawBoxEdges(segment[0], segment[1], segment[2], segment[3],
                              -half_z, half_z, edge_color);
             }
-            drawPlateStub(plate, half_x, half_y, half_z, body_color, body_alpha, edge_color);
+            drawPlateStub(plate, half_x, half_y, half_z, body_color, body_alpha, edge_color,
+                          plate_frame);
         } else {
             drawBox(-half_x, half_x, -half_y, half_y, -half_z, half_z,
-                    body_color, body_alpha);
+                    body_color, body_alpha, plate_frame);
             ::glLineWidth(selected ? 3.2f : 2.0f);
             drawBoxEdges(-half_x, half_x, -half_y, half_y, -half_z, half_z, edge_color);
         }
@@ -2025,35 +2229,43 @@ void WaveguideOpenGLWidget::drawBox(double min_x,
                                     double min_z,
                                     double max_z,
                                     const QColor &color,
-                                    double alpha) const
+                                    double alpha,
+                                    const QMatrix4x4 &frame_rotation) const
 {
-    setColor(color, alpha);
+    // Каждая грань берёт свой блик: одинаково закрашенная коробка выглядит
+    // плоским силуэтом, и по ней не видно, металл это или подсветка области.
     glBegin(GL_QUADS);
+    setMetalColor(color, QVector3D(0.0f, 0.0f, -1.0f), alpha, frame_rotation);
     glVertex3d(min_x, min_y, min_z);
     glVertex3d(max_x, min_y, min_z);
     glVertex3d(max_x, max_y, min_z);
     glVertex3d(min_x, max_y, min_z);
 
+    setMetalColor(color, QVector3D(0.0f, 0.0f, 1.0f), alpha, frame_rotation);
     glVertex3d(min_x, min_y, max_z);
     glVertex3d(min_x, max_y, max_z);
     glVertex3d(max_x, max_y, max_z);
     glVertex3d(max_x, min_y, max_z);
 
+    setMetalColor(color, QVector3D(0.0f, -1.0f, 0.0f), alpha, frame_rotation);
     glVertex3d(min_x, min_y, min_z);
     glVertex3d(min_x, min_y, max_z);
     glVertex3d(max_x, min_y, max_z);
     glVertex3d(max_x, min_y, min_z);
 
+    setMetalColor(color, QVector3D(0.0f, 1.0f, 0.0f), alpha, frame_rotation);
     glVertex3d(min_x, max_y, min_z);
     glVertex3d(max_x, max_y, min_z);
     glVertex3d(max_x, max_y, max_z);
     glVertex3d(min_x, max_y, max_z);
 
+    setMetalColor(color, QVector3D(-1.0f, 0.0f, 0.0f), alpha, frame_rotation);
     glVertex3d(min_x, min_y, min_z);
     glVertex3d(min_x, max_y, min_z);
     glVertex3d(min_x, max_y, max_z);
     glVertex3d(min_x, min_y, max_z);
 
+    setMetalColor(color, QVector3D(1.0f, 0.0f, 0.0f), alpha, frame_rotation);
     glVertex3d(max_x, min_y, min_z);
     glVertex3d(max_x, min_y, max_z);
     glVertex3d(max_x, max_y, max_z);
@@ -2123,8 +2335,139 @@ void WaveguideOpenGLWidget::drawFields() const
     }
 }
 
+void WaveguideOpenGLWidget::drawCurvedArrow(const FieldGlyph &glyph) const
+{
+    const QVector<QVector3D> &points = glyph.points;
+    const int point_count = static_cast<int>(points.size());
+
+    // Якорь — точка, вокруг которой стрелка растёт в обе стороны. Он лежит на
+    // ломаной, но её узлы после трассировки неравномерны, поэтому нужный узел
+    // ищется по расстоянию, а не по номеру.
+    int anchor_index = 0;
+    float best_distance = std::numeric_limits<float>::max();
+    for (int index = 0; index < point_count; ++index) {
+        const float distance = (points[index] - glyph.anchor).lengthSquared();
+        if (distance < best_distance) {
+            best_distance = distance;
+            anchor_index = index;
+        }
+    }
+
+    double intensity = std::clamp(glyph.magnitude, 0.0, 1.0);
+    bool along_trace = true;
+    if (glyph.animated && animation_enabled_ && glyph.reference_magnitude > 0.0) {
+        const QVector3D instantaneous =
+            glyph.phasor_real * static_cast<float>(std::cos(animation_phase_)) -
+            glyph.phasor_imag * static_cast<float>(std::sin(animation_phase_));
+        const double normalized = std::clamp(
+            static_cast<double>(instantaneous.length()) / glyph.reference_magnitude, 0.0, 1.0);
+        if (normalized < 0.02) {
+            return;   // near a temporal zero-crossing: nothing to draw this frame
+        }
+        // Куда смотрит поле сейчас, решает проекция мгновенного вектора на
+        // касательную к линии в якоре: полпериода спустя стрелка развернётся,
+        // оставшись на той же линии.
+        const QVector3D tangent = points[std::min(anchor_index + 1, point_count - 1)] -
+                                  points[std::max(anchor_index - 1, 0)];
+        along_trace = QVector3D::dotProduct(instantaneous, tangent) >= 0.0f;
+        intensity = normalized;
+    }
+
+    // Половина длины в каждую сторону от якоря — по дуге самой линии, а не по
+    // прямой между концами.
+    const double half_length_mm =
+        0.5 * (glyph.animation_length_mm > 0.0
+                   ? glyph.animation_length_mm * std::max(0.12, intensity)
+                   : std::numeric_limits<double>::max());
+
+    const auto walk = [&points, point_count, anchor_index](int step, double budget_mm) {
+        QVector<QVector3D> path;
+        path.push_back(points[anchor_index]);
+        int index = anchor_index;
+        double left = budget_mm;
+        while (left > 0.0) {
+            const int next = index + step;
+            if (next < 0 || next >= point_count) {
+                break;
+            }
+            const QVector3D segment = points[next] - points[index];
+            const double length = static_cast<double>(segment.length());
+            if (length <= 1.0e-6) {
+                index = next;
+                continue;
+            }
+            if (length >= left) {
+                path.push_back(points[index] +
+                               segment * static_cast<float>(left / length));
+                break;
+            }
+            path.push_back(points[next]);
+            left -= length;
+            index = next;
+        }
+        return path;
+    };
+
+    const QVector<QVector3D> tail = walk(along_trace ? -1 : 1, half_length_mm);
+    const QVector<QVector3D> head = walk(along_trace ? 1 : -1, half_length_mm);
+    if (head.size() < 2 && tail.size() < 2) {
+        return;
+    }
+
+    const QColor &color = glyph.color;
+    const double alpha = 0.34 + 0.62 * intensity;
+    setColor(color, alpha);
+    ::glLineWidth(static_cast<GLfloat>(0.70 + 1.35 * intensity));
+    glBegin(GL_LINE_STRIP);
+    for (int index = tail.size() - 1; index >= 0; --index) {
+        glVertex3f(tail[index].x(), tail[index].y(), tail[index].z());
+    }
+    for (int index = 1; index < head.size(); ++index) {
+        glVertex3f(head[index].x(), head[index].y(), head[index].z());
+    }
+    glEnd();
+
+    if (head.size() < 2) {
+        return;
+    }
+    const QVector3D tip = head.back();
+    const QVector3D direction = safeNormal(tip - head[head.size() - 2],
+                                           QVector3D(0.0f, 1.0f, 0.0f));
+    // Плоскость наконечника берётся из локального изгиба ствола: иначе на
+    // гнутой стрелке он торчал бы поперёк своей же кривой.
+    const QVector3D previous = head.size() >= 3
+                                   ? head[head.size() - 2] - head[head.size() - 3]
+                                   : tip - head[head.size() - 2];
+    QVector3D plane_normal = QVector3D::crossProduct(previous, tip - head[head.size() - 2]);
+    if (plane_normal.lengthSquared() < 1.0e-12f) {
+        plane_normal = std::abs(QVector3D::dotProduct(direction, QVector3D(0.0f, 1.0f, 0.0f))) <
+                               0.86f
+                           ? QVector3D(0.0f, 1.0f, 0.0f)
+                           : QVector3D(1.0f, 0.0f, 0.0f);
+    }
+    const QVector3D side_hint = safeNormal(QVector3D::crossProduct(plane_normal, direction),
+                                           QVector3D(0.0f, 0.0f, 1.0f));
+    double shaft_length = 0.0;
+    for (int index = 1; index < head.size(); ++index) {
+        shaft_length += static_cast<double>((head[index] - head[index - 1]).length());
+    }
+    drawArrowHead(tip,
+                  direction,
+                  side_hint,
+                  color,
+                  std::clamp(2.0 * shaft_length * 0.24, 0.55, 1.35),
+                  alpha);
+}
+
 void WaveguideOpenGLWidget::drawArrow(const FieldGlyph &glyph) const
 {
+    // Ствол из трёх и более точек — это кусок силовой линии: такую стрелку
+    // нельзя рисовать отрезком, она обязана гнуться вместе с полем.
+    if (glyph.points.size() > 2) {
+        drawCurvedArrow(glyph);
+        return;
+    }
+
     QVector3D start = glyph.points[0];
     QVector3D end = glyph.points[1];
     double intensity = std::clamp(glyph.magnitude, 0.0, 1.0);
@@ -2178,7 +2521,8 @@ void WaveguideOpenGLWidget::drawPlateStub(const PecPlateParameters &plate,
                                           double half_z,
                                           const QColor &body_color,
                                           double body_alpha,
-                                          const QColor &edge_color) const
+                                          const QColor &edge_color,
+                                          const QMatrix4x4 &frame_rotation) const
 {
     if (!plate.post_enabled || plate.post_width_mm <= 0.0 || plate.post_height_mm <= 0.0) {
         return;
@@ -2193,7 +2537,7 @@ void WaveguideOpenGLWidget::drawPlateStub(const PecPlateParameters &plate,
         return;
     }
     Q_UNUSED(half_x);
-    drawBox(x0, x1, y0, y1, -half_z, half_z, body_color, body_alpha);
+    drawBox(x0, x1, y0, y1, -half_z, half_z, body_color, body_alpha, frame_rotation);
     ::glLineWidth(2.0f);
     drawBoxEdges(x0, x1, y0, y1, -half_z, half_z, edge_color);
 }
@@ -2273,8 +2617,10 @@ void WaveguideOpenGLWidget::drawVolumeSlices() const
     const QMatrix4x4 model_view = modelViewMatrix();
     QVector<int> order;
     QVector<double> eye_depth;
+    QVector<double> normal_coordinate;
     order.reserve(volume_slices_.size());
     eye_depth.reserve(volume_slices_.size());
+    normal_coordinate.reserve(volume_slices_.size());
     for (int index = 0; index < volume_slices_.size(); ++index) {
         const FieldSlice &slice = volume_slices_[index];
         const QVector3D representative =
@@ -2284,6 +2630,9 @@ void WaveguideOpenGLWidget::drawVolumeSlices() const
         order.push_back(index);
         eye_depth.push_back(
             static_cast<double>(model_view.map(representative).z()));
+        normal_coordinate.push_back(slice.plane == FieldSlicePlane::VerticalYZ
+                                        ? static_cast<double>(representative.x())
+                                        : static_cast<double>(representative.y()));
     }
     std::sort(order.begin(), order.end(), [&eye_depth](int left, int right) {
         return eye_depth[left] < eye_depth[right];   // дальние (z меньше) первыми
@@ -2291,16 +2640,121 @@ void WaveguideOpenGLWidget::drawVolumeSlices() const
 
     const GLboolean depth_was_enabled = ::glIsEnabled(GL_DEPTH_TEST);
     ::glDisable(GL_DEPTH_TEST);
-    // Прозрачность подобрана так, чтобы сквозь стопку читались и дальние
-    // плоскости, и стрелки поля поверх неё.
+    // Прозрачность подобрана так, чтобы сквозь облако читались и дальние точки,
+    // и линии поля поверх него.
     const double alpha =
-        std::clamp(2.6 / std::max(1, static_cast<int>(volume_slices_.size())), 0.10, 0.45);
+        std::clamp(3.4 / std::max(1, static_cast<int>(volume_slices_.size())), 0.14, 0.55);
+    // Геометрический шаг между плоскостями выборки — на столько точке разрешено
+    // разбегаться вдоль нормали, иначе облако осталось бы разложенным по
+    // плоскостям. Считается по координате вдоль нормали, а не по глубине в
+    // камере: последняя сжимается косинусом угла и на повороте занижала бы
+    // разброс ровно там, где нарезка виднее всего.
+    double plane_spacing_mm = 0.0;
+    if (normal_coordinate.size() >= 2) {
+        QVector<double> sorted = normal_coordinate;
+        std::sort(sorted.begin(), sorted.end());
+        double minimum_gap = std::numeric_limits<double>::max();
+        for (int index = 1; index < sorted.size(); ++index) {
+            const double gap = sorted[index] - sorted[index - 1];
+            if (gap > 1.0e-6) {
+                minimum_gap = std::min(minimum_gap, gap);
+            }
+        }
+        if (minimum_gap < std::numeric_limits<double>::max()) {
+            plane_spacing_mm = minimum_gap;
+        }
+    }
+    // Круглая точка вместо квадратной: квадраты на редкой сетке снова читаются
+    // как решётка, а не как облако.
+    const GLboolean smooth_was_enabled = ::glIsEnabled(GL_POINT_SMOOTH);
+    ::glEnable(GL_POINT_SMOOTH);
     for (const int index : order) {
-        drawSliceCells(volume_slices_[index], maximum_value, alpha);
+        drawSliceCloud(volume_slices_[index], maximum_value, alpha, plane_spacing_mm);
+    }
+    if (!smooth_was_enabled) {
+        ::glDisable(GL_POINT_SMOOTH);
     }
     if (depth_was_enabled) {
         ::glEnable(GL_DEPTH_TEST);
     }
+}
+
+// Объём показывается облаком точек, а не стопкой залитых плоскостей. Залитые
+// плоскости на повороте видны именно плоскостями: взгляд упирается в ближнюю,
+// а всё, что за ней, читается как ещё одна пластина, и объём распадается на
+// нарезку. Точки этого не делают — сквозь них видно насквозь, и плотность
+// свечения сама показывает, где поля больше.
+//
+// Точка ставится не в центре ячейки, а со сдвигом внутри неё; сдвиг считается
+// по её же координатам, поэтому выборочная решётка перестаёт быть видна, а сама
+// точка не дрожит от кадра к кадру и остаётся в своей ячейке.
+void WaveguideOpenGLWidget::drawSliceCloud(const FieldSlice &slice,
+                                           double maximum_value,
+                                           double alpha,
+                                           double plane_spacing_mm) const
+{
+    if (!slice.valid || slice.cells.isEmpty() || maximum_value <= 0.0) {
+        return;
+    }
+
+    const float cos_phase = static_cast<float>(std::cos(animation_phase_));
+    const float sin_phase = static_cast<float>(std::sin(animation_phase_));
+    const QVector3D plane_normal = slice.plane == FieldSlicePlane::VerticalYZ
+                                       ? QVector3D(1.0f, 0.0f, 0.0f)
+                                       : QVector3D(0.0f, 1.0f, 0.0f);
+
+    // Устойчивый разброс: целочисленная мешалка по координатам ячейки. Одна и та
+    // же ячейка всегда получает один и тот же сдвиг, а соседние — разный.
+    const auto scatter = [](const QVector3D &point, int salt) {
+        auto bits = [](float value) {
+            return static_cast<unsigned>(static_cast<int>(std::lround(value * 64.0f)));
+        };
+        unsigned hash = bits(point.x()) * 73856093u ^ bits(point.y()) * 19349663u ^
+                        bits(point.z()) * 83492791u ^ static_cast<unsigned>(salt) * 2654435761u;
+        hash ^= hash >> 13;
+        hash *= 1274126177u;
+        hash ^= hash >> 16;
+        return static_cast<float>(hash & 0xffffu) / 32768.0f - 1.0f;   // -1 .. 1
+    };
+
+    // Крупная точка на сильном поле и мелкая на слабом читаются как плотность
+    // облака; менять размер внутри одного glBegin нельзя, поэтому точки идут
+    // по нескольким проходам с разным размером.
+    constexpr int size_levels = 4;
+    for (int level = 0; level < size_levels; ++level) {
+        const double low = static_cast<double>(level) / size_levels;
+        const double high = static_cast<double>(level + 1) / size_levels;
+        ::glPointSize(static_cast<GLfloat>(1.6 + 3.2 * (low + high) * 0.5));
+        glBegin(GL_POINTS);
+        for (const FieldSliceCell &cell : slice.cells) {
+            double value = cell.envelope;
+            if (animation_enabled_) {
+                const QVector3D instantaneous = cell.phasor_real * cos_phase -
+                                                cell.phasor_imag * sin_phase;
+                value = static_cast<double>(instantaneous.length());
+            }
+            if (value <= 0.0) {
+                continue;   // металл или невыбранная ячейка — оставляем пустоту
+            }
+            const double t = fieldHeatNormalize(value, maximum_value);
+            if (t < low || t >= high) {
+                continue;
+            }
+            const QColor color = fieldHeatColor(t);
+            // Слабое поле не должно застилать сильное: прозрачность падает
+            // вместе с амплитудой, иначе фон облака съедает его же ядро.
+            glColor4d(color.redF(), color.greenF(), color.blueF(),
+                      std::clamp(alpha * (0.25 + 0.75 * t), 0.0, 1.0));
+            const QVector3D position =
+                cell.center + cell.u_half * scatter(cell.center, 1) +
+                cell.v_half * scatter(cell.center, 2) +
+                plane_normal * static_cast<float>(0.5 * plane_spacing_mm *
+                                                  scatter(cell.center, 3));
+            glVertex3f(position.x(), position.y(), position.z());
+        }
+        glEnd();
+    }
+    ::glPointSize(1.0f);
 }
 
 void WaveguideOpenGLWidget::drawArrowHead(const QVector3D &position,
@@ -2311,7 +2765,18 @@ void WaveguideOpenGLWidget::drawArrowHead(const QVector3D &position,
                                            double alpha) const
 {
     const QVector3D forward = safeNormal(direction, QVector3D(0.0f, 1.0f, 0.0f));
-    const QVector3D side = safeNormal(side_hint, QVector3D(1.0f, 0.0f, 0.0f));
+    // Наконечник — плоский треугольник, и поставленный ребром к камере он
+    // вырождается в чёрточку поперёк линии: вдоль дуги, лежащей в плоскости
+    // взгляда, все наконечники превращались в частокол засечек, и поле читалось
+    // рваным. Поэтому пластинка разворачивается к наблюдателю: остриё смотрит
+    // вдоль поля, а её плоскость выбирается поперёк взгляда. Подсказка вызова
+    // остаётся запасным вариантом на вырожденный случай, когда смотрят точно
+    // вдоль линии и «поперёк взгляда» не определено.
+    QVector3D side = QVector3D::crossProduct(forward, viewDirectionModelSpace());
+    if (side.lengthSquared() < 1.0e-8f) {
+        side = side_hint;
+    }
+    side = safeNormal(side, QVector3D(1.0f, 0.0f, 0.0f));
 
     setColor(color, alpha);
 
@@ -2644,4 +3109,74 @@ double WaveguideOpenGLWidget::modelRadiusMm() const
 void WaveguideOpenGLWidget::setColor(const QColor &color, double alpha) const
 {
     glColor4d(color.redF(), color.greenF(), color.blueF(), alpha);
+}
+
+QVector3D WaveguideOpenGLWidget::viewDirectionModelSpace() const
+{
+    // Модельвью — сдвиг назад и два поворота, поэтому направление на камеру в
+    // осях модели даёт обратный поворот орта +z системы вида. Матрица чистого
+    // поворота обращается транспонированием, читать её из драйвера не нужно.
+    QMatrix4x4 rotation;
+    rotation.rotate(static_cast<float>(rotation_x_), 1.0f, 0.0f, 0.0f);
+    rotation.rotate(static_cast<float>(rotation_y_), 0.0f, 1.0f, 0.0f);
+    return rotation.transposed().mapVector(QVector3D(0.0f, 0.0f, 1.0f)).normalized();
+}
+
+QColor WaveguideOpenGLWidget::metalShade(const QColor &base,
+                                         const QVector3D &normal,
+                                         const QMatrix4x4 &frame_rotation) const
+{
+    QVector3D unit = normal;
+    if (unit.isNull()) {
+        return base;
+    }
+    unit.normalize();
+    // Тело нарисовано в своей повёрнутой системе: взгляд переводится в неё,
+    // а не нормаль в мировую, — так же дешевле и не нужно обращать матрицу
+    // поворота тела дважды.
+    const QVector3D view = frame_rotation.transposed()
+                               .mapVector(viewDirectionModelSpace())
+                               .normalized();
+    // Бесконечно тонкий металл виден с обеих сторон, и грань, отвёрнутая от
+    // камеры, обязана бликовать так же, как обращённая к ней.
+    if (QVector3D::dotProduct(unit, view) < 0.0f) {
+        unit = -unit;
+    }
+    // Источник смещён от оси взгляда вверх и вправо: блик, совпадающий с
+    // центром экрана, не даёт формы — при повороте он стоял бы на месте.
+    const QVector3D light = (view + QVector3D(0.42f, 0.62f, 0.0f)).normalized();
+    const QVector3D halfway = (light + view).normalized();
+    const double diffuse = std::max(0.0f, QVector3D::dotProduct(unit, light));
+    const double specular =
+        std::pow(std::max(0.0f, QVector3D::dotProduct(unit, halfway)), 42.0);
+    // Полированный металл: слабое рассеяние, узкий и сильный зеркальный блик.
+    constexpr double ambient = 0.30;
+    constexpr double diffuse_gain = 0.58;
+    constexpr double specular_gain = 0.90;
+    const double shade = ambient + diffuse_gain * diffuse;
+    const auto channel = [shade, specular, specular_gain](double component) {
+        return std::clamp(component * shade + specular_gain * specular, 0.0, 1.0);
+    };
+    return QColor::fromRgbF(channel(base.redF()),
+                            channel(base.greenF()),
+                            channel(base.blueF()));
+}
+
+void WaveguideOpenGLWidget::setMetalColor(const QColor &base,
+                                          const QVector3D &normal,
+                                          double alpha,
+                                          const QMatrix4x4 &frame_rotation) const
+{
+    const QColor shaded = metalShade(base, normal, frame_rotation);
+    // Блик должен пробиваться и сквозь полупрозрачную стенку, иначе на
+    // просвечивающем корпусе от него не остаётся ничего. Добавка к
+    // непрозрачности намеренно скромная: подними её сильнее — и стенка начнёт
+    // читаться неровной по плотности, будто она где-то толще, где-то тоньше.
+    const double highlight = std::max({shaded.redF() - base.redF(),
+                                       shaded.greenF() - base.greenF(),
+                                       shaded.blueF() - base.blueF()});
+    glColor4d(shaded.redF(),
+              shaded.greenF(),
+              shaded.blueF(),
+              std::clamp(alpha + 0.30 * std::max(0.0, highlight), 0.0, 1.0));
 }

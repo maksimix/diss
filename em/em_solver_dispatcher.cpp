@@ -2,6 +2,7 @@
 
 #include "mode_matching_iris_solver.h"
 #include "analytic_waveguide_solver.h"
+#include "ridged_circular_solver.h"
 #include "transverse_pec_partition_solver.h"
 
 #include <algorithm>
@@ -65,6 +66,25 @@ FieldSolution EmSolverDispatcher::solve(const SimulationRequest &request,
     const bool enabled_shapes = hasEnabledShapes(request.model.shapes);
 
     if (isCircular(request.model.waveguide)) {
+        // Гребни и кольцевые сегменты меняют само сечение, поэтому формулы
+        // гладкого круглого волновода к нему неприменимы: такую структуру
+        // считает метод частичных областей, а вставки в тракте он не описывает.
+        if (hasCircularRidges(request.model.waveguide)) {
+            std::string reason;
+            if (!RidgedCircularWaveguideSolver::canSolve(request, &reason)) {
+                return rejected(request,
+                                "Круглый волновод с гребнями считается методом частичных "
+                                "областей, а он неприменим: " + reason + ".");
+            }
+            if (request.settings.solver_method != SolverMethod::Automatic &&
+                request.settings.solver_method != SolverMethod::ModeMatching) {
+                return rejected(request,
+                                "Круглый волновод с гребнями и кольцевыми сегментами "
+                                "считается методом частичных областей: выберите "
+                                "«Автоматически» или «Метод частичных областей».");
+            }
+            return RidgedCircularWaveguideSolver().solve(request, control);
+        }
         if (enabled_plates || enabled_dielectrics || enabled_slots) {
             return rejected(request,
                             "Для круглого волновода поддержаны пустой тракт и свободные "

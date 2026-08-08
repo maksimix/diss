@@ -72,12 +72,31 @@ struct ShapeParameters
     QVector<QPointF> profile_mm;
 };
 
+// Гребни, кольцевые сегменты и слоистое заполнение круглого сечения — форма
+// самого тракта, а не вставка в нём. Сечение получается отражениями сектора
+// 0..ridge_sector_deg, поэтому число гребней равно 180 / ridge_sector_deg.
+struct CircularRidgeParameters
+{
+    bool enabled = false;
+    // Радиус раздела частичных областей r1: до него идёт сердцевина со своим
+    // диэлектриком, за ним — гребни.
+    double partition_radius_mm = 3.5;
+    double sector_deg = 90.0;      // phi1
+    double ridge_deg = 90.0;       // phi2 <= phi1; равенство — бесконечно тонкий гребень
+    double aperture_deg = 90.0;    // phi3 <= phi2; металл на дуге phi3..phi2
+    double core_permittivity = 1.0;
+    // Длины рядов метода частичных областей.
+    int series_terms = 60;
+    int edge_terms = 3;
+};
+
 struct WaveguideParameters
 {
     // Форма сечения: 0 — прямоугольное, 1 — круглое. У круглого используется
     // radius_mm, у прямоугольного — width_mm и depth_mm.
     int cross_section = 0;
     double radius_mm = 10.0;
+    CircularRidgeParameters ridge;
     double width_mm = 22.86;
     double length_mm = 50.0;
     double depth_mm = 10.16;
@@ -107,6 +126,12 @@ struct WaveguideParameters
     int mode_family = 0;   // 0 — TE (H), 1 — TM (E)
     int mode_m = 1;
     int mode_n = 0;
+    // Круглый волновод с гребнями: мода задаётся условиями на плоскостях
+    // симметрии сектора (0 — электрическая стенка, 1 — магнитная) и номером в
+    // спектре этой пары — H^q_{g1,g2}. Пара (m, n) там смысла не имеет.
+    int mode_g1 = 1;
+    int mode_g2 = 0;
+    int mode_q = 1;
     bool slot_enabled = false;
     double slot_length_mm = 12.0;
     double slot_width_mm = 1.0;
@@ -229,6 +254,11 @@ struct WaveguideMode
     bool transverse_electric = true;
     int m = 0;
     int n = 0;
+    // Гребневое сечение: пара граничных условий и номер моды в её спектре.
+    // Отрицательные g означают обычную моду с индексами m и n.
+    int g1 = -1;
+    int g2 = -1;
+    int q = 0;
     double cutoff_ghz = 0.0;
     bool propagates = false;
 };

@@ -59,9 +59,6 @@
     <ClCompile Include="em\rectangular_mode_field.cpp">
       <Filter>Source Files\EM</Filter>
     </ClCompile>
-    <ClCompile Include="em\rectangular_waveguide_solver.cpp">
-      <Filter>Source Files\EM</Filter>
-    </ClCompile>
     <ClCompile Include="em\transverse_pec_partition_solver.cpp">
       <Filter>Source Files\EM</Filter>
     </ClCompile>
@@ -74,12 +71,63 @@
     <ClCompile Include="postprocessing\slot_excitation_estimator.cpp">
       <Filter>Source Files\Postprocessing</Filter>
     </ClCompile>
+    <ClCompile Include="cst_ribbon.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="expression_spin_box.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="model_parameters.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="parameter_list_widget.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="project_preview_widget.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="em\circular_mode_field.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="em\ridged_circular_solver.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="em\cylindrical_bessel.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="em\gmsh_tetrahedral_mesher.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="em\mfem_frequency_domain_backend.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="em\mode_matching_iris_solver.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="em\analytic_waveguide_solver.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="model_serialization.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <QtMoc Include="calculation_worker.h">
       <Filter>Header Files</Filter>
     </QtMoc>
     <QtMoc Include="main_window.h">
+      <Filter>Header Files</Filter>
+    </QtMoc>
+    <QtMoc Include="cst_ribbon.h">
+      <Filter>Header Files</Filter>
+    </QtMoc>
+    <QtMoc Include="expression_spin_box.h">
+      <Filter>Header Files</Filter>
+    </QtMoc>
+    <QtMoc Include="parameter_list_widget.h">
+      <Filter>Header Files</Filter>
+    </QtMoc>
+    <QtMoc Include="project_preview_widget.h">
       <Filter>Header Files</Filter>
     </QtMoc>
   </ItemGroup>
@@ -117,9 +165,6 @@
     <ClInclude Include="em\rectangular_mode_field.h">
       <Filter>Header Files\EM</Filter>
     </ClInclude>
-    <ClInclude Include="em\rectangular_waveguide_solver.h">
-      <Filter>Header Files\EM</Filter>
-    </ClInclude>
     <ClInclude Include="em\transverse_pec_partition_solver.h">
       <Filter>Header Files\EM</Filter>
     </ClInclude>
@@ -131,6 +176,33 @@
     </ClInclude>
     <ClInclude Include="postprocessing\slot_excitation_estimator.h">
       <Filter>Header Files\Postprocessing</Filter>
+    </ClInclude>
+    <ClInclude Include="em\circular_mode_field.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="em\ridged_circular_solver.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="em\cylindrical_bessel.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="em\gmsh_tetrahedral_mesher.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="em\mfem_frequency_domain_backend.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="em\mode_matching_iris_solver.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="em\analytic_waveguide_solver.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="model_parameters.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="model_serialization.h">
+      <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>
   <ItemGroup>

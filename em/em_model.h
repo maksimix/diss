@@ -36,6 +36,37 @@ enum class WaveguideCrossSection
     Circular
 };
 
+// Гребни, кольцевые сегменты и слоистое заполнение круглого сечения. Углы
+// отсчитываются от оси x против часовой стрелки, радиусы — от оси волновода;
+// внешний радиус берётся из WaveguideGeometry::inner_radius_m (r2).
+//
+//   phi1 — половина углового шага структуры: сечение получается отражениями
+//          сектора 0..phi1 относительно его границ, поэтому число гребней
+//          равно pi / phi1 (при phi1 = pi/2 — два гребня, сверху и снизу);
+//   phi2 — угол грани гребня, phi2 <= phi1; при phi2 = phi1 гребень
+//          бесконечно тонкий;
+//   phi3 — угловая ширина окна связи на r = r1, phi3 <= phi2; металл на
+//          дуге phi3..phi2 и есть кольцевой сегмент, при phi3 = phi2 его нет.
+//
+// Внутри r < r1 стоит диэлектрик core_material, снаружи — общее заполнение
+// волновода. Это описание не тело в тракте, а сама форма сечения: моды такой
+// структуры считаются методом частичных областей, а не формулами гладкого
+// круглого волновода.
+struct CircularRidgeGeometry
+{
+    bool enabled = false;
+    double partition_radius_m = 0.0;         // r1
+    double sector_angle_rad = 0.5 * pi;      // phi1
+    double ridge_angle_rad = 0.5 * pi;       // phi2
+    double aperture_angle_rad = 0.5 * pi;    // phi3
+    Material core_material;
+    // Длины рядов метода частичных областей: series_terms — членов ряда по
+    // собственным функциям частичной области, edge_terms — членов базиса
+    // Гегенбауэра на окне связи.
+    int series_terms = 60;
+    int edge_terms = 3;
+};
+
 struct WaveguideGeometry
 {
     WaveguideCrossSection cross_section = WaveguideCrossSection::Rectangular;
@@ -44,6 +75,7 @@ struct WaveguideGeometry
     double inner_height_m = 0.0;
     // Круглое сечение.
     double inner_radius_m = 0.0;
+    CircularRidgeGeometry ridge;
     double length_m = 0.0;
     double wall_thickness_m = 0.0;
     // Finite wall conductivity for the perturbation conductor-loss model.
@@ -54,6 +86,51 @@ struct WaveguideGeometry
 inline bool isCircular(const WaveguideGeometry &geometry)
 {
     return geometry.cross_section == WaveguideCrossSection::Circular;
+}
+
+// Гребни описаны и действительно меняют сечение. Нулевой или охватывающий всё
+// сечение радиус раздела оставляет гладкий круглый волновод, для которого есть
+// точные формулы, поэтому такая запись гребнями не считается.
+inline bool hasCircularRidges(const WaveguideGeometry &geometry)
+{
+    const CircularRidgeGeometry &ridge = geometry.ridge;
+    return isCircular(geometry) && ridge.enabled && ridge.partition_radius_m > 0.0 &&
+           ridge.partition_radius_m < geometry.inner_radius_m &&
+           ridge.sector_angle_rad > 0.0 && ridge.ridge_angle_rad > 0.0 &&
+           ridge.aperture_angle_rad > 0.0 &&
+           ridge.ridge_angle_rad <= ridge.sector_angle_rad + 1.0e-12 &&
+           ridge.aperture_angle_rad <= ridge.ridge_angle_rad + 1.0e-12;
+}
+
+// Точка сечения лежит в металле гребня: при phi2 < phi1 гребень занимает
+// клин phi2..phi1 за радиусом раздела. Углы приводятся к сектору отражениями,
+// как и поле.
+inline bool insideCircularRidgeMetal(const WaveguideGeometry &geometry,
+                                     double x_m,
+                                     double y_m)
+{
+    if (!hasCircularRidges(geometry)) {
+        return false;
+    }
+    const CircularRidgeGeometry &ridge = geometry.ridge;
+    if (ridge.ridge_angle_rad >= ridge.sector_angle_rad - 1.0e-12) {
+        return false;   // бесконечно тонкий гребень объёма не занимает
+    }
+    const double radius_m = std::sqrt(x_m * x_m + y_m * y_m);
+    if (radius_m <= ridge.partition_radius_m) {
+        return false;
+    }
+    double azimuth_rad = std::atan2(y_m, x_m);
+    if (azimuth_rad < 0.0) {
+        azimuth_rad += 2.0 * pi;
+    }
+    const double steps = azimuth_rad / ridge.sector_angle_rad;
+    const double index = std::floor(steps);
+    const double fraction = steps - index;
+    const double folded_rad =
+        (static_cast<long long>(index) % 2 == 0 ? fraction : 1.0 - fraction) *
+        ridge.sector_angle_rad;
+    return folded_rad > ridge.ridge_angle_rad;
 }
 
 // Полуразмеры описанного прямоугольника сечения. Для круглого волновода это
@@ -167,6 +244,102 @@ inline bool insidePlateStub(const PecPlateGeometry &plate,
     const double bottom_m = -0.5 * plate.size_m.y;
     return std::abs(local_x_m - plate.aperture_offset_x_m) <= 0.5 * plate.post_width_m &&
            local_y_m >= bottom_m && local_y_m <= bottom_m + plate.post_height_m;
+}
+
+// Отрезок пересекает бесконечно тонкий металл гребневого сечения: грань гребня
+// (полуплоскость phi = phi2 за радиусом раздела) или кольцевой сегмент (дугу
+// r = r1 от phi3 до phi2). Толщины у такого металла нет, поэтому попадание в
+// него точкой не проверить — только пересечением отрезка.
+//
+// Это нужно построению силовых линий: касательное E на металле равно нулю,
+// линия обязана на нём кончиться. Шаг интегрирования конечен и через лист
+// перепрыгивает, а линия продолжается по ту сторону изломом — как будто поле
+// разрывное. Возвращает долю отрезка до пересечения в crossing_fraction.
+inline bool crossesCircularRidgeSheet(const WaveguideGeometry &geometry,
+                                      const Vec3 &from_m,
+                                      const Vec3 &to_m,
+                                      double *crossing_fraction)
+{
+    if (!hasCircularRidges(geometry)) {
+        return false;
+    }
+    const CircularRidgeGeometry &ridge = geometry.ridge;
+    const double sector = ridge.sector_angle_rad;
+    const double from_radius = std::sqrt(from_m.x * from_m.x + from_m.y * from_m.y);
+    const double to_radius = std::sqrt(to_m.x * to_m.x + to_m.y * to_m.y);
+
+    // Свёрнутый угол в секторе: он же используется и полем, поэтому лист
+    // ищется там, где поле действительно ставит границу.
+    const auto folded = [sector](double x_m, double y_m) {
+        double azimuth_rad = std::atan2(y_m, x_m);
+        if (azimuth_rad < 0.0) {
+            azimuth_rad += 2.0 * pi;
+        }
+        const double steps = azimuth_rad / sector;
+        const double index = std::floor(steps);
+        const double fraction = steps - index;
+        return (static_cast<long long>(index) % 2 == 0 ? fraction : 1.0 - fraction) * sector;
+    };
+
+    // Грань бесконечно тонкого гребня стоит ровно на границе секторов, и
+    // свёрнутый угол там не меняет знак, а разворачивается: по обе стороны от
+    // листа он один и тот же. Поэтому пересечение ищется по номеру сектора.
+    // Границы чередуются: чётная — плоскость симметрии phi = 0, нечётная —
+    // сам гребень. У гребня с конечной толщиной листа нет, там металл занимает
+    // клин, и его ловит insideCircularRidgeMetal по точке.
+    if (ridge.ridge_angle_rad >= ridge.sector_angle_rad - 1.0e-12 &&
+        std::min(from_radius, to_radius) > ridge.partition_radius_m) {
+        double from_azimuth = std::atan2(from_m.y, from_m.x);
+        double to_azimuth = std::atan2(to_m.y, to_m.x);
+        // Короткий путь: иначе переход через phi = 0 читался бы как облёт всего
+        // сечения и давал бы ложные пересечения.
+        if (to_azimuth - from_azimuth > pi) {
+            to_azimuth -= 2.0 * pi;
+        } else if (from_azimuth - to_azimuth > pi) {
+            to_azimuth += 2.0 * pi;
+        }
+        const double from_step = from_azimuth / sector;
+        const double to_step = to_azimuth / sector;
+        const long long from_index = static_cast<long long>(std::floor(from_step));
+        const long long to_index = static_cast<long long>(std::floor(to_step));
+        if (from_index != to_index) {
+            const long long boundary = std::max(from_index, to_index);
+            // Нечётная граница — гребень; чётная — плоскость симметрии, металла
+            // на ней нет. Остаток берётся с приведением к положительному, чтобы
+            // отрицательные номера секторов не сбивали чётность.
+            if (((boundary % 2) + 2) % 2 != 0) {
+                if (crossing_fraction != nullptr) {
+                    const double span = to_step - from_step;
+                    *crossing_fraction =
+                        std::abs(span) > 1.0e-12
+                            ? std::clamp((boundary - from_step) / span, 0.0, 1.0)
+                            : 0.0;
+                }
+                return true;
+            }
+        }
+    }
+
+    // Кольцевой сегмент: радиус переходит через r1 там, где на этой дуге стоит
+    // металл, то есть при свёрнутом угле между phi3 и phi2.
+    const double from_step = from_radius - ridge.partition_radius_m;
+    const double to_step = to_radius - ridge.partition_radius_m;
+    if (from_step * to_step < 0.0 &&
+        ridge.aperture_angle_rad < ridge.ridge_angle_rad - 1.0e-12) {
+        const double span = std::abs(from_step) + std::abs(to_step);
+        const double fraction = span > 0.0 ? std::abs(from_step) / span : 0.0;
+        const double crossing_x = from_m.x + (to_m.x - from_m.x) * fraction;
+        const double crossing_y = from_m.y + (to_m.y - from_m.y) * fraction;
+        const double crossing_angle = folded(crossing_x, crossing_y);
+        if (crossing_angle > ridge.aperture_angle_rad &&
+            crossing_angle < ridge.ridge_angle_rad) {
+            if (crossing_fraction != nullptr) {
+                *crossing_fraction = fraction;
+            }
+            return true;
+        }
+    }
+    return false;
 }
 
 // ------------------------------------------------------------- формы -------
@@ -478,6 +651,12 @@ struct ModeSelection
     ModeFamily family = ModeFamily::TransverseElectric;
     int m = 1;
     int n = 0;
+    // Круглый волновод с гребнями: мода задаётся не парой (m, n), а условиями
+    // на плоскостях симметрии сектора и номером в спектре этой пары —
+    // H^q_{g1,g2}. Для остальных сечений эти поля не читаются.
+    int g1 = 1;
+    int g2 = 0;
+    int q = 1;
 };
 
 enum class GeometryApproximationPolicy

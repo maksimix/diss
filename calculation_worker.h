@@ -15,7 +15,7 @@ public:
     explicit CalculationWorker(QObject *parent = nullptr);
     // Thread-safe: the GUI calls this directly to interrupt the active request.
     void setLatestRequestId(int request_id) noexcept;
-    // Аналогично для перестройки стрелок: устаревший запрос обрывается, как
+    // Аналогично для перестройки глифов поля: устаревший запрос обрывается, как
     // только интерфейс выдал более новый (или обнулил счётчик при новом
     // расчёте либо закрытии окна).
     void setLatestGlyphRequestId(int request_id) noexcept;
@@ -26,12 +26,12 @@ public:
 public slots:
     void calculate(int request_id,
                    const WaveguideParameters &parameters,
-                   double arrow_density);
+                   double line_density);
     // Перестраивает линии и стрелки поля по уже готовому решению — без запуска
-    // решателя. Вызывается при смене концентрации стрелок пользователем.
+    // решателя. Вызывается при смене концентрации линий пользователем.
     void regenerateGlyphs(int glyph_request_id,
                           std::shared_ptr<const em::FieldSolution> field_solution,
-                          double arrow_density);
+                          double line_density);
     // Пересобирает срез |E| на смещённой плоскости (slice_plane —
     // FieldSlicePlane как int, offset_fraction — доля поперечника [-0.5, 0.5]).
     void rebuildSlice(int fill_request_id,

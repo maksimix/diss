@@ -90,6 +90,10 @@ bool insideVolume(const em::WaveguideGeometry &geometry,
     // Сечение может быть и круглым: проверка формы вынесена в модель, поэтому
     // обрезка линий поля по стенке одинаково работает для обоих случаев.
     return em::insideCrossSection(geometry, position_m.x, position_m.y, tolerance_m) &&
+           // Гребень конечной толщины занимает клин сечения: это металл, и поле
+           // внутри него не живёт. У бесконечно тонкого гребня объёма нет, и
+           // его ловит проверка пересечения отрезком.
+           !em::insideCircularRidgeMetal(geometry, position_m.x, position_m.y) &&
            position_m.z >= -0.5 * geometry.length_m - tolerance_m &&
            position_m.z <= 0.5 * geometry.length_m + tolerance_m;
 }
@@ -207,6 +211,19 @@ std::vector<em::Vec3> traceVolumeDirection(const em::FieldSolution &solution,
             points.push_back(lastInsidePoint(geometry, position_m, next_position_m));
             break;
         }
+        // Бесконечно тонкий металл гребневого сечения точкой не ловится: у него
+        // нет толщины, и шаг интегрирования через него перепрыгивает. Линия
+        // обязана на нём кончиться — касательное E на металле равно нулю, и
+        // продолжение по ту сторону было бы не полем, а изломом.
+        double crossing_fraction = 0.0;
+        if (em::crossesCircularRidgeSheet(geometry,
+                                          position_m,
+                                          next_position_m,
+                                          &crossing_fraction)) {
+            points.push_back(position_m +
+                             (next_position_m - position_m) * crossing_fraction);
+            break;
+        }
 
         points.push_back(next_position_m);
         position_m = next_position_m;
@@ -251,6 +268,47 @@ std::vector<em::Vec3> traceVolumeLine(const em::FieldSolution &solution,
     }
     std::reverse(backward.begin(), backward.end());
     backward.push_back(seed_m);
+    backward.insert(backward.end(), forward.begin(), forward.end());
+    return backward;
+}
+
+// Кусок силовой линии вокруг точки — ствол стрелки, лежащей строго на линии.
+// Прямая стрелка на изогнутом поле неизбежно сходит с линии, и тем сильнее, чем
+// круче изгиб: она срезает угол и повисает рядом. Поэтому ствол берётся из той
+// же траектории, что и сама линия, а не из направления поля в одной точке.
+std::vector<em::Vec3> volumeArrowPath(const em::FieldSolution &solution,
+                                      FieldQuantity quantity,
+                                      const em::Vec3 &center_m,
+                                      double phase_rad,
+                                      double half_length_m,
+                                      double minimum_magnitude,
+                                      const GenerationControl &control)
+{
+    // Шести шагов на сторону хватает: на длине стрелки поле не успевает
+    // повернуть настолько, чтобы ломаная отличалась от кривой на глаз.
+    constexpr int steps_per_side = 6;
+    const double step_m = half_length_m / steps_per_side;
+    if (!(step_m > 0.0)) {
+        return {};
+    }
+    std::vector<em::Vec3> backward = traceVolumeDirection(solution,
+                                                          quantity,
+                                                          center_m,
+                                                          phase_rad,
+                                                          -step_m,
+                                                          minimum_magnitude,
+                                                          steps_per_side,
+                                                          control);
+    std::vector<em::Vec3> forward = traceVolumeDirection(solution,
+                                                         quantity,
+                                                         center_m,
+                                                         phase_rad,
+                                                         step_m,
+                                                         minimum_magnitude,
+                                                         steps_per_side,
+                                                         control);
+    std::reverse(backward.begin(), backward.end());
+    backward.push_back(center_m);
     backward.insert(backward.end(), forward.begin(), forward.end());
     return backward;
 }
@@ -307,17 +365,17 @@ bool isDominantTe10(const em::FieldSolution &solution)
            mode.m == 1 && mode.n == 0;
 }
 
-constexpr double minimum_arrow_density = 0.25;
-constexpr double maximum_arrow_density = 4.0;
+constexpr double minimum_line_density = 0.25;
+constexpr double maximum_line_density = 4.0;
 
-// Множитель шага сетки посева вдоль одной оси при заданной концентрации
-// стрелок. Показатель 1/2 (грани) или 1/3 (объём) делит множитель между осями
-// так, что полное число стрелок растёт примерно пропорционально самой
+// Множитель числа точек посева вдоль одной оси при заданной концентрации линий.
+// Показатель 1/2 (посев по грани) или 1/3 (посев по объёму) делит множитель
+// между осями так, что полное число линий растёт примерно пропорционально самой
 // концентрации, а не её квадрату или кубу.
-double arrowAxisFactor(double arrow_density, double axis_exponent)
+double lineAxisFactor(double line_density, double axis_exponent)
 {
     const double density =
-        std::clamp(arrow_density, minimum_arrow_density, maximum_arrow_density);
+        std::clamp(line_density, minimum_line_density, maximum_line_density);
     return std::pow(density, axis_exponent);
 }
 
@@ -331,7 +389,7 @@ int scaledSeedCount(int base_count, double axis_factor)
 void appendTe10ElectricFluxArrows(std::vector<VisualizationPrimitive> &primitives,
                                   const em::FieldSolution &solution,
                                   double phase_rad,
-                                  double arrow_density,
+                                  double line_density,
                                   const GenerationControl &control)
 {
     const em::WaveguideGeometry &geometry = solution.request.model.waveguide;
@@ -354,9 +412,13 @@ void appendTe10ElectricFluxArrows(std::vector<VisualizationPrimitive> &primitive
         return;
     }
 
-    // Сетка посева двумерная (x поперёк, z вдоль), поэтому концентрация делится
-    // между осями как корень.
-    const double axis_factor = arrowAxisFactor(arrow_density, 0.5);
+    // Это не глиф направления, а эпюра амплитуды: каждая стрелка — своя трубка
+    // потока, и её точки взяты по равным квантилям потока. Число трубок и есть
+    // число линий электрического поля у доминирующей моды, поэтому концентрация
+    // линий управляет им наравне с обычными силовыми линиями. Сетка посева
+    // двумерная (x поперёк, z вдоль), поэтому множитель делится между осями как
+    // корень.
+    const double axis_factor = lineAxisFactor(line_density, 0.5);
     const int maximum_arrows_per_slice = scaledSeedCount(13, axis_factor);
     const int z_count = scaledSeedCount(11, axis_factor);
     const double maximum_arrow_length_m = 0.94 * geometry.inner_height_m;
@@ -472,6 +534,7 @@ void appendVolumeLines(std::vector<VisualizationPrimitive> &primitives,
                        const em::FieldSolution &solution,
                        FieldQuantity quantity,
                        double phase_rad,
+                       double line_density,
                        const GenerationControl &control)
 {
     const em::WaveguideGeometry &geometry = solution.request.model.waveguide;
@@ -488,9 +551,15 @@ void appendVolumeLines(std::vector<VisualizationPrimitive> &primitives,
                                     geometry.length_m}) /
                           82.0;
     const double minimum_magnitude = maximum_magnitude * 0.025;
-    const int x_count = quantity == FieldQuantity::Electric ? 7 : 6;
-    const int y_count = quantity == FieldQuantity::Electric ? 3 : 4;
-    const int z_count = quantity == FieldQuantity::Electric ? 8 : 7;
+    // Посев объёмный, поэтому концентрация делится между тремя осями: полное
+    // число линий растёт вместе с ней, а не как её куб.
+    const double axis_factor = lineAxisFactor(line_density, 1.0 / 3.0);
+    const int x_count =
+        scaledSeedCount(quantity == FieldQuantity::Electric ? 7 : 6, axis_factor);
+    const int y_count =
+        scaledSeedCount(quantity == FieldQuantity::Electric ? 3 : 4, axis_factor);
+    const int z_count =
+        scaledSeedCount(quantity == FieldQuantity::Electric ? 8 : 7, axis_factor);
 
     for (int z_index = 0; z_index < z_count; ++z_index) {
         if (control.isCancellationRequested()) {
@@ -687,12 +756,13 @@ std::vector<em::Vec3> traceSurfaceDirection(const em::FieldSolution &solution,
                                             double phase_rad,
                                             double signed_step_m,
                                             double minimum_magnitude,
-                                            const GenerationControl &control)
+                                            const GenerationControl &control,
+                                            int maximum_steps = 420)
 {
     std::vector<em::Vec3> points_m;
     SurfaceState state = seed;
     const em::WaveguideGeometry &geometry = solution.request.model.waveguide;
-    for (int step_index = 0; step_index < 420; ++step_index) {
+    for (int step_index = 0; step_index < maximum_steps; ++step_index) {
         if (control.isCancellationRequested()) {
             return {};
         }
@@ -1028,6 +1098,7 @@ void appendPlateCurrentLines(std::vector<VisualizationPrimitive> &primitives,
 void appendSurfaceCurrentLines(std::vector<VisualizationPrimitive> &primitives,
                                const em::FieldSolution &solution,
                                double phase_rad,
+                               double line_density,
                                const GenerationControl &control)
 {
     const em::WaveguideGeometry &geometry = solution.request.model.waveguide;
@@ -1061,8 +1132,10 @@ void appendSurfaceCurrentLines(std::vector<VisualizationPrimitive> &primitives,
             continue;
         }
         const double minimum_magnitude = maximum_magnitude * 0.025;
-        constexpr int u_count = 7;
-        constexpr int z_count = 11;
+        // Посев по грани — две оси, поэтому концентрация делится пополам.
+        const double axis_factor = lineAxisFactor(line_density, 0.5);
+        const int u_count = scaledSeedCount(7, axis_factor);
+        const int z_count = scaledSeedCount(11, axis_factor);
         for (int z_index = 0; z_index < z_count; ++z_index) {
             const double z_m = -0.92 * half_length_m +
                                z_index * 1.84 * half_length_m / (z_count - 1);
@@ -1121,7 +1194,6 @@ void appendWallElectricArrows(std::vector<VisualizationPrimitive> &primitives,
                               const em::FieldSolution &solution,
                               double phase_rad,
                               double maximum_electric,
-                              double arrow_density,
                               const GenerationControl &control)
 {
     if (maximum_electric <= vector_tolerance) {
@@ -1138,15 +1210,15 @@ void appendWallElectricArrows(std::vector<VisualizationPrimitive> &primitives,
         {em::WallSurface::Left, {1.0, 0.0, 0.0}, 0.5 * geometry.inner_height_m},
     }};
     const double half_length_m = 0.5 * geometry.length_m;
-    // При уплотнении сетки посева стрелка укорачивается тем же множителем, что
-    // и шаг сетки, — иначе соседние стрелки наезжают друг на друга.
-    const double axis_factor = arrowAxisFactor(arrow_density, 0.5);
+    // Стрелка — глиф направления, а не линия поля: её сетка подобрана так,
+    // чтобы наконечники не набегали друг на друга, и концентрацией линий не
+    // управляется.
     const double base_length_m = std::min(geometry.inner_width_m,
                                           geometry.inner_height_m) *
-                                 0.13 / axis_factor;
+                                 0.13;
     const double sample_offset_m = base_length_m * 0.12;
-    const int z_count = scaledSeedCount(9, axis_factor);
-    const int u_count = scaledSeedCount(6, axis_factor);
+    const int z_count = 9;
+    const int u_count = 6;
 
     for (const WallDefinition &wall : walls) {
         if (control.isCancellationRequested()) {
@@ -1330,16 +1402,19 @@ double maximumFieldEnvelope(const em::FieldSolution &solution,
     return maximum;
 }
 
-// True three-dimensional field arrows (all vector components). Unlike the
-// stylised TE10 flux arrows and the streamlines, these reveal the transverse
-// and longitudinal components that appear near a plate or post, and they carry
-// the complex phasor so the widget can animate the running wave. Used for both
-// the electric and the magnetic field.
+// Истинный трёхмерный вектор поля стрелками по сетке — не замена силовым
+// линиям, а дополнение там, где линий нет. У доминирующей H10 электрическое
+// поле рисуется амплитудной эпюрой по профилю моды, и около пластины эта эпюра
+// врёт: поле там уже не мода. Вот тогда и нужны стрелки настоящего вектора.
+//
+// Ставить такие стрелки рядом с уже нарисованными линиями нельзя: они сеются по
+// своей сетке, каждая ложится на свою траекторию поля, и в кадре получается
+// частокол рядом с линиями, а не на них. Поэтому для магнитного поля их больше
+// нет — там есть линии, и стрелки несут сами линии.
 void appendVolumeVectorArrows(std::vector<VisualizationPrimitive> &primitives,
                               const em::FieldSolution &solution,
                               FieldQuantity quantity,
                               double phase_rad,
-                              double arrow_density,
                               const GenerationControl &control)
 {
     const em::WaveguideGeometry &geometry = solution.request.model.waveguide;
@@ -1353,18 +1428,13 @@ void appendVolumeVectorArrows(std::vector<VisualizationPrimitive> &primitives,
     // 1.6 mm apart across the width, so 0.13 of the smallest guide dimension
     // (1.3 mm at full strength) keeps every arrow inside its own cell. The old
     // 0.40 gave 4.1 mm arrows on a 2.4 mm pitch - longer than the spacing.
-    //
-    // Density is a count multiplier over a three dimensional grid, so each axis
-    // takes its cube root; the arrow shrinks by the same factor so a denser
-    // field stays as readable as a sparse one.
-    const double axis_scale = arrowAxisFactor(arrow_density, 1.0 / 3.0);
     const double base_length_m = std::min({geometry.inner_width_m,
                                           geometry.inner_height_m,
                                           geometry.length_m}) *
-                                 0.13 / axis_scale;
-    const int x_count = scaledSeedCount(15, axis_scale);
-    const int y_count = scaledSeedCount(5, axis_scale);
-    const int z_count = scaledSeedCount(25, axis_scale);
+                                 0.13;
+    const int x_count = 15;
+    const int y_count = 5;
+    const int z_count = 25;
     for (int z_index = 0; z_index < z_count; ++z_index) {
         if (control.isCancellationRequested()) {
             return;
@@ -1396,16 +1466,32 @@ void appendVolumeVectorArrows(std::vector<VisualizationPrimitive> &primitives,
                     continue;
                 }
                 const em::Vec3 direction = instantaneous / instantaneous_magnitude;
-                const double arrow_length_m =
-                    base_length_m * (0.4 + 0.6 * std::min(1.0, normalized_magnitude));
 
                 VisualizationPrimitive primitive;
                 primitive.quantity = quantity;
                 primitive.kind = PrimitiveKind::Arrow;
-                primitive.points_m = {
-                    center_m - direction * (0.5 * arrow_length_m),
-                    center_m + direction * (0.5 * arrow_length_m),
-                };
+                // Ствол — кусок силовой линии через эту точку, чтобы стрелка
+                // гнулась вместе с полем, а не срезала угол.
+                std::vector<em::Vec3> path = volumeArrowPath(solution,
+                                                             quantity,
+                                                             center_m,
+                                                             phase_rad,
+                                                             0.5 * base_length_m,
+                                                             maximum_envelope * 0.01,
+                                                             control);
+                if (control.isCancellationRequested()) {
+                    return;
+                }
+                if (path.size() >= 3) {
+                    primitive.points_m = std::move(path);
+                } else {
+                    const double arrow_length_m =
+                        base_length_m * (0.4 + 0.6 * std::min(1.0, normalized_magnitude));
+                    primitive.points_m = {
+                        center_m - direction * (0.5 * arrow_length_m),
+                        center_m + direction * (0.5 * arrow_length_m),
+                    };
+                }
                 primitive.normalized_magnitude = std::min(1.0, normalized_magnitude);
                 primitive.animated = true;
                 primitive.anchor_m = center_m;
@@ -1452,7 +1538,6 @@ em::Vec3 rotateVector(const em::Vec3 &rotation_rad, const em::Vec3 &vector)
 void appendWallCurrentArrows(std::vector<VisualizationPrimitive> &primitives,
                              const em::FieldSolution &solution,
                              double phase_rad,
-                             double arrow_density,
                              const GenerationControl &control)
 {
     const em::WaveguideGeometry &geometry = solution.request.model.waveguide;
@@ -1469,14 +1554,12 @@ void appendWallCurrentArrows(std::vector<VisualizationPrimitive> &primitives,
     const double inside_offset_m =
         std::max(1.0e-9,
                  std::min(geometry.inner_width_m, geometry.inner_height_m) * 1.0e-6);
-    // Сетка посева на стенке двумерная, поэтому концентрация делится между
-    // осями как корень; длина стрелки сжимается тем же множителем, чтобы при
-    // уплотнении соседние стрелки не сливались.
-    const double axis_factor = arrowAxisFactor(arrow_density, 0.5);
+    // Сетка посева на стенке подобрана по длине стрелки: гуще — и наконечники
+    // сливаются в сплошную полосу, реже — теряется рисунок тока.
     const double arrow_base_m =
-        std::min(geometry.inner_width_m, geometry.inner_height_m) * 0.34 / axis_factor;
-    const int u_count = scaledSeedCount(5, axis_factor);
-    const int z_count = scaledSeedCount(9, axis_factor);
+        std::min(geometry.inner_width_m, geometry.inner_height_m) * 0.34;
+    const int u_count = 5;
+    const int z_count = 9;
 
     for (const WallDefinition &wall : walls) {
         if (control.isCancellationRequested()) {
@@ -1485,6 +1568,7 @@ void appendWallCurrentArrows(std::vector<VisualizationPrimitive> &primitives,
         struct WallHit
         {
             em::Vec3 point_m;
+            SurfaceState state;   // та же точка в координатах грани — для трассировки
             em::ComplexVec3 phasor;
             double envelope = 0.0;
         };
@@ -1517,7 +1601,7 @@ void appendWallCurrentArrows(std::vector<VisualizationPrimitive> &primitives,
                 // The arrow must sit exactly on the metal: a surface current
                 // lives on the wall, not in the volume above it.
                 maximum_envelope = std::max(maximum_envelope, envelope);
-                hits.push_back({wall_point_m, phasor, envelope});
+                hits.push_back({wall_point_m, SurfaceState{u_m, z_m}, phasor, envelope});
             }
         }
 
@@ -1537,15 +1621,45 @@ void appendWallCurrentArrows(std::vector<VisualizationPrimitive> &primitives,
             const em::Vec3 direction = instantaneous_magnitude > vector_tolerance
                                            ? instantaneous / instantaneous_magnitude
                                            : em::Vec3{0.0, 0.0, 1.0};
-            const double arrow_length_m =
-                arrow_base_m * (0.4 + 0.6 * std::min(1.0, normalized_magnitude));
             VisualizationPrimitive primitive;
             primitive.quantity = FieldQuantity::SurfaceCurrent;
             primitive.kind = PrimitiveKind::Arrow;
-            primitive.points_m = {
-                hit.point_m - direction * (0.5 * arrow_length_m),
-                hit.point_m + direction * (0.5 * arrow_length_m),
-            };
+            // Ствол — кусок линии тока по этой же грани: ток течёт по кривой, и
+            // прямая стрелка на повороте сходит с неё.
+            constexpr int steps_per_side = 6;
+            const double trace_step_m = 0.5 * arrow_base_m / steps_per_side;
+            std::vector<em::Vec3> backward = traceSurfaceDirection(solution,
+                                                                   wall,
+                                                                   hit.state,
+                                                                   phase_rad,
+                                                                   -trace_step_m,
+                                                                   maximum_envelope * 0.01,
+                                                                   control,
+                                                                   steps_per_side);
+            std::vector<em::Vec3> forward = traceSurfaceDirection(solution,
+                                                                  wall,
+                                                                  hit.state,
+                                                                  phase_rad,
+                                                                  trace_step_m,
+                                                                  maximum_envelope * 0.01,
+                                                                  control,
+                                                                  steps_per_side);
+            if (control.isCancellationRequested()) {
+                return;
+            }
+            std::reverse(backward.begin(), backward.end());
+            backward.push_back(hit.point_m);
+            backward.insert(backward.end(), forward.begin(), forward.end());
+            if (backward.size() >= 3) {
+                primitive.points_m = std::move(backward);
+            } else {
+                const double arrow_length_m =
+                    arrow_base_m * (0.4 + 0.6 * std::min(1.0, normalized_magnitude));
+                primitive.points_m = {
+                    hit.point_m - direction * (0.5 * arrow_length_m),
+                    hit.point_m + direction * (0.5 * arrow_length_m),
+                };
+            }
             primitive.normalized_magnitude = std::min(1.0, normalized_magnitude);
             primitive.animated = true;
             primitive.anchor_m = hit.point_m;
@@ -1563,21 +1677,18 @@ void appendWallCurrentArrows(std::vector<VisualizationPrimitive> &primitives,
 void appendPlateCurrentArrows(std::vector<VisualizationPrimitive> &primitives,
                               const em::FieldSolution &solution,
                               double phase_rad,
-                              double arrow_density,
                               const GenerationControl &control)
 {
     const em::WaveguideGeometry &geometry = solution.request.model.waveguide;
     const double offset_m =
         std::max(1.0e-9,
                  std::min(geometry.inner_width_m, geometry.inner_height_m) * 1.0e-6);
-    // Грань пластины — та же двумерная сетка, что и стенка: корень из
-    // концентрации на каждую ось и укороченная в то же число раз стрелка.
-    const double axis_factor = arrowAxisFactor(arrow_density, 0.5);
+    // Грань пластины — та же фиксированная сетка, что и стенка тракта.
     const double arrow_base_m =
-        std::min(geometry.inner_width_m, geometry.inner_height_m) * 0.10 / axis_factor;
+        std::min(geometry.inner_width_m, geometry.inner_height_m) * 0.10;
     const em::Vec3 unit_axis[3] = {{1.0, 0.0, 0.0}, {0.0, 1.0, 0.0}, {0.0, 0.0, 1.0}};
-    const int samples_u = scaledSeedCount(5, axis_factor);
-    const int samples_v = scaledSeedCount(5, axis_factor);
+    const int samples_u = 5;
+    const int samples_v = 5;
 
     struct FaceHit
     {
@@ -1697,13 +1808,14 @@ std::vector<VisualizationPrimitive> FieldVisualizationGenerator::generate(
             appendTe10ElectricFluxArrows(primitives,
                                          solution,
                                          settings.phase_rad,
-                                         settings.arrow_density,
+                                         settings.line_density,
                                          control);
         } else {
             appendVolumeLines(primitives,
                               solution,
                               FieldQuantity::Electric,
                               settings.phase_rad,
+                              settings.line_density,
                               control);
         }
         if (control.isCancellationRequested()) {
@@ -1717,7 +1829,6 @@ std::vector<VisualizationPrimitive> FieldVisualizationGenerator::generate(
                                                             FieldQuantity::Electric,
                                                             settings.phase_rad,
                                                             control),
-                                     settings.arrow_density,
                                      control);
         }
         if (control.isCancellationRequested()) {
@@ -1730,7 +1841,6 @@ std::vector<VisualizationPrimitive> FieldVisualizationGenerator::generate(
                                      solution,
                                      FieldQuantity::Electric,
                                      settings.phase_rad,
-                                     settings.arrow_density,
                                      control);
             if (control.isCancellationRequested()) {
                 return {};
@@ -1742,32 +1852,21 @@ std::vector<VisualizationPrimitive> FieldVisualizationGenerator::generate(
                           solution,
                           FieldQuantity::Magnetic,
                           settings.phase_rad,
+                          settings.line_density,
                           control);
-        if (control.isCancellationRequested()) {
-            return {};
-        }
-        // Streamlines are traced once and cannot follow the phase, so the
-        // magnetic field also gets animatable vector arrows — otherwise H would
-        // stand still while E oscillates.
-        appendVolumeVectorArrows(primitives,
-                                 solution,
-                                 FieldQuantity::Magnetic,
-                                 settings.phase_rad,
-                                 settings.arrow_density,
-                                 control);
         if (control.isCancellationRequested()) {
             return {};
         }
     }
     if (settings.generate_surface_current) {
-        appendSurfaceCurrentLines(primitives, solution, settings.phase_rad, control);
+        appendSurfaceCurrentLines(primitives, solution, settings.phase_rad,
+                                  settings.line_density, control);
         if (control.isCancellationRequested()) {
             return {};
         }
         appendPlateCurrentArrows(primitives,
                                  solution,
                                  settings.phase_rad,
-                                 settings.arrow_density,
                                  control);
         if (control.isCancellationRequested()) {
             return {};
@@ -1775,7 +1874,6 @@ std::vector<VisualizationPrimitive> FieldVisualizationGenerator::generate(
         appendWallCurrentArrows(primitives,
                                 solution,
                                 settings.phase_rad,
-                                settings.arrow_density,
                                 control);
         if (control.isCancellationRequested()) {
             return {};

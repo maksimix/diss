@@ -121,6 +121,10 @@ private:
                            const QColor &metal_color,
                            const QColor &edge_color,
                            double body_alpha) const;
+    // Гребни, кольцевые сегменты и диэлектрическая сердцевина круглого сечения.
+    // Это форма самого тракта, а не вставка в нём, поэтому рисуется вместе с
+    // корпусом и не зависит от выбора тела в дереве.
+    void drawCircularRidges(double inner_radius, double half_length) const;
     void drawSlot() const;
     // Непрозрачность стенок тракта по режиму отображения корпуса: в
     // автоматическом режиме корпус светлеет, как только в дереве выбрано тело
@@ -140,6 +144,21 @@ private:
                         double body_alpha,
                         const QColor &edge_color,
                         bool wireframe) const;
+    // Металл отличается от диэлектрика и от вспомогательной геометрии не
+    // цветом, а бликом: доля отражённого света считается по нормали грани и
+    // направлению взгляда. Источник закреплён за камерой, поэтому при повороте
+    // модели блик едет по поверхности — именно это и читается как металл, а не
+    // как полупрозрачная оболочка. Тела рисуются внутри своих поворотов, и для
+    // них передаётся поворот локальной системы, иначе блик считался бы по
+    // чужим осям.
+    QVector3D viewDirectionModelSpace() const;
+    QColor metalShade(const QColor &base,
+                      const QVector3D &normal,
+                      const QMatrix4x4 &frame_rotation = QMatrix4x4()) const;
+    void setMetalColor(const QColor &base,
+                       const QVector3D &normal,
+                       double alpha,
+                       const QMatrix4x4 &frame_rotation = QMatrix4x4()) const;
     void drawBox(double min_x,
                  double max_x,
                  double min_y,
@@ -147,7 +166,8 @@ private:
                  double min_z,
                  double max_z,
                  const QColor &color,
-                 double alpha) const;
+                 double alpha,
+                 const QMatrix4x4 &frame_rotation = QMatrix4x4()) const;
     void drawBoxEdges(double min_x,
                       double max_x,
                       double min_y,
@@ -162,8 +182,17 @@ private:
                        double half_z,
                        const QColor &body_color,
                        double body_alpha,
-                       const QColor &edge_color) const;
+                       const QColor &edge_color,
+                       const QMatrix4x4 &frame_rotation = QMatrix4x4()) const;
     void drawFieldSlice() const;
+    // Одна плоскость выборки, показанная точками, а не заливкой: из таких
+    // плоскостей складывается объёмное облако. plane_spacing_mm — расстояние до
+    // соседней плоскости стопки, в его пределах точке разрешено разбегаться
+    // вдоль нормали, чтобы решётка выборки не читалась нарезкой.
+    void drawSliceCloud(const FieldSlice &slice,
+                        double maximum_value,
+                        double alpha,
+                        double plane_spacing_mm) const;
     // Клетки одного среза; maximum_value — общий масштаб цвета (у стопки он
     // один на все плоскости, чтобы цвета срезов были сравнимы между собой).
     void drawSliceCells(const FieldSlice &slice,
@@ -171,6 +200,11 @@ private:
                         double alpha) const;
     void drawVolumeSlices() const;
     void drawArrow(const FieldGlyph &glyph) const;
+    // Стрелка, ствол которой — кусок самой силовой линии. Прямой отрезок на
+    // изогнутом поле срезает угол и повисает рядом с линией, тем заметнее, чем
+    // круче изгиб; здесь ствол повторяет траекторию, а наконечник встаёт на её
+    // конец и разворачивается вместе с фазой, не сходя с линии.
+    void drawCurvedArrow(const FieldGlyph &glyph) const;
     void drawArrowHead(const QVector3D &position,
                        const QVector3D &direction,
                        const QVector3D &side_hint,

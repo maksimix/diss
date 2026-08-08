@@ -20,6 +20,7 @@ set(EMWS_TESTS_HAVE_EIGEN OFF)
 
 set(EM_CORE_SOURCES
     em/circular_mode_field.cpp
+    em/ridged_circular_solver.cpp
     em/cylindrical_bessel.cpp
     em/em_solver_dispatcher.cpp
     em/fem_frequency_domain_solver.cpp

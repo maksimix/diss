@@ -50,12 +50,12 @@ public:
 signals:
     void requestCalculation(int request_id,
                             const WaveguideParameters &parameters,
-                            double arrow_density);
+                            double line_density);
     // Перестройка стрелок по готовому решению в рабочем потоке: решатель не
     // запускается, поэтому запрос дешёвый и идёт при каждом сдвиге ползунка.
     void requestGlyphRegeneration(int glyph_request_id,
                                   std::shared_ptr<const em::FieldSolution> field_solution,
-                                  double arrow_density);
+                                  double line_density);
     // Срез |E| на смещённой плоскости и стопка срезов объёмной заливки — тоже
     // по готовому решению, без пересчёта задачи.
     void requestSliceRebuild(int fill_request_id,
@@ -164,7 +164,7 @@ private:
     QString solverMethodName(int method) const;
     QString linearSolverMethodName(int method) const;
     // Концентрация стрелок E/H/J по положению ползунка (1.0 — обычная).
-    double arrowDensity() const;
+    double lineDensity() const;
     // Текущая плоскость среза по комбобоксу и её желаемое смещение по
     // ползунку (доля поперечного размера, [-0.48, 0.48]).
     FieldSlicePlane activeSlicePlane() const;
@@ -251,8 +251,12 @@ private:
     QComboBox *field_mode_combo_box_ = nullptr;
     QComboBox *field_fill_combo_box_ = nullptr;
     QCheckBox *animation_check_box_ = nullptr;
-    QSlider *arrow_density_slider_ = nullptr;
-    QLabel *arrow_density_value_label_ = nullptr;
+    QSlider *line_density_slider_ = nullptr;
+    QLabel *line_density_value_label_ = nullptr;
+    // Обычная подсказка ползунка линий: возвращается на место, когда расчёт
+    // снова умеет перестраивать поле. У расчёта из кэша подсказка другая — там
+    // объясняется, почему ползунок погашен.
+    QString line_density_tooltip_;
     QSlider *slice_position_slider_ = nullptr;
     QLabel *slice_position_value_label_ = nullptr;
     QComboBox *slice_plane_combo_box_ = nullptr;
@@ -310,7 +314,7 @@ private:
     QTimer progress_timer_;
     // Пауза после сдвига ползунка концентрации: стрелки перестраиваются один
     // раз по конечному положению, а не на каждый шаг ползунка.
-    QTimer arrow_density_timer_;
+    QTimer line_density_timer_;
     // Такая же пауза для ползунка положения среза.
     QTimer slice_position_timer_;
     QElapsedTimer calculation_elapsed_timer_;

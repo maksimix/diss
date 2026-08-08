@@ -24,7 +24,7 @@ void CalculationWorker::setLatestFillRequestId(int request_id) noexcept
 
 void CalculationWorker::calculate(int request_id,
                                   const WaveguideParameters &parameters,
-                                  double arrow_density)
+                                  double line_density)
 {
     const auto cancellation_requested = [this, request_id]() {
         return latest_request_id_.load(std::memory_order_acquire) != request_id;
@@ -41,7 +41,7 @@ void CalculationWorker::calculate(int request_id,
                 emit progressed(request_id, stage);
             }
         },
-        arrow_density);
+        line_density);
     if (result.cancelled || cancellation_requested()) {
         return;
     }
@@ -51,7 +51,7 @@ void CalculationWorker::calculate(int request_id,
 void CalculationWorker::regenerateGlyphs(
     int glyph_request_id,
     std::shared_ptr<const em::FieldSolution> field_solution,
-    double arrow_density)
+    double line_density)
 {
     const auto cancellation_requested = [this, glyph_request_id]() {
         return latest_glyph_request_id_.load(std::memory_order_acquire) !=
@@ -64,7 +64,7 @@ void CalculationWorker::regenerateGlyphs(
     postprocessing::GenerationControl control;
     control.cancellation_requested = cancellation_requested;
     postprocessing::FieldVisualizationSettings settings;
-    settings.arrow_density = arrow_density;
+    settings.line_density = line_density;
     const QVector<FieldGlyph> glyphs =
         QtFieldGlyphAdapter().build(*field_solution, settings, control);
     if (cancellation_requested()) {

@@ -2,6 +2,7 @@
 
 #include "em/analytic_waveguide_solver.h"
 #include "em/em_solver_dispatcher.h"
+#include "em/ridged_circular_solver.h"
 #include "postprocessing/qt_field_glyph_adapter.h"
 #include "postprocessing/slot_excitation_estimator.h"
 
@@ -28,6 +29,16 @@ bool positiveFinite(double value)
 
 QString modeName(const em::ModeDescriptor &mode)
 {
+    // У гребневого сечения мода нумеруется не парой (m, n), а условиями на
+    // плоскостях симметрии и номером в спектре этой пары: H^q_{g1,g2}.
+    if (em::isSymmetryClassifiedMode(mode)) {
+        return QStringLiteral("%1%2(%3%4)")
+            .arg(mode.family == em::ModeFamily::TransverseElectric ? QStringLiteral("H")
+                                                                   : QStringLiteral("E"))
+            .arg(mode.order_q)
+            .arg(mode.symmetry_g1)
+            .arg(mode.symmetry_g2);
+    }
     return QStringLiteral("%1%2%3")
         .arg(mode.family == em::ModeFamily::TransverseElectric
                  ? QStringLiteral("TE")
@@ -43,6 +54,9 @@ WaveguideMode toWaveguideMode(const em::ModeDescriptor &mode)
     result.transverse_electric = mode.family == em::ModeFamily::TransverseElectric;
     result.m = mode.m;
     result.n = mode.n;
+    result.g1 = mode.symmetry_g1;
+    result.g2 = mode.symmetry_g2;
+    result.q = mode.order_q;
     result.cutoff_ghz = mode.cutoff_frequency_hz * 1.0e-9;
     result.propagates = mode.propagating;
     return result;
@@ -98,6 +112,11 @@ QString validateModeSelection(const WaveguideParameters &parameters)
         return QStringLiteral("Индексы моды не могут быть отрицательными.");
     }
     if (isCircularSection(parameters)) {
+        if (parameters.ridge.enabled) {
+            // У гребневого сечения моду задают g1, g2 и q, а не индексы
+            // Бесселя: их проверяет validateCircularRidge.
+            return {};
+        }
         // В круглом сечении n — номер корня функции Бесселя, он считается от
         // единицы; азимутальный m = 0 разрешён обоим семействам (H01, E01).
         if (parameters.mode_n < 1) {
@@ -175,6 +194,57 @@ QString validateShapes(const QVector<ShapeParameters> &shapes)
     return {};
 }
 
+// Гребни круглого сечения. Углы связаны неравенствами phi3 <= phi2 <= phi1:
+// окно связи не может быть шире грани гребня, а грань — шире сектора. Радиус
+// раздела обязан лежать строго внутри полости, иначе частичных областей две не
+// получается и метод теряет смысл.
+QString validateCircularRidge(const WaveguideParameters &parameters)
+{
+    const CircularRidgeParameters &ridge = parameters.ridge;
+    if (!ridge.enabled) {
+        return {};
+    }
+    const double inner_radius_mm = parameters.radius_mm - parameters.wall_thickness_mm;
+    if (!positiveFinite(ridge.partition_radius_mm) ||
+        ridge.partition_radius_mm >= inner_radius_mm) {
+        return QStringLiteral(
+            "Радиус раздела частичных областей должен быть больше нуля и меньше "
+            "внутреннего радиуса волновода (%1 мм).")
+            .arg(inner_radius_mm, 0, 'f', 3);
+    }
+    if (!positiveFinite(ridge.sector_deg) || ridge.sector_deg > 180.0) {
+        return QStringLiteral("Угол сектора гребней должен лежать в пределах от 0 до 180°.");
+    }
+    if (!positiveFinite(ridge.ridge_deg) || ridge.ridge_deg > ridge.sector_deg + 1.0e-9) {
+        return QStringLiteral(
+            "Угол грани гребня не может превышать угол сектора (%1°).")
+            .arg(ridge.sector_deg, 0, 'f', 3);
+    }
+    if (!positiveFinite(ridge.aperture_deg) ||
+        ridge.aperture_deg > ridge.ridge_deg + 1.0e-9) {
+        return QStringLiteral(
+            "Угол окна связи не может превышать угол грани гребня (%1°).")
+            .arg(ridge.ridge_deg, 0, 'f', 3);
+    }
+    if (!(std::isfinite(ridge.core_permittivity) && ridge.core_permittivity > 0.0)) {
+        return QStringLiteral(
+            "Диэлектрическая проницаемость сердцевины должна быть больше нуля.");
+    }
+    if (ridge.series_terms < 4 || ridge.edge_terms < 1) {
+        return QStringLiteral(
+            "Метод частичных областей требует не меньше четырёх членов ряда и "
+            "одного члена базиса на окне связи.");
+    }
+    if (!parameters.mode_automatic &&
+        (parameters.mode_g1 < 0 || parameters.mode_g1 > 1 || parameters.mode_g2 < 0 ||
+         parameters.mode_g2 > 1 || parameters.mode_q < 1)) {
+        return QStringLiteral(
+            "Мода гребневого сечения задаётся условиями g1 и g2 (0 — электрическая "
+            "стенка, 1 — магнитная) и номером q от единицы.");
+    }
+    return {};
+}
+
 QString validateParameters(const WaveguideParameters &parameters)
 {
     const QString mode_error = validateModeSelection(parameters);
@@ -210,6 +280,10 @@ QString validateParameters(const WaveguideParameters &parameters)
             return QStringLiteral(
                 "В круглом волноводе поддержаны пустой тракт и свободные тела: отключите "
                 "щель и пластины-диафрагмы или вернитесь к прямоугольному сечению.");
+        }
+        const QString ridge_error = validateCircularRidge(parameters);
+        if (!ridge_error.isEmpty()) {
+            return ridge_error;
         }
         if (!positiveFinite(parameters.frequency_ghz)) {
             return QStringLiteral("Частота должна быть конечной и больше нуля.");
@@ -491,6 +565,17 @@ em::SimulationRequest buildRequest(const WaveguideParameters &parameters,
         request.model.waveguide.cross_section = em::WaveguideCrossSection::Circular;
         // Для круглого сечения inner_width_mm несёт внутренний диаметр.
         request.model.waveguide.inner_radius_m = mmToM(0.5 * inner_width_mm);
+        const CircularRidgeParameters &ridge = parameters.ridge;
+        em::CircularRidgeGeometry &target = request.model.waveguide.ridge;
+        target.enabled = ridge.enabled;
+        target.partition_radius_m = mmToM(ridge.partition_radius_mm);
+        target.sector_angle_rad = ridge.sector_deg * em::pi / 180.0;
+        target.ridge_angle_rad = ridge.ridge_deg * em::pi / 180.0;
+        target.aperture_angle_rad = ridge.aperture_deg * em::pi / 180.0;
+        target.core_material.name = "Ridge core";
+        target.core_material.relative_permittivity = ridge.core_permittivity;
+        target.series_terms = ridge.series_terms;
+        target.edge_terms = ridge.edge_terms;
     }
     request.model.waveguide.inner_width_m = mmToM(inner_width_mm);
     request.model.waveguide.inner_height_m = mmToM(inner_height_mm);
@@ -509,6 +594,9 @@ em::SimulationRequest buildRequest(const WaveguideParameters &parameters,
                                     : em::ModeFamily::TransverseElectric;
     request.excitation.m = parameters.mode_m;
     request.excitation.n = parameters.mode_n;
+    request.excitation.g1 = parameters.mode_g1;
+    request.excitation.g2 = parameters.mode_g2;
+    request.excitation.q = parameters.mode_q;
     request.settings.normalization_power_w = 1.0;
     request.settings.fem.relative_tolerance = 1.0e-6;
     request.settings.fem.maximum_iterations = 1200;
@@ -633,6 +721,17 @@ QVector<WaveguideMode> enumerateWaveguideModes(const WaveguideParameters &parame
     // геометрию целиком, поэтому запрос строится обычным путём.
     request.settings.maximum_m = std::max(1, maximum_index);
     request.settings.maximum_n = std::max(1, maximum_index);
+    // Гребневое сечение имеет собственный спектр: его моды нумеруются парой
+    // граничных условий и номером в спектре этой пары, а не индексами Бесселя,
+    // поэтому перечисляет их решатель частичных областей.
+    if (em::hasCircularRidges(request.model.waveguide)) {
+        const em::FieldSolution spectrum =
+            em::RidgedCircularWaveguideSolver().solve(request);
+        for (const em::ModeDescriptor &mode : spectrum.available_modes) {
+            modes.push_back(toWaveguideMode(mode));
+        }
+        return modes;
+    }
     for (const em::ModeDescriptor &mode : em::enumerateWaveguideModes(request)) {
         modes.push_back(toWaveguideMode(mode));
     }
@@ -643,7 +742,7 @@ WaveguideCalculationResult WaveguideCalculator::calculate(
     const WaveguideParameters &parameters,
     const std::function<bool()> &cancellation_requested,
     const std::function<void(const QString &)> &progress_reporter,
-    double arrow_density) const
+    double line_density) const
 {
     WaveguideCalculationResult result;
     result.parameters = parameters;
@@ -793,7 +892,7 @@ WaveguideCalculationResult WaveguideCalculator::calculate(
     postprocessing::GenerationControl generation_control;
     generation_control.cancellation_requested = cancellation_requested;
     postprocessing::FieldVisualizationSettings glyph_settings;
-    glyph_settings.arrow_density = arrow_density;
+    glyph_settings.line_density = line_density;
     const QtFieldGlyphAdapter adapter;
     result.field_glyphs = adapter.build(*field_solution, glyph_settings, generation_control);
     if (cancelled()) {

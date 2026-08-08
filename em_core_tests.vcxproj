@@ -13,7 +13,7 @@
   <PropertyGroup Label="Globals">
     <ProjectGuid>{D8BCB8D1-DA84-4C19-B56B-369A6A84BBA7}</ProjectGuid>
     <Keyword>Win32Proj</Keyword>
-    <WindowsTargetPlatformVersion>10.0.26100.0</WindowsTargetPlatformVersion>
+    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
@@ -95,6 +95,7 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="em\circular_mode_field.cpp" />
+    <ClCompile Include="em\ridged_circular_solver.cpp" />
     <ClCompile Include="em\cylindrical_bessel.cpp" />
     <ClCompile Include="em\em_solver_dispatcher.cpp" />
     <ClCompile Include="em\fem_frequency_domain_solver.cpp" />
@@ -112,6 +113,7 @@
     <ClInclude Include="em\derived_fields.h" />
     <ClInclude Include="em\em_math.h" />
     <ClInclude Include="em\circular_mode_field.h" />
+    <ClInclude Include="em\ridged_circular_solver.h" />
     <ClInclude Include="em\cylindrical_bessel.h" />
     <ClInclude Include="em\em_model.h" />
     <ClInclude Include="em\em_solution.h" />

@@ -86,8 +86,23 @@ QString modeAlias(bool transverse_electric, int m, int n)
         .arg(n);
 }
 
+// Мода гребневого сечения нумеруется не индексами Бесселя, а условиями на
+// плоскостях симметрии сектора и номером в спектре этой пары: H^q_{g1,g2}.
+// Второй нотации у неё нет, поэтому подпись остаётся одна.
+QString ridgedModeTitle(bool transverse_electric, int g1, int g2, int q)
+{
+    return QStringLiteral("%1%2 (g1=%3, g2=%4)")
+        .arg(transverse_electric ? QStringLiteral("H") : QStringLiteral("E"))
+        .arg(q)
+        .arg(g1)
+        .arg(g2);
+}
+
 QString modeTitle(const WaveguideMode &mode)
 {
+    if (mode.g1 >= 0 && mode.g2 >= 0) {
+        return ridgedModeTitle(mode.transverse_electric, mode.g1, mode.g2, mode.q);
+    }
     return QStringLiteral("%1 (%2)").arg(modeAlias(mode.transverse_electric, mode.m, mode.n),
                                          mode.name);
 }
@@ -1204,9 +1219,9 @@ MainWindow::MainWindow(QWidget *parent)
     progress_timer_.setInterval(1000);
     connect(&progress_timer_, &QTimer::timeout, this, &MainWindow::updateCalculationProgress);
 
-    arrow_density_timer_.setInterval(350);
-    arrow_density_timer_.setSingleShot(true);
-    connect(&arrow_density_timer_, &QTimer::timeout, this, &MainWindow::regenerateFieldGlyphs);
+    line_density_timer_.setInterval(350);
+    line_density_timer_.setSingleShot(true);
+    connect(&line_density_timer_, &QTimer::timeout, this, &MainWindow::regenerateFieldGlyphs);
 
     slice_position_timer_.setInterval(300);
     slice_position_timer_.setSingleShot(true);
@@ -1447,7 +1462,7 @@ void MainWindow::runCalculation()
                   ? QStringLiteral("FEM-расчет выполняется: пока показано предыдущее поле, оно еще не учитывает новую геометрию.")
                   : QStringLiteral("Расчет поля выполняется в отдельном потоке..."),
               false);
-    emit requestCalculation(request_id, readParameters(), arrowDensity());
+    emit requestCalculation(request_id, readParameters(), lineDensity());
 }
 
 void MainWindow::handleCalculationResult(int request_id, const WaveguideCalculationResult &result)
@@ -1542,7 +1557,7 @@ void MainWindow::persistCalculationResult()
 void MainWindow::showResult(const WaveguideCalculationResult &result)
 {
     last_result_ = result;
-    // Показан новый результат: не завершённые перестройки стрелок и заливки
+    // Показан новый результат: не завершённые перестройки глифов и заливки
     // относятся к прежнему полю и не должны перезаписать свежие данные.
     latest_glyph_request_id_ = 0;
     latest_fill_request_id_ = 0;
@@ -1569,6 +1584,20 @@ void MainWindow::showResult(const WaveguideCalculationResult &result)
     open_gl_widget_->setCalculationResult(result);
     top_projection_widget_->setCalculationResult(result);
     side_projection_widget_->setCalculationResult(result);
+    // Концентрация линий перестраивает картину по решению поля, а в файл
+    // результатов решение не пишется: у расчёта, поднятого из кэша проекта,
+    // перестраивать нечего. Ползунок в этом случае гасится с объяснением —
+    // иначе он молча ничего не делает, и это выглядит поломкой.
+    if (line_density_slider_ != nullptr) {
+        const bool can_rebuild = static_cast<bool>(result.field_solution);
+        line_density_slider_->setEnabled(can_rebuild);
+        line_density_slider_->setToolTip(
+            can_rebuild
+                ? line_density_tooltip_
+                : QStringLiteral("Расчёт поднят из кэша проекта: решения поля в файле "
+                                 "результатов нет, и перестроить линии не по чему.\n"
+                                 "Запустите расчёт заново — ползунок оживёт."));
+    }
     if (color_bar_ != nullptr) {
         color_bar_->setMaximum(std::max(result.horizontal_slice.maximum_value,
                                         result.vertical_slice.maximum_value));
@@ -1663,9 +1692,9 @@ void MainWindow::changeFieldDisplayMode(int index)
     side_projection_widget_->setFieldDisplayMode(display_mode);
 }
 
-double MainWindow::arrowDensity() const
+double MainWindow::lineDensity() const
 {
-    return arrow_density_slider_ != nullptr ? arrow_density_slider_->value() / 100.0
+    return line_density_slider_ != nullptr ? line_density_slider_->value() / 100.0
                                             : 1.0;
 }
 
@@ -1852,13 +1881,13 @@ void MainWindow::handleVolumeFillBuilt(int fill_request_id,
 void MainWindow::regenerateFieldGlyphs()
 {
     if (!last_result_.valid || !last_result_.has_propagating_mode) {
-        return;   // стрелок нет — нечего перестраивать
+        return;   // глифов нет — нечего перестраивать
     }
     if (!last_result_.field_solution) {
         // Расчёт загружен из файла результатов: решение поля не сохраняется,
         // поэтому новая концентрация применится при следующем пересчёте.
         setStatus(QStringLiteral(
-                      "Концентрация стрелок применится после пересчёта поля: "
+                      "Концентрация линий применится после пересчёта поля: "
                       "у загруженного расчёта нет решения для перестройки."),
                   false);
         return;
@@ -1869,9 +1898,9 @@ void MainWindow::regenerateFieldGlyphs()
     worker_->setLatestGlyphRequestId(glyph_request_id);
     emit requestGlyphRegeneration(glyph_request_id,
                                   last_result_.field_solution,
-                                  arrowDensity());
+                                  lineDensity());
     if (!calculation_running_) {
-        setStatus(QStringLiteral("Перестроение стрелок поля..."), false);
+        setStatus(QStringLiteral("Перестроение линий поля..."), false);
     }
 }
 
@@ -1890,9 +1919,9 @@ void MainWindow::handleGlyphsRegenerated(int glyph_request_id,
     top_projection_widget_->setFieldGlyphs(glyphs);
     side_projection_widget_->setFieldGlyphs(glyphs);
     if (!calculation_running_) {
-        setStatus(QStringLiteral("Стрелки поля перестроены: концентрация %1%.")
-                      .arg(arrow_density_slider_ != nullptr
-                               ? arrow_density_slider_->value()
+        setStatus(QStringLiteral("Линии поля перестроены: концентрация %1%.")
+                      .arg(line_density_slider_ != nullptr
+                               ? line_density_slider_->value()
                                : 100),
                   false);
     }
@@ -2013,28 +2042,36 @@ QWidget *MainWindow::createFieldDisplayWidget()
     slice_position_layout->addWidget(slice_position_slider_, 1);
     slice_position_layout->addWidget(slice_position_value_label_);
 
-    // Концентрация стрелок E/H/J — в процентах от обычного числа стрелок.
-    // Линии поля и стрелки потока S ползунок не трогает.
-    QWidget *arrow_density_row = new QWidget(view_group);
-    QHBoxLayout *arrow_density_layout = new QHBoxLayout(arrow_density_row);
-    arrow_density_layout->setContentsMargins(0, 0, 0, 0);
-    arrow_density_layout->setSpacing(6);
-    arrow_density_slider_ = new QSlider(Qt::Horizontal, arrow_density_row);
-    arrow_density_slider_->setRange(25, 400);
-    arrow_density_slider_->setValue(100);
-    arrow_density_slider_->setSingleStep(5);
-    arrow_density_slider_->setPageStep(25);
-    arrow_density_slider_->setToolTip(
-        QStringLiteral("Концентрация стрелок полей E, H и токов J:\n"
-                       "процент от обычного числа стрелок (25–400%).\n"
-                       "Применяется к показанному полю без пересчёта задачи."));
-    arrow_density_value_label_ = new QLabel(QStringLiteral("100%"), arrow_density_row);
-    arrow_density_value_label_->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    // Концентрация силовых линий — в процентах от обычного их числа. У
+    // доминирующей H10 электрическое поле показано эпюрой из трубок потока —
+    // это те же линии, и ползунок сгущает их наравне с остальными. Глифы
+    // направления (стрелки H, J и потока) он не трогает: их сетка подобрана по
+    // длине стрелки, чтобы наконечники не набегали друг на друга.
+    QWidget *line_density_row = new QWidget(view_group);
+    QHBoxLayout *line_density_layout = new QHBoxLayout(line_density_row);
+    line_density_layout->setContentsMargins(0, 0, 0, 0);
+    line_density_layout->setSpacing(6);
+    line_density_slider_ = new QSlider(Qt::Horizontal, line_density_row);
+    line_density_slider_->setRange(25, 400);
+    line_density_slider_->setValue(100);
+    line_density_slider_->setSingleStep(5);
+    line_density_slider_->setPageStep(25);
+    line_density_tooltip_ =
+        QStringLiteral("Концентрация силовых линий полей E, H и токов J:\n"
+                       "процент от обычного числа линий (25–400%).\n"
+                       "Каждая линия остаётся полной кривой поля — гуще\n"
+                       "становится только их сеть. У доминирующей H10 поле E\n"
+                       "показано эпюрой из трубок потока, и она подчиняется\n"
+                       "этому же ползунку; стрелки направления H, J и S — нет.\n"
+                       "Применяется к показанному полю без пересчёта задачи.");
+    line_density_slider_->setToolTip(line_density_tooltip_);
+    line_density_value_label_ = new QLabel(QStringLiteral("100%"), line_density_row);
+    line_density_value_label_->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
     // Ширина по самой длинной подписи «400%», чтобы строка не дёргалась.
-    arrow_density_value_label_->setMinimumWidth(
-        arrow_density_value_label_->fontMetrics().horizontalAdvance(QStringLiteral("400%")) + 4);
-    arrow_density_layout->addWidget(arrow_density_slider_, 1);
-    arrow_density_layout->addWidget(arrow_density_value_label_);
+    line_density_value_label_->setMinimumWidth(
+        line_density_value_label_->fontMetrics().horizontalAdvance(QStringLiteral("400%")) + 4);
+    line_density_layout->addWidget(line_density_slider_, 1);
+    line_density_layout->addWidget(line_density_value_label_);
 
     color_bar_ = new FieldColorBar(view_group);
     QPushButton *reset_view_button = new QPushButton(QStringLiteral("Сбросить вид"), view_group);
@@ -2043,7 +2080,7 @@ QWidget *MainWindow::createFieldDisplayWidget()
     view_layout->addRow(slice_plane_combo_box_);
     view_layout->addRow(QStringLiteral("Положение"), slice_position_row);
     view_layout->addRow(animation_check_box_);
-    view_layout->addRow(QStringLiteral("Стрелки"), arrow_density_row);
+    view_layout->addRow(QStringLiteral("Линии"), line_density_row);
     view_layout->addRow(color_bar_);
     view_layout->addRow(reset_view_button);
     // Пока заливка выключена, выбор плоскости и положения ни на что не влияет.
@@ -2065,11 +2102,11 @@ QWidget *MainWindow::createFieldDisplayWidget()
         top_projection_widget_->setAnimationEnabled(checked);
         side_projection_widget_->setAnimationEnabled(checked);
     });
-    connect(arrow_density_slider_, &QSlider::valueChanged, this, [this](int percent) {
-        arrow_density_value_label_->setText(QStringLiteral("%1%").arg(percent));
+    connect(line_density_slider_, &QSlider::valueChanged, this, [this](int percent) {
+        line_density_value_label_->setText(QStringLiteral("%1%").arg(percent));
         // Перестройка стартует после паузы: пока ползунок тащат, запросы не
         // сыплются на каждый шаг.
-        arrow_density_timer_.start();
+        line_density_timer_.start();
     });
     connect(slice_plane_combo_box_,
             qOverload<int>(&QComboBox::currentIndexChanged),
@@ -2710,6 +2747,74 @@ void MainWindow::showWaveguideDialog()
                            16, 0, 1, 2);
     grid_layout->addWidget(shell_display_combo_box, 17, 0, 1, 2);
 
+    // Гребни, кольцевые сегменты и слоистое заполнение — форма самого сечения,
+    // а не вставка в тракте, поэтому они живут здесь, рядом с радиусом.
+    QCheckBox *ridge_check_box =
+        new QCheckBox(QStringLiteral("Гребни и кольцевые сегменты"), &dialog);
+    ridge_check_box->setChecked(parameters_.ridge.enabled);
+    ridge_check_box->setToolTip(QStringLiteral(
+        "Круглый волновод с бесконечно тонкими радиальными гребнями, кольцевыми "
+        "сегментами и диэлектрической сердцевиной. Такое сечение считается методом "
+        "частичных областей, а не формулами гладкого круглого волновода."));
+    QDoubleSpinBox *ridge_radius_spin_box = createSpinBox(
+        0.001, 10000.0, parameters_.ridge.partition_radius_mm, 0.1, 3,
+        QStringLiteral(" mm"), &dialog);
+    ridge_radius_spin_box->setToolTip(QStringLiteral(
+        "Радиус раздела частичных областей r1: до него идёт сердцевина, за ним — "
+        "гребни. Кольцевые сегменты стоят именно на этом радиусе."));
+    QDoubleSpinBox *ridge_sector_spin_box = createSpinBox(
+        1.0, 180.0, parameters_.ridge.sector_deg, 1.0, 3, QStringLiteral(" °"), &dialog);
+    ridge_sector_spin_box->setToolTip(QStringLiteral(
+        "Угол сектора φ1: сечение получается отражениями сектора, поэтому число "
+        "гребней равно 180° / φ1 (90° — два гребня, сверху и снизу)."));
+    QDoubleSpinBox *ridge_angle_spin_box = createSpinBox(
+        0.001, 180.0, parameters_.ridge.ridge_deg, 1.0, 3, QStringLiteral(" °"), &dialog);
+    ridge_angle_spin_box->setToolTip(QStringLiteral(
+        "Угол грани гребня φ2. Равенство φ2 = φ1 даёт бесконечно тонкий гребень, "
+        "меньшее значение — гребень конечной угловой толщины."));
+    QDoubleSpinBox *ridge_aperture_spin_box = createSpinBox(
+        0.001, 180.0, parameters_.ridge.aperture_deg, 1.0, 3, QStringLiteral(" °"), &dialog);
+    ridge_aperture_spin_box->setToolTip(QStringLiteral(
+        "Угол окна связи φ3. Металл кольцевого сегмента занимает дугу от φ3 до φ2; "
+        "при φ3 = φ2 сегмента нет."));
+    QDoubleSpinBox *ridge_permittivity_spin_box = createSpinBox(
+        0.01, 1000.0, parameters_.ridge.core_permittivity, 0.1, 3, QString(), &dialog);
+    ridge_permittivity_spin_box->setToolTip(QStringLiteral(
+        "Относительная диэлектрическая проницаемость сердцевины r < r1. Заполнение "
+        "остальной части сечения задаётся отдельно и здесь равно единице."));
+
+    QLabel *ridge_radius_label = new QLabel(QStringLiteral("Радиус раздела r1:"), &dialog);
+    QLabel *ridge_sector_label = new QLabel(QStringLiteral("Сектор φ1:"), &dialog);
+    QLabel *ridge_angle_label = new QLabel(QStringLiteral("Грань гребня φ2:"), &dialog);
+    QLabel *ridge_aperture_label = new QLabel(QStringLiteral("Окно связи φ3:"), &dialog);
+    QLabel *ridge_permittivity_label = new QLabel(QStringLiteral("ε сердцевины:"), &dialog);
+    grid_layout->addWidget(ridge_check_box, 18, 0, 1, 2);
+    grid_layout->addWidget(ridge_radius_label, 19, 0);
+    grid_layout->addWidget(ridge_permittivity_label, 19, 1);
+    grid_layout->addWidget(ridge_radius_spin_box, 20, 0);
+    grid_layout->addWidget(ridge_permittivity_spin_box, 20, 1);
+    grid_layout->addWidget(ridge_sector_label, 21, 0);
+    grid_layout->addWidget(ridge_angle_label, 21, 1);
+    grid_layout->addWidget(ridge_sector_spin_box, 22, 0);
+    grid_layout->addWidget(ridge_angle_spin_box, 22, 1);
+    grid_layout->addWidget(ridge_aperture_label, 23, 0);
+    grid_layout->addWidget(ridge_aperture_spin_box, 24, 0);
+
+    const QVector<QWidget *> ridge_widgets = {
+        ridge_radius_label,       ridge_radius_spin_box,
+        ridge_sector_label,       ridge_sector_spin_box,
+        ridge_angle_label,        ridge_angle_spin_box,
+        ridge_aperture_label,     ridge_aperture_spin_box,
+        ridge_permittivity_label, ridge_permittivity_spin_box,
+    };
+    const auto update_ridge_fields = [ridge_check_box, ridge_widgets]() {
+        for (QWidget *widget : ridge_widgets) {
+            widget->setEnabled(ridge_check_box->isChecked());
+        }
+    };
+    update_ridge_fields();
+    connect(ridge_check_box, &QCheckBox::toggled, &dialog, update_ridge_fields);
+
     // У круглого сечения ширина и глубина не имеют смысла, а у прямоугольного —
     // радиус. Ненужные поля прячутся, чтобы диалог не предлагал задать размер,
     // который всё равно будет проигнорирован.
@@ -2717,6 +2822,10 @@ void MainWindow::showWaveguideDialog()
         const bool circular = index == 1;
         radius_label->setVisible(circular);
         radius_spin_box->setVisible(circular);
+        ridge_check_box->setVisible(circular);
+        for (QWidget *widget : ridge_widgets) {
+            widget->setVisible(circular);
+        }
         for (QWidget *widget : {static_cast<QWidget *>(x_min_spin_box),
                                 static_cast<QWidget *>(x_max_spin_box),
                                 static_cast<QWidget *>(y_min_spin_box),
@@ -2766,6 +2875,28 @@ void MainWindow::showWaveguideDialog()
                 QStringLiteral("Радиус должен быть больше толщины стенки."));
             return false;
         }
+        if (circular && ridge_check_box->isChecked()) {
+            const double inner_radius_mm =
+                radius_spin_box->value() - wall_thickness_spin_box->value();
+            if (ridge_radius_spin_box->value() >= inner_radius_mm) {
+                QMessageBox::warning(
+                    &dialog,
+                    QStringLiteral("Brick"),
+                    QStringLiteral("Радиус раздела должен быть меньше внутреннего "
+                                   "радиуса волновода (%1 мм).")
+                        .arg(inner_radius_mm, 0, 'f', 3));
+                return false;
+            }
+            if (ridge_angle_spin_box->value() > ridge_sector_spin_box->value() ||
+                ridge_aperture_spin_box->value() > ridge_angle_spin_box->value()) {
+                QMessageBox::warning(
+                    &dialog,
+                    QStringLiteral("Brick"),
+                    QStringLiteral("Углы должны идти по возрастанию: окно связи φ3 "
+                                   "не шире грани гребня φ2, а та — не шире сектора φ1."));
+                return false;
+            }
+        }
 
         waveguide_name_ = name_line_edit->text().trimmed().isEmpty()
                               ? QStringLiteral("wr-90")
@@ -2776,6 +2907,12 @@ void MainWindow::showWaveguideDialog()
         // новое сечение вместо ошибки при запуске расчёта.
         normalizeModeSelection(parameters_);
         parameters_.radius_mm = radius_spin_box->value();
+        parameters_.ridge.enabled = circular && ridge_check_box->isChecked();
+        parameters_.ridge.partition_radius_mm = ridge_radius_spin_box->value();
+        parameters_.ridge.sector_deg = ridge_sector_spin_box->value();
+        parameters_.ridge.ridge_deg = ridge_angle_spin_box->value();
+        parameters_.ridge.aperture_deg = ridge_aperture_spin_box->value();
+        parameters_.ridge.core_permittivity = ridge_permittivity_spin_box->value();
         if (!circular) {
             parameters_.width_mm = x_max - x_min;
             parameters_.depth_mm = y_max - y_min;
@@ -3710,26 +3847,35 @@ void MainWindow::showExcitationDialog()
     // Список мод строится по текущим размерам и частоте: у каждой видно отсечку
     // и то, проходит ли она. Пересобирается при каждой смене частоты, потому что
     // от частоты зависит именно эта пометка.
+    // Полезная нагрузка пункта: семейство, индексы (m, n) обычного сечения и
+    // тройка (g1, g2, q) гребневого. Обе нумерации лежат рядом, потому что
+    // диалог один, а сечение пользователь может переключить в любой момент.
     const auto selected_indices = [mode_combo_box]() {
         const QVariantList data = mode_combo_box->currentData().toList();
-        if (data.size() != 3) {
-            return QVariantList{true, 1, 0};
+        if (data.size() != 6) {
+            return QVariantList{true, 1, 0, -1, -1, 0};
         }
         return data;
     };
     const auto refresh_modes = [&, mode_combo_box, frequency_spin_box]() {
         WaveguideParameters probe = parameters_;
         probe.frequency_ghz = frequency_spin_box->value();
-        const QVariantList wanted = mode_combo_box->count() > 0
-                                        ? selected_indices()
-                                        : QVariantList{parameters_.mode_family != 1,
-                                                       parameters_.mode_m,
-                                                       parameters_.mode_n};
+        const bool ridged = probe.cross_section == 1 && probe.ridge.enabled;
+        const QVariantList wanted =
+            mode_combo_box->count() > 0
+                ? selected_indices()
+                : QVariantList{parameters_.mode_family != 1,
+                               parameters_.mode_m,
+                               parameters_.mode_n,
+                               ridged ? parameters_.mode_g1 : -1,
+                               ridged ? parameters_.mode_g2 : -1,
+                               ridged ? parameters_.mode_q : 0};
         const QSignalBlocker block(mode_combo_box);
         mode_combo_box->clear();
         int wanted_index = -1;
         for (const WaveguideMode &mode : enumerateWaveguideModes(probe)) {
-            const QVariantList data{mode.transverse_electric, mode.m, mode.n};
+            const QVariantList data{mode.transverse_electric, mode.m, mode.n,
+                                    mode.g1, mode.g2, mode.q};
             mode_combo_box->addItem(QStringLiteral("%1 — fc %2 ГГц — %3")
                                         .arg(modeTitle(mode),
                                              number(mode.cutoff_ghz, 4),
@@ -3741,13 +3887,19 @@ void MainWindow::showExcitationDialog()
                 wanted_index = mode_combo_box->count() - 1;
             }
         }
-        if (wanted_index < 0 && wanted.size() == 3) {
+        if (wanted_index < 0 && wanted.size() == 6) {
             // Мода из файла модели может лежать за пределами перечисленных
             // индексов: её пункт добавляется отдельно, чтобы открытие диалога
             // не подменяло выбор молча.
-            mode_combo_box->addItem(modeTitle(wanted.at(0).toBool(),
-                                              wanted.at(1).toInt(),
-                                              wanted.at(2).toInt()),
+            const bool wanted_ridged = wanted.at(3).toInt() >= 0 && wanted.at(4).toInt() >= 0;
+            mode_combo_box->addItem(wanted_ridged
+                                        ? ridgedModeTitle(wanted.at(0).toBool(),
+                                                          wanted.at(3).toInt(),
+                                                          wanted.at(4).toInt(),
+                                                          wanted.at(5).toInt())
+                                        : modeTitle(wanted.at(0).toBool(),
+                                                    wanted.at(1).toInt(),
+                                                    wanted.at(2).toInt()),
                                     wanted);
             wanted_index = mode_combo_box->count() - 1;
         }
@@ -3821,6 +3973,11 @@ void MainWindow::showExcitationDialog()
         parameters_.mode_family = indices.at(0).toBool() ? 0 : 1;
         parameters_.mode_m = indices.at(1).toInt();
         parameters_.mode_n = indices.at(2).toInt();
+        if (indices.at(3).toInt() >= 0 && indices.at(4).toInt() >= 0) {
+            parameters_.mode_g1 = indices.at(3).toInt();
+            parameters_.mode_g2 = indices.at(4).toInt();
+            parameters_.mode_q = std::max(1, indices.at(5).toInt());
+        }
         rebuildObjectTree();
         markModelChanged();
         return true;

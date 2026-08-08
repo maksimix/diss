@@ -36,10 +36,26 @@ struct ModeDescriptor
     int m = 0;
     int n = 0;
     double cutoff_frequency_hz = 0.0;
+    // Поперечное волновое число моды в вакууме: k_c = 2 pi f_c / c. У
+    // неоднородно заполненной структуры это именно вакуумное число, а не
+    // собственное число поперечной задачи — последнее равно k_c * sqrt(eps_w) и
+    // в каждой частичной области своё.
     double cutoff_wavenumber_per_m = 0.0;
     Complex propagation_constant_per_m = 0.0;
     bool propagating = false;
+    // Круглый волновод с гребнями: условия на плоскостях симметрии сектора
+    // (0 — электрическая стенка, 1 — магнитная) и номер моды в спектре этой
+    // пары, то есть обозначение H^q_{g1,g2}. Для однородных сечений равны -1,
+    // и тогда моду задают индексы m и n.
+    int symmetry_g1 = -1;
+    int symmetry_g2 = -1;
+    int order_q = 0;
 };
+
+inline bool isSymmetryClassifiedMode(const ModeDescriptor &mode)
+{
+    return mode.symmetry_g1 >= 0 && mode.symmetry_g2 >= 0;
+}
 
 struct ScatteringMatrix2Port
 {

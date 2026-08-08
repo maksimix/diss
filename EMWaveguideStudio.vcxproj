@@ -13,10 +13,9 @@
   <PropertyGroup Label="Globals">
     <ProjectGuid>{41D6DEA4-4ED2-454D-BCBD-608887FD587C}</ProjectGuid>
     <Keyword>QtVS_v304</Keyword>
-    <WindowsTargetPlatformVersion Condition="'$(Configuration)|$(Platform)' == 'Debug|x64'">10.0.26100.0</WindowsTargetPlatformVersion>
-    <WindowsTargetPlatformVersion Condition="'$(Configuration)|$(Platform)' == 'Release|x64'">10.0.26100.0</WindowsTargetPlatformVersion>
-    <QtMsBuild Condition="'$(QtMsBuild)'=='' OR !Exists('$(QtMsBuild)\qt.targets')"
-      >$(MSBuildProjectDirectory)\QtMsBuild</QtMsBuild>
+    <WindowsTargetPlatformVersion Condition="'$(Configuration)|$(Platform)' == 'Debug|x64'">10.0</WindowsTargetPlatformVersion>
+    <WindowsTargetPlatformVersion Condition="'$(Configuration)|$(Platform)' == 'Release|x64'">10.0</WindowsTargetPlatformVersion>
+    <QtMsBuild Condition="'$(QtMsBuild)'=='' OR !Exists('$(QtMsBuild)\qt.targets')">$(MSBuildProjectDirectory)\QtMsBuild</QtMsBuild>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Debug|x64'" Label="Configuration">
@@ -41,11 +40,8 @@
     <QtModules>core;gui;widgets;opengl;openglwidgets</QtModules>
     <QtBuildConfig>release</QtBuildConfig>
   </PropertyGroup>
-  <Target Name="QtMsBuildNotFound"
-    BeforeTargets="CustomBuild;ClCompile"
-    Condition="!Exists('$(QtMsBuild)\qt.targets') or !Exists('$(QtMsBuild)\qt.props')">
-    <Message Importance="High"
-      Text="QtMsBuild: could not locate qt.targets, qt.props; project may not build correctly." />
+  <Target Name="QtMsBuildNotFound" BeforeTargets="CustomBuild;ClCompile" Condition="!Exists('$(QtMsBuild)\qt.targets') or !Exists('$(QtMsBuild)\qt.props')">
+    <Message Importance="High" Text="QtMsBuild: could not locate qt.targets, qt.props; project may not build correctly." />
   </Target>
   <ImportGroup Label="ExtensionSettings" />
   <ImportGroup Label="Shared" />
@@ -119,6 +115,7 @@
     <ClCompile Include="parameter_list_widget.cpp" />
     <ClCompile Include="project_preview_widget.cpp" />
     <ClCompile Include="em\circular_mode_field.cpp" />
+    <ClCompile Include="em\ridged_circular_solver.cpp" />
     <ClCompile Include="em\cylindrical_bessel.cpp" />
     <ClCompile Include="em\em_solver_dispatcher.cpp" />
     <ClCompile Include="em\fem_frequency_domain_solver.cpp" />
@@ -149,6 +146,7 @@
     <ClInclude Include="em\derived_fields.h" />
     <ClInclude Include="em\em_math.h" />
     <ClInclude Include="em\circular_mode_field.h" />
+    <ClInclude Include="em\ridged_circular_solver.h" />
     <ClInclude Include="em\cylindrical_bessel.h" />
     <ClInclude Include="em\em_model.h" />
     <ClInclude Include="em\em_solution.h" />

@@ -7,6 +7,7 @@
 #include "em/mode_matching_iris_solver.h"
 #include "em/analytic_waveguide_solver.h"
 #include "em/cylindrical_bessel.h"
+#include "em/ridged_circular_solver.h"
 #include "em/transverse_pec_partition_solver.h"
 #include "postprocessing/field_visualization_generator.h"
 #include "postprocessing/slot_excitation_estimator.h"
@@ -589,14 +590,15 @@ void testTe10ElectricFluxDensity()
     }
 }
 
-// Концентрация стрелок — пользовательская настройка: больше плотность — больше
-// стрелок E, H и J. Линии поля и стрелки Пойнтинга настройка не трогает.
-void testArrowDensitySetting()
+// Концентрация линий — пользовательская настройка: больше плотность — больше
+// силовых линий E, H и линий тока. Стрелки и поток Пойнтинга она не трогает:
+// их сетка подобрана так, чтобы наконечники не набегали друг на друга.
+void testLineDensitySetting()
 {
     const em::SimulationRequest request = createRequest(10.0e9);
     const em::FieldSolution solution = em::AnalyticWaveguideSolver().solve(request);
     expectTrue(solution.success && solution.has_selected_mode,
-               "arrow-density test has a field solution");
+               "line-density test has a field solution");
 
     const auto census = [](const std::vector<postprocessing::VisualizationPrimitive> &primitives,
                            postprocessing::FieldQuantity quantity,
@@ -612,9 +614,9 @@ void testArrowDensitySetting()
 
     const postprocessing::FieldVisualizationGenerator generator;
     postprocessing::FieldVisualizationSettings sparse;
-    sparse.arrow_density = 0.25;
+    sparse.line_density = 0.25;
     postprocessing::FieldVisualizationSettings dense;
-    dense.arrow_density = 4.0;
+    dense.line_density = 4.0;
     const std::vector<postprocessing::VisualizationPrimitive> sparse_primitives =
         generator.generate(solution, sparse);
     const std::vector<postprocessing::VisualizationPrimitive> normal_primitives =
@@ -624,24 +626,38 @@ void testArrowDensitySetting()
 
     using postprocessing::FieldQuantity;
     using postprocessing::PrimitiveKind;
-    const FieldQuantity arrow_quantities[] = {FieldQuantity::Electric,
-                                              FieldQuantity::Magnetic,
-                                              FieldQuantity::SurfaceCurrent};
-    for (const FieldQuantity quantity : arrow_quantities) {
-        const int sparse_count = census(sparse_primitives, quantity, PrimitiveKind::Arrow);
-        const int normal_count = census(normal_primitives, quantity, PrimitiveKind::Arrow);
-        const int dense_count = census(dense_primitives, quantity, PrimitiveKind::Arrow);
-        expectTrue(sparse_count > 0, "quarter density keeps some arrows");
-        expectTrue(sparse_count < normal_count, "quarter density thins the arrows");
-        expectTrue(normal_count < dense_count, "quadruple density adds arrows");
+    // Линии магнитного поля и линии тока по стенкам идут от посева, который и
+    // сгущает ползунок. Линии E у доминирующей TE10 не строятся: там своя
+    // амплитудная эпюра, поэтому это семейство проверяется отдельным тестом.
+    const FieldQuantity line_quantities[] = {FieldQuantity::Magnetic,
+                                             FieldQuantity::SurfaceCurrent};
+    for (const FieldQuantity quantity : line_quantities) {
+        const int sparse_count = census(sparse_primitives, quantity, PrimitiveKind::Polyline);
+        const int normal_count = census(normal_primitives, quantity, PrimitiveKind::Polyline);
+        const int dense_count = census(dense_primitives, quantity, PrimitiveKind::Polyline);
+        expectTrue(sparse_count > 0, "quarter density keeps some field lines");
+        expectTrue(sparse_count < normal_count, "quarter density thins the field lines");
+        expectTrue(normal_count < dense_count, "quadruple density adds field lines");
     }
 
-    expectTrue(census(sparse_primitives, FieldQuantity::Poynting, PrimitiveKind::Arrow) ==
-                   census(dense_primitives, FieldQuantity::Poynting, PrimitiveKind::Arrow),
-               "Poynting arrows ignore the arrow-density setting");
-    expectTrue(census(sparse_primitives, FieldQuantity::Magnetic, PrimitiveKind::Polyline) ==
-                   census(dense_primitives, FieldQuantity::Magnetic, PrimitiveKind::Polyline),
-               "field lines ignore the arrow-density setting");
+    // У доминирующей H10 электрическое поле нарисовано эпюрой из трубок потока:
+    // это те же линии поля, только другой формы, поэтому эпюра тоже густеет.
+    expectTrue(census(sparse_primitives, FieldQuantity::Electric, PrimitiveKind::Arrow) <
+                   census(normal_primitives, FieldQuantity::Electric, PrimitiveKind::Arrow),
+               "quarter density thins the TE10 electric flux tubes");
+    expectTrue(census(normal_primitives, FieldQuantity::Electric, PrimitiveKind::Arrow) <
+                   census(dense_primitives, FieldQuantity::Electric, PrimitiveKind::Arrow),
+               "quadruple density adds TE10 electric flux tubes");
+
+    // Глифы направления настройка не трогает — ни H, ни токов, ни потока.
+    const FieldQuantity arrow_quantities[] = {FieldQuantity::Magnetic,
+                                              FieldQuantity::SurfaceCurrent,
+                                              FieldQuantity::Poynting};
+    for (const FieldQuantity quantity : arrow_quantities) {
+        expectTrue(census(sparse_primitives, quantity, PrimitiveKind::Arrow) ==
+                       census(dense_primitives, quantity, PrimitiveKind::Arrow),
+                   "direction arrows ignore the line-density setting");
+    }
 }
 
 // Срез |E| умеет вставать на смещённую плоскость (перенос среза в интерфейсе),
@@ -1072,8 +1088,26 @@ void testFieldSliceAndAnimation()
         }
     }
     expectTrue(animated_electric, "TE10 electric arrows carry a non-zero animation phasor");
-    expectTrue(animated_magnetic,
-               "magnetic arrows carry an animation phasor so H oscillates like E");
+    // У магнитного поля отдельных стрелок больше нет: они сеялись по своей сетке
+    // и ложились не на нарисованные линии, а рядом с ними. Фазу теперь несут
+    // сами линии — по вершинам, поэтому яркость бежит вдоль линии, а наконечники
+    // переворачиваются вместе с полем.
+    bool animated_magnetic_line = false;
+    for (const postprocessing::VisualizationPrimitive &primitive : primitives) {
+        if (primitive.quantity != postprocessing::FieldQuantity::Magnetic ||
+            primitive.kind != postprocessing::PrimitiveKind::Polyline) {
+            continue;
+        }
+        if (primitive.animated &&
+            primitive.vertex_phase_rad.size() == primitive.points_m.size() &&
+            primitive.vertex_amplitude.size() == primitive.points_m.size()) {
+            animated_magnetic_line = true;
+        }
+    }
+    expectTrue(animated_magnetic_line,
+               "magnetic field lines carry per-vertex animation so H oscillates like E");
+    expectTrue(!animated_magnetic,
+               "magnetic field has no separate arrows beside its own lines");
 
     // Animated arrows must stay on one axis: they reverse and change length with
     // the phase, but never sweep around. H is elliptically polarised in a
@@ -2640,8 +2674,371 @@ void testCircularFemMatchesAnalytic()
 }
 #endif
 
+// --------------------------------------------------------------------------
+// Круглый волновод с бесконечно тонкими гребнями, кольцевыми сегментами и
+// слоистым диэлектрическим заполнением: метод частичных областей.
+//
+// Эталон получен независимо — двумерным методом конечных элементов на секторе
+// для той же задачи (div((1/eps) grad Hz) + kc^2 Hz = 0 у H-волн и
+// div(grad Ez) + kc^2 eps Ez = 0 у E-волн, бесконечно тонкий кольцевой сегмент
+// смоделирован раздвоением узлов на дуге). Совпадение двух разных методов —
+// более сильная проверка, чем совпадение с одним печатным источником.
+
+em::SimulationRequest createRidgedRequest(double frequency_hz,
+                                          double outer_radius_m,
+                                          double radius_ratio,
+                                          double aperture_angle_rad,
+                                          double core_permittivity)
+{
+    em::SimulationRequest request;
+    request.frequency_hz = frequency_hz;
+    request.model.waveguide.cross_section = em::WaveguideCrossSection::Circular;
+    request.model.waveguide.inner_radius_m = outer_radius_m;
+    request.model.waveguide.length_m = 50.0e-3;
+    request.model.waveguide.wall_thickness_m = 0.1e-3;
+    em::CircularRidgeGeometry &ridge = request.model.waveguide.ridge;
+    ridge.enabled = true;
+    ridge.partition_radius_m = radius_ratio * outer_radius_m;
+    ridge.sector_angle_rad = 0.5 * em::pi;
+    ridge.ridge_angle_rad = 0.5 * em::pi;
+    ridge.aperture_angle_rad = aperture_angle_rad;
+    ridge.core_material.relative_permittivity = core_permittivity;
+    ridge.series_terms = 60;
+    ridge.edge_terms = 3;
+    request.settings.maximum_n = 4;
+    request.settings.normalization_power_w = 1.0;
+    return request;
+}
+
+double ridgedCutoff(double radius_ratio,
+                    double aperture_angle_rad,
+                    double core_permittivity,
+                    int g1,
+                    int g2,
+                    em::ModeFamily family,
+                    int order_q)
+{
+    em::RidgedCircularProblem problem;
+    problem.radius_ratio = radius_ratio;
+    problem.sector_angle_rad = 0.5 * em::pi;
+    problem.ridge_angle_rad = 0.5 * em::pi;
+    problem.aperture_angle_rad = aperture_angle_rad;
+    problem.core_permittivity = core_permittivity;
+    problem.shell_permittivity = 1.0;
+    problem.series_terms = 60;
+    problem.edge_terms = 3;
+    problem.g1 = g1;
+    problem.g2 = g2;
+    problem.family = family;
+    const std::vector<double> cutoffs = em::findRidgedCircularCutoffs(problem, order_q);
+    return static_cast<int>(cutoffs.size()) >= order_q ? cutoffs[order_q - 1] : 0.0;
+}
+
+void testRidgedCircularCutoffs()
+{
+    const double full = 0.5 * em::pi;
+    const double window = 0.5 * em::pi - 1.0;
+
+    // Гребни без кольцевых сегментов, воздушное заполнение. Эталон: 2D МКЭ дал
+    // 1.3268, 3.0898, 2.0742, 4.2073 — на этих числах два метода сходятся, и
+    // они же совпадают с печатной таблицей.
+    expectNear(ridgedCutoff(0.35, full, 1.0, 1, 0, em::ModeFamily::TransverseElectric, 1),
+               1.3268, 2.0e-3, "H^1_{1,0} гребней без сегментов");
+    expectNear(ridgedCutoff(0.35, full, 1.0, 1, 0, em::ModeFamily::TransverseElectric, 2),
+               3.0897, 4.0e-3, "H^2_{1,0} гребней без сегментов");
+    expectNear(ridgedCutoff(0.35, full, 1.0, 1, 1, em::ModeFamily::TransverseElectric, 1),
+               2.0745, 3.0e-3, "H^1_{1,1} гребней без сегментов");
+
+    // Гребни с кольцевыми сегментами, phi3 = pi/2 - 1: основная и высшие моды.
+    expectNear(ridgedCutoff(0.35, window, 1.0, 1, 0, em::ModeFamily::TransverseElectric, 1),
+               0.8514, 2.0e-3, "H^1_{1,0} с кольцевыми сегментами");
+    expectNear(ridgedCutoff(0.35, window, 1.0, 1, 0, em::ModeFamily::TransverseElectric, 2),
+               2.9640, 4.0e-3, "H^2_{1,0} с кольцевыми сегментами");
+    expectNear(ridgedCutoff(0.35, window, 1.0, 1, 1, em::ModeFamily::TransverseElectric, 1),
+               1.6137, 3.0e-3, "H^1_{1,1} с кольцевыми сегментами");
+    expectNear(ridgedCutoff(0.35, window, 1.0, 0, 1, em::ModeFamily::TransverseElectric, 1),
+               1.6089, 3.0e-3, "H^1_{0,1} с кольцевыми сегментами");
+    expectNear(ridgedCutoff(0.35, window, 1.0, 0, 0, em::ModeFamily::TransverseElectric, 1),
+               2.6317, 4.0e-3, "H^1_{0,0} с кольцевыми сегментами");
+
+    // Слоистое заполнение eps1 = 3 в области между гребнями: моды становятся
+    // гибридными, а критические волновые числа падают сильнее всего у основной.
+    expectNear(ridgedCutoff(0.35, window, 3.0, 1, 0, em::ModeFamily::TransverseElectric, 1),
+               0.5675, 2.0e-3, "HE^1_{1,0} со слоистым заполнением");
+    expectNear(ridgedCutoff(0.35, window, 3.0, 1, 0, em::ModeFamily::TransverseElectric, 2),
+               2.9187, 5.0e-3, "HE^2_{1,0} со слоистым заполнением");
+    expectNear(ridgedCutoff(0.35, window, 3.0, 1, 1, em::ModeFamily::TransverseElectric, 1),
+               1.5661, 3.0e-3, "HE^1_{1,1} со слоистым заполнением");
+    expectNear(ridgedCutoff(0.35, window, 3.0, 0, 0, em::ModeFamily::TransverseElectric, 1),
+               2.0909, 5.0e-3, "HE^1_{0,0} со слоистым заполнением");
+
+    // E-волны: тот же аппарат с другим базисом на окне связи.
+    expectNear(ridgedCutoff(0.35, full, 1.0, 1, 1, em::ModeFamily::TransverseMagnetic, 1),
+               3.1572, 8.0e-3, "E^1_{1,1} гребней без сегментов");
+    expectNear(ridgedCutoff(0.35, full, 1.0, 1, 0, em::ModeFamily::TransverseMagnetic, 1),
+               5.0019, 1.0e-2, "E^1_{1,0} гребней без сегментов");
+    expectNear(ridgedCutoff(0.35, window, 1.0, 1, 1, em::ModeFamily::TransverseMagnetic, 1),
+               4.5381, 1.2e-2, "E^1_{1,1} с кольцевыми сегментами");
+}
+
+void testRidgedCircularConvergence()
+{
+    // Ряды метода частичных областей должны сходиться: удвоение числа членов
+    // не должно двигать корень дальше собственной погрешности метода.
+    const double window = 0.5 * em::pi - 1.0;
+    em::RidgedCircularProblem problem;
+    problem.radius_ratio = 0.35;
+    problem.sector_angle_rad = 0.5 * em::pi;
+    problem.ridge_angle_rad = 0.5 * em::pi;
+    problem.aperture_angle_rad = window;
+    problem.core_permittivity = 1.0;
+    problem.shell_permittivity = 1.0;
+    problem.g1 = 1;
+    problem.g2 = 0;
+    problem.family = em::ModeFamily::TransverseElectric;
+
+    problem.series_terms = 20;
+    problem.edge_terms = 2;
+    const std::vector<double> coarse = em::findRidgedCircularCutoffs(problem, 1);
+    problem.series_terms = 120;
+    problem.edge_terms = 4;
+    const std::vector<double> fine = em::findRidgedCircularCutoffs(problem, 1);
+    expectTrue(!coarse.empty() && !fine.empty(), "корень найден на обеих длинах ряда");
+    if (!coarse.empty() && !fine.empty()) {
+        expectTrue(std::abs(coarse[0] - fine[0]) < 5.0e-3,
+                   "ряд сошёлся: " + std::to_string(coarse[0]) + " против " +
+                       std::to_string(fine[0]));
+        // Длинный ряд обязан оставаться конечным: именно здесь Y_nu переполняет
+        // double, если считать его напрямую.
+        expectTrue(std::isfinite(fine[0]) && fine[0] > 0.0,
+                   "длинный ряд не разваливается на переполнении функции Неймана");
+    }
+}
+
+void testRidgedCircularFieldAndDispatch()
+{
+    const double window = 0.5 * em::pi - 1.0;
+    const double radius_m = 10.0e-3;
+    // Основная мода структуры: kc*r2 = 0.8514, то есть f_c = 4.06 ГГц.
+    em::SimulationRequest request =
+        createRidgedRequest(8.0e9, radius_m, 0.35, window, 1.0);
+    em::EmSolverDispatcher dispatcher(std::make_shared<TestFemBackend>());
+    const em::FieldSolution solution = dispatcher.solve(request);
+    expectTrue(solution.success, "гребневый волновод считается: " + solution.error_message);
+    expectTrue(solution.diagnostics.backend_name ==
+                   "Метод частичных областей: круглый волновод с гребнями",
+               "гребневое сечение уходит в метод частичных областей");
+    expectTrue(solution.has_selected_mode, "мода гребневой структуры выбрана");
+    if (!solution.has_selected_mode || !solution.field) {
+        fail("гребневая структура не дала поля");
+        return;
+    }
+    expectTrue(em::isSymmetryClassifiedMode(solution.selected_mode),
+               "мода помечена парой граничных условий");
+    expectNear(solution.selected_mode.cutoff_wavenumber_per_m * radius_m,
+               0.8514,
+               3.0e-3,
+               "основная мода структуры — H^1_{1,0}");
+
+    // Внешняя стенка: радиальная функция области построена так, что её
+    // производная там обращается в ноль тождественно, поэтому тангенциальное E
+    // ограничено собственным линейным изменением поля на отступе точки
+    // измерения от стенки, а не сходимостью ряда.
+    double maximum_wall_tangential = 0.0;
+    double maximum_total = 0.0;
+    for (int index = 0; index < 24; ++index) {
+        const double azimuth_rad = (index + 0.5) * 2.0 * em::pi / 24.0;
+        const double sample_radius_m = radius_m * (1.0 - 1.0e-8);
+        const em::FieldPhasor sample = solution.field->evaluate(
+            {sample_radius_m * std::cos(azimuth_rad),
+             sample_radius_m * std::sin(azimuth_rad),
+             -0.013});
+        const em::Complex azimuthal = -sample.electric_v_per_m.x * std::sin(azimuth_rad) +
+                                      sample.electric_v_per_m.y * std::cos(azimuth_rad);
+        maximum_wall_tangential = std::max(maximum_wall_tangential,
+                                           std::sqrt(std::norm(azimuthal) +
+                                                     std::norm(sample.electric_v_per_m.z)));
+        maximum_total = std::max(maximum_total, em::magnitude(sample.electric_v_per_m));
+    }
+    expectTrue(maximum_total > 0.0, "поле гребневой структуры не нулевое");
+    expectTrue(maximum_wall_tangential < 1.0e-6 * std::max(1.0e-30, maximum_total),
+               "тангенциальное E на внешней стенке обращается в ноль (отступ 1e-8 R): " +
+                   std::to_string(maximum_wall_tangential / std::max(1.0e-30, maximum_total)));
+
+    // Кольцевой сегмент — другое дело. Условие E_phi = 0 на нём выполняется не
+    // тождественно, а суммой ряда: краевая функция раскладывается по окну связи
+    // и продолжается нулём на металл, так что усечённый ряд оставляет у кромки
+    // осцилляции Гиббса. Проверять здесь нужно не малость невязки, а её
+    // убывание с длиной ряда — именно этим сходящийся метод отличается от
+    // ошибки в формуле, которая с ростом числа членов никуда не девается.
+    const auto segment_residual = [&](int series_terms) {
+        em::SimulationRequest refined =
+            createRidgedRequest(8.0e9, radius_m, 0.35, window, 1.0);
+        refined.model.waveguide.ridge.series_terms = series_terms;
+        em::RidgedCircularProblem problem;
+        problem.radius_ratio = 0.35;
+        problem.sector_angle_rad = 0.5 * em::pi;
+        problem.ridge_angle_rad = 0.5 * em::pi;
+        problem.aperture_angle_rad = window;
+        problem.core_permittivity = 1.0;
+        problem.shell_permittivity = 1.0;
+        problem.series_terms = series_terms;
+        problem.edge_terms = 3;
+        problem.g1 = 1;
+        problem.g2 = 0;
+        problem.family = em::ModeFamily::TransverseElectric;
+        const std::vector<double> cutoffs = em::findRidgedCircularCutoffs(problem, 1);
+        if (cutoffs.empty()) {
+            return std::numeric_limits<double>::infinity();
+        }
+        em::ModeDescriptor mode;
+        mode.family = problem.family;
+        mode.symmetry_g1 = problem.g1;
+        mode.symmetry_g2 = problem.g2;
+        mode.order_q = 1;
+        mode.cutoff_wavenumber_per_m = cutoffs[0] / radius_m;
+        const em::RidgedCircularModeField field(
+            refined, problem, mode,
+            em::ridgedCircularEdgeCoefficients(problem, cutoffs[0]), 1.0);
+        double tangential = 0.0;
+        double total = 0.0;
+        for (const double azimuth_rad : {0.9, 1.2, 1.5}) {
+            // Угол больше phi3 = 0.5708 — там на радиусе раздела стоит металл.
+            for (const double offset : {-1.0e-4, 1.0e-4}) {
+                const double sample_radius_m = 0.35 * radius_m * (1.0 + offset);
+                const em::FieldPhasor sample =
+                    field.evaluate({sample_radius_m * std::cos(azimuth_rad),
+                                    sample_radius_m * std::sin(azimuth_rad),
+                                    -0.013});
+                const em::Complex azimuthal =
+                    -sample.electric_v_per_m.x * std::sin(azimuth_rad) +
+                    sample.electric_v_per_m.y * std::cos(azimuth_rad);
+                tangential = std::max(tangential, std::abs(azimuthal));
+                total = std::max(total, em::magnitude(sample.electric_v_per_m));
+            }
+        }
+        return tangential / std::max(1.0e-30, total);
+    };
+    const double coarse_residual = segment_residual(20);
+    const double fine_residual = segment_residual(160);
+    expectTrue(fine_residual < 0.5 * coarse_residual,
+               "невязка E_phi на кольцевом сегменте убывает с длиной ряда: " +
+                   std::to_string(coarse_residual) + " -> " +
+                   std::to_string(fine_residual));
+
+    // Симметрия сечения: четыре сектора отличаются только знаком, который
+    // задают g1 и g2. Для H^1_{1,0} продольная компонента нечётна относительно
+    // плоскости phi = pi/2 и чётна относительно phi = 0.
+    const double probe_radius_m = 0.2 * radius_m;
+    const auto axial_at = [&](double azimuth_rad) {
+        return solution.field->evaluate({probe_radius_m * std::cos(azimuth_rad),
+                                         probe_radius_m * std::sin(azimuth_rad),
+                                         -0.013})
+            .magnetic_a_per_m.z;
+    };
+    const em::Complex base = axial_at(0.4);
+    expectTrue(std::abs(base) > 0.0, "продольная компонента внутри сечения не нулевая");
+    expectNear(std::abs(axial_at(-0.4) - base),
+               0.0,
+               1.0e-6 * std::abs(base),
+               "чётность относительно электрической стенки phi = 0");
+    expectNear(std::abs(axial_at(em::pi - 0.4) + base),
+               0.0,
+               1.0e-6 * std::abs(base),
+               "нечётность относительно магнитной стенки phi = pi/2");
+
+    // Диэлектрик в области между гребнями делает моды гибридными, и решатель
+    // обязан сказать об этом вслух, а не выдать постоянную распространения.
+    em::SimulationRequest layered =
+        createRidgedRequest(8.0e9, radius_m, 0.35, window, 3.0);
+    const em::FieldSolution hybrid = dispatcher.solve(layered);
+    expectTrue(hybrid.success, "структура со слоистым заполнением считается");
+    expectTrue(!hybrid.diagnostics.warnings.empty(),
+               "слоистое заполнение сопровождается предупреждением о гибридных модах");
+    if (hybrid.has_selected_mode) {
+        expectNear(hybrid.selected_mode.propagation_constant_per_m.real(), 0.0, 1.0e-30,
+                   "постоянная распространения гибридной моды не выдумывается");
+    }
+
+    // Гладкий круглый волновод не должен уезжать в этот решатель.
+    em::SimulationRequest smooth = createRidgedRequest(8.0e9, radius_m, 0.35, window, 1.0);
+    smooth.model.waveguide.ridge.enabled = false;
+    const em::FieldSolution plain = dispatcher.solve(smooth);
+    expectTrue(plain.diagnostics.backend_name == "Analytic circular-waveguide TE/TM",
+               "без гребней сечение остаётся гладким круглым волноводом");
+}
+
+// Бесконечно тонкий металл — гребень и кольцевой сегмент — не имеет толщины,
+// поэтому проверкой точки его не поймать: шаг трассировки через лист
+// перепрыгивает, и линия продолжается по ту сторону изломом. Условие на металле
+// требует обратного: касательное E там ноль, линия обязана кончиться.
+void testRidgedCircularFieldLinesStopAtMetal()
+{
+    const double window = 0.5 * em::pi - 1.0;
+    const double radius_m = 10.0e-3;
+    em::SimulationRequest request =
+        createRidgedRequest(8.0e9, radius_m, 0.35, window, 1.0);
+    const em::WaveguideGeometry &geometry = request.model.waveguide;
+
+    // Отрезок поперёк грани гребня за радиусом раздела: phi = 90 градусов.
+    const double outside_m = 0.7 * radius_m;
+    double fraction = 0.0;
+    expectTrue(em::crossesCircularRidgeSheet(geometry,
+                                             {-0.2 * outside_m, outside_m, 0.0},
+                                             {0.2 * outside_m, outside_m, 0.0},
+                                             &fraction),
+               "отрезок поперёк грани гребня признан пересечением металла");
+    expectTrue(fraction > 0.3 && fraction < 0.7,
+               "точка пересечения грани лежит примерно посередине отрезка: " +
+                   std::to_string(fraction));
+
+    // Тот же поворот, но внутри радиуса раздела: там гребня нет, есть окно.
+    const double inside_m = 0.2 * radius_m;
+    expectTrue(!em::crossesCircularRidgeSheet(geometry,
+                                              {-0.2 * inside_m, inside_m, 0.0},
+                                              {0.2 * inside_m, inside_m, 0.0},
+                                              &fraction),
+               "внутри радиуса раздела грани гребня нет");
+
+    // Отрезок сквозь кольцевой сегмент: угол больше phi3 = 32.7 градуса.
+    const double segment_angle_rad = 1.2;   // между phi3 и phi2
+    const double partition_m = 0.35 * radius_m;
+    expectTrue(em::crossesCircularRidgeSheet(
+                   geometry,
+                   {0.8 * partition_m * std::cos(segment_angle_rad),
+                    0.8 * partition_m * std::sin(segment_angle_rad), 0.0},
+                   {1.2 * partition_m * std::cos(segment_angle_rad),
+                    1.2 * partition_m * std::sin(segment_angle_rad), 0.0},
+                   &fraction),
+               "отрезок сквозь кольцевой сегмент признан пересечением металла");
+
+    // Тот же радиальный отрезок в окне связи: металла там нет, поле проходит.
+    const double window_angle_rad = 0.3;    // меньше phi3
+    expectTrue(!em::crossesCircularRidgeSheet(
+                   geometry,
+                   {0.8 * partition_m * std::cos(window_angle_rad),
+                    0.8 * partition_m * std::sin(window_angle_rad), 0.0},
+                   {1.2 * partition_m * std::cos(window_angle_rad),
+                    1.2 * partition_m * std::sin(window_angle_rad), 0.0},
+                   &fraction),
+               "в окне связи радиус проходится свободно");
+
+    // Гладкий круглый волновод не должен обрастать несуществующим металлом.
+    em::SimulationRequest smooth = request;
+    smooth.model.waveguide.ridge.enabled = false;
+    expectTrue(!em::crossesCircularRidgeSheet(smooth.model.waveguide,
+                                              {-0.2 * outside_m, outside_m, 0.0},
+                                              {0.2 * outside_m, outside_m, 0.0},
+                                              &fraction),
+               "без гребней листов металла в сечении нет");
+}
+
 int main()
 {
+    runTest("testRidgedCircularCutoffs", testRidgedCircularCutoffs);
+    testRidgedCircularFieldLinesStopAtMetal();
+    runTest("testRidgedCircularConvergence", testRidgedCircularConvergence);
+    runTest("testRidgedCircularFieldAndDispatch", testRidgedCircularFieldAndDispatch);
     testCircularBesselRoots();
     testCircularWaveguideModes();
     testCircularPecBoundaryAndMaxwell();
@@ -2668,7 +3065,7 @@ int main()
     testConductorLossAndQ();
     testVisualizationPrimitives();
     testTe10ElectricFluxDensity();
-    testArrowDensitySetting();
+    testLineDensitySetting();
     testSliceOffsetAndResolution();
     testSlotCurrentMaskAndExcitationEstimate();
     testCooperativeCancellation();
